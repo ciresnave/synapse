@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  synapse:
+    image: synapsenetwork/synapse:latest
+    container_name: synapse
+    restart: always
+    ports:
+      - "8080:8080"
+      - "8081:8081/udp"
+      - "8082:8082"
+    environment:
+      - RUST_LOG=info
+      - DATABASE_URL=postgres://synapse:${DB_PASSWORD}@postgres:5432/synapse
+      - PORT=8080
+      - CONFIG_PATH=/app/config/production.toml
+    volumes:
+      - ./config:/app/config
+    depends_on:
+      - postgres
+    networks:
+      - synapse-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  postgres:
+    image: postgres:14-alpine
+    container_name: synapse-postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=synapse
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=synapse
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - synapse-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v2.37.0
+    container_name: synapse-prometheus
+    restart: always
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - synapse-net
+
+  grafana:
+    image: grafana/grafana:9.0.0
+    container_name: synapse-grafana
+    restart: always
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    networks:
+      - synapse-net
+    depends_on:
+      - prometheus
+
+networks:
+  synapse-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,248 @@
+[package]
+name = "synapse"
+version = "1.0.0"
+edition = "2021"
+authors = ["Eric Evans <ciresnave@gmail.com>"]
+description = "Neural Communication Network with Federated Identity and Blockchain Trust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ciresnave/synapse"
+homepage = "https://github.com/ciresnave/synapse"
+documentation = "https://docs.rs/synapse"
+readme = "README.md"
+keywords = ["neural", "communication", "ai", "federated", "blockchain"]
+categories = ["network-programming", "web-programming", "cryptography", "science", "wasm"]
+exclude = [
+    "*.md",
+    "docs/",
+    "examples/README*.md",
+    "target/",
+    ".git/",
+    ".vscode/",
+    "*.bat",
+    "*.sh"
+]
+
+[dependencies]
+# Core async and utilities (WASM-compatible)
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization (WASM-compatible)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Utilities (WASM-compatible)
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+
+# Basic networking (cross-platform)
+url = "2.0"
+
+# Development dependencies
+[dev-dependencies]
+tokio-test = "0.4"
+pretty_assertions = "1.0"
+tempfile = "3.0"
+
+# WASM-specific dev dependencies  
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+# WebAssembly dependencies (minimal, browser-only)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Minimal Tokio for WASM (no networking)
+tokio = { version = "1.0", features = ["macros", "sync", "time"], default-features = false }
+# WASM-specific UUID with JS randomness
+uuid = { version = "1.6", features = ["v4", "serde", "js"] }
+# WASM-specific dependencies
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "WebSocket",
+    "MessageEvent",
+    "CloseEvent", 
+    "ErrorEvent",
+    "BinaryType",
+    "BroadcastChannel",
+    "RtcPeerConnection",
+    "RtcDataChannel",
+    "RtcConfiguration",
+    "RtcIceServer",
+    "RtcDataChannelInit",
+    "RtcPeerConnectionIceEvent",
+    "RtcSessionDescriptionInit",
+    "RtcSdpType",
+], optional = true }
+js-sys = { version = "0.3", optional = true }
+getrandom = { version = "0.2", features = ["js"] }
+# Browser utilities
+gloo-utils = { version = "0.1", optional = true }
+gloo-storage = { version = "0.2", optional = true }
+gloo-worker = { version = "0.2", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+wasm-logger = { version = "0.2", optional = true }
+
+# Non-WASM dependencies (all platform-specific features)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Full async runtime
+tokio = { version = "1.0", features = ["full"] }
+rand = "0.9"
+
+# High-performance concurrent data structures
+dashmap = "6.0"
+ahash = "0.8"
+
+# Cryptography and blockchain (requires system entropy)
+ring = "0.17"
+rsa = "0.9"
+aes-gcm = "0.10"
+sha2 = "0.10"
+ed25519-dalek = "2.0"
+blake3 = "1.5"
+base64 = "0.22"
+
+# Configuration and CLI (file system access required)
+toml = "0.8"
+tracing-subscriber = "0.3"
+clap = { version = "4.0", features = ["derive"] }
+config = "0.14"
+
+# Networking (platform-specific)
+reqwest = { version = "0.11", features = ["json"] }
+tokio-tungstenite = "0.20"
+
+# New dependencies for enhanced features
+# WebSocket support
+tungstenite = "0.20"
+futures-util = "0.3"
+
+# System monitoring
+sysinfo = "0.29"
+
+# QUIC support (conceptual - would use quinn in practice)
+# quinn = "0.10"  # Uncomment when implementing real QUIC
+
+# Additional utilities for monitoring
+parking_lot = "0.12"
+
+# Email protocols (not available in WASM)
+async-smtp = "0.10"
+async-imap = "0.10"
+lettre = "0.11"
+mail-parser = "0.11"
+
+# Database connections (not available in WASM)
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+redis = { version = "0.24", features = ["tokio-comp"] }
+
+# Network discovery (not available in WASM)
+simple-mdns = "0.6"
+socket2 = "0.5"
+dns-lookup = "2.0"
+trust-dns-resolver = "0.23"
+
+[[bin]]
+name = "synapse-router"
+path = "src/bin/router.rs"
+required-features = ["native"]
+
+[[bin]]
+name = "synapse-client"
+path = "src/bin/client.rs"
+required-features = ["native"]
+
+[[bin]]
+name = "synapse-demo"
+path = "src/bin/synapse_demo.rs"
+required-features = ["native"]
+
+[[example]]
+name = "hello_world"
+path = "examples/hello_world.rs"
+required-features = ["native"]
+
+[[example]]
+name = "working_basic_chat"
+path = "examples/working_basic_chat.rs"
+required-features = ["native"]
+
+[[example]]
+name = "simple_working_demo"
+path = "examples/simple_working_demo.rs"
+required-features = ["native"]
+
+[[example]]
+name = "basic_chat_fixed"
+path = "examples/basic_chat_fixed.rs"
+required-features = ["native"]
+
+[[example]]
+name = "connectivity_demo_fixed"
+path = "examples/connectivity_demo_fixed.rs"
+required-features = ["native"]
+
+[[example]]
+name = "tool_interaction_fixed"
+path = "examples/tool_interaction_fixed.rs"
+required-features = ["native"]
+
+[[example]]
+name = "comprehensive_test"
+path = "examples/comprehensive_test.rs"
+required-features = ["native"]
+
+[[example]]
+name = "production_readiness_test"
+path = "examples/production_readiness_test.rs"
+required-features = ["native"]
+
+[[example]]
+name = "multi_transport_demo"
+path = "examples/multi_transport_demo.rs"
+required-features = ["native"]
+
+[[example]]
+name = "circuit_breaker_demo"
+path = "examples/circuit_breaker_demo.rs"
+required-features = ["native"]
+
+[[example]]
+name = "email_server_demo"
+path = "examples/email_server_demo.rs"
+required-features = ["native"]
+
+[[example]]
+name = "unified_transport_demo"
+path = "examples/unified_transport_demo.rs"
+required-features = ["native"]
+
+[features]
+default = ["native"]
+# Native platform support (includes all non-WASM features)
+native = []
+# WASM feature for browser environments
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures", 
+    "dep:web-sys",
+    "dep:js-sys",
+    "dep:gloo-utils",
+    "dep:gloo-storage",
+    "dep:gloo-worker",
+    "dep:console_error_panic_hook",
+    "dep:wasm-logger"
+]
+console_error_panic_hook = ["dep:console_error_panic_hook"]
+wasm-logger = ["dep:wasm-logger"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wee_alloc = false

@@ -1,0 +1,160 @@
+# Synapse Configuration File
+# This is an example configuration file with all available options.
+# Copy this file to production.toml and customize for your environment.
+
+[general]
+# Application name
+name = "Synapse Server"
+# Environment (production, staging, development)
+environment = "production"
+# Log level (error, warn, info, debug, trace)
+log_level = "info"
+
+[server]
+# HTTP API server port
+http_port = 8080
+# WebSocket server port
+websocket_port = 8082
+# UDP port for WebRTC and other UDP communications
+udp_port = 8081
+# Enable CORS for HTTP API
+enable_cors = true
+# CORS allowed origins (comma separated)
+cors_allowed_origins = "*"
+
+[database]
+# PostgreSQL connection string
+# Override with DATABASE_URL environment variable
+url = "postgres://synapse:password@localhost:5432/synapse"
+# Maximum connection pool size
+max_connections = 20
+# Connection timeout in seconds
+timeout_seconds = 5
+# Enable statement logging for debugging
+log_statements = false
+
+[security]
+# Enable encryption for stored data
+enable_encryption = true
+# Encryption key source (file, env, vault)
+key_source = "env"
+# JWT secret for authentication
+# Override with JWT_SECRET environment variable
+jwt_secret = ""
+# Token expiration time in hours
+token_expiry_hours = 24
+# Enable rate limiting
+enable_rate_limiting = true
+# Rate limit requests per minute
+rate_limit_rpm = 60
+
+[blockchain]
+# Enable blockchain features
+enabled = true
+# Genesis trust points for new participants
+genesis_trust_points = 100
+# Block time in seconds
+block_time_seconds = 30
+# Minimum consensus nodes required
+min_consensus_nodes = 3
+
+[blockchain.staking]
+# Minimum stake amount
+min_stake_amount = 10
+# Maximum stake amount
+max_stake_amount = 10000
+# Minimum stake for submitting reports
+min_stake_for_report = 10
+# Minimum stake for consensus participation
+min_stake_for_consensus = 50
+# Percentage to slash for false reports (0.0-1.0)
+slash_percentage = 0.1
+
+[blockchain.trust_decay]
+# Monthly decay rate (0.0-1.0)
+monthly_decay_rate = 0.02
+# Days without activity before decay starts
+min_activity_days = 30
+# How often to check decay (hours)
+decay_check_interval_hours = 24
+
+[transport]
+# Default transport protocol (http, websocket, webrtc)
+default_protocol = "websocket"
+# Enable circuit breaker pattern
+enable_circuit_breaker = true
+# Circuit breaker failure threshold
+circuit_breaker_threshold = 5
+# Circuit breaker reset timeout in seconds
+circuit_breaker_reset_seconds = 30
+# Enable transport fallback
+enable_fallback = true
+# Fallback order (comma separated)
+fallback_order = "websocket,http"
+
+[transport.http]
+# HTTP transport base URL
+base_url = "https://api.example.com/v1"
+# Timeout in seconds
+timeout_seconds = 30
+# Maximum retries
+max_retries = 3
+# Retry backoff in milliseconds
+retry_backoff_ms = 500
+
+[transport.websocket]
+# Keep-alive interval in seconds
+keepalive_seconds = 30
+# Reconnection attempts
+reconnect_attempts = 5
+# Reconnection delay in milliseconds
+reconnect_delay_ms = 1000
+
+[transport.webrtc]
+# ICE servers (STUN/TURN) for WebRTC
+ice_servers = ["stun:stun.l.google.com:19302"]
+# Use trickle ICE
+use_trickle_ice = true
+# ICE candidate timeout in seconds
+ice_timeout_seconds = 10
+
+[email]
+# Enable email transport
+enabled = true
+# SMTP server
+smtp_server = "smtp.example.com"
+# SMTP port
+smtp_port = 587
+# SMTP username
+# Override with EMAIL_USERNAME environment variable
+username = ""
+# SMTP password
+# Override with EMAIL_PASSWORD environment variable
+password = ""
+# From address
+from_address = "synapse@example.com"
+# Email signature
+signature = "Sent via Synapse Network"
+
+[telemetry]
+# Enable telemetry collection
+enabled = true
+# Telemetry endpoint URL
+# Override with TELEMETRY_URL environment variable
+endpoint_url = ""
+# Telemetry submission interval in seconds
+interval_seconds = 60
+# Include debug information
+include_debug_info = false
+# Enable automatic error reporting
+report_errors = true
+
+[wasm]
+# Enable WASM optimizations
+optimize = true
+# Memory limit in MB
+memory_limit_mb = 128
+# Enable shared array buffer
+enable_shared_memory = true
+# IndexedDB storage name
+indexeddb_name = "synapse-storage"

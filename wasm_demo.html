@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synapse WASM Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .section {
+            background: #f8f9fa;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin: 15px 0;
+        }
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s ease;
+        }
+        button:hover:not(:disabled) {
+            background: #5a6fd8;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .log {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            margin: 15px 0;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+        .status.loading {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status.ready {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .info-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .info-card h4 {
+            margin: 0 0 10px 0;
+            color: #667eea;
+        }
+        input, select {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin: 5px;
+        }
+        .message-input {
+            width: 300px;
+        }
+        .target-input {
+            width: 200px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌐 Synapse WebAssembly Demo</h1>
+        <p>Neural Communication Network in Your Browser</p>
+    </div>
+
+    <div class="section">
+        <h2>📊 Status</h2>
+        <div id="status" class="status loading">Initializing WebAssembly...</div>
+        <div class="info-grid">
+            <div class="info-card">
+                <h4>Entity ID</h4>
+                <div id="entity-id">Loading...</div>
+            </div>
+            <div class="info-card">
+                <h4>Entity Type</h4>
+                <div id="entity-type">Loading...</div>
+            </div>
+            <div class="info-card">
+                <h4>Initialized At</h4>
+                <div id="init-time">Loading...</div>
+            </div>
+            <div class="info-card">
+                <h4>WASM Test</h4>
+                <div id="wasm-test">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>🔧 Controls</h2>
+        <div class="controls">
+            <button id="test-btn" onclick="runTest()" disabled>Test WASM Functions</button>
+            <button id="timestamp-btn" onclick="getTimestamp()" disabled>Get Timestamp</button>
+            <button id="log-btn" onclick="logMessage()" disabled>Log Test Message</button>
+            <button id="clear-btn" onclick="clearLog()">Clear Log</button>
+        </div>
+        
+        <h3>💬 Message Sending</h3>
+        <div class="controls">
+            <input type="text" id="target-input" class="target-input" placeholder="Target entity" value="test-target">
+            <input type="text" id="message-input" class="message-input" placeholder="Message content" value="Hello from browser!">
+            <button id="send-btn" onclick="sendMessage()" disabled>Send Message</button>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>📝 Activity Log</h2>
+        <div id="log" class="log">Starting Synapse WASM Demo...\n</div>
+    </div>
+
+    <div class="section">
+        <h2>ℹ️ About This Demo</h2>
+        <p>This demonstration shows Synapse running in WebAssembly inside your browser. The WASM build includes:</p>
+        <ul>
+            <li>Core Synapse communication protocol</li>
+            <li>Browser-compatible transport layer</li>
+            <li>Identity management and message handling</li>
+            <li>Error handling and logging</li>
+        </ul>
+        <p><strong>Note:</strong> This is a simplified demo. Platform-specific features like file I/O, native networking, and email protocols are not available in the WASM build.</p>
+    </div>
+
+    <script type="module">
+        import init, { 
+            WasmSynapseNode, 
+            WasmConfig,
+            init as initWasm,
+            test_wasm,
+            get_timestamp
+        } from './pkg/synapse.js';
+
+        let synapseNode = null;
+        let messageCounter = 0;
+
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const logElement = document.getElementById('log');
+            logElement.textContent += `[${timestamp}] ${message}\n`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        function setStatus(status, type = 'ready') {
+            const statusElement = document.getElementById('status');
+            statusElement.textContent = status;
+            statusElement.className = `status ${type}`;
+        }
+
+        function enableButtons() {
+            document.getElementById('test-btn').disabled = false;
+            document.getElementById('timestamp-btn').disabled = false;
+            document.getElementById('log-btn').disabled = false;
+            document.getElementById('send-btn').disabled = false;
+        }
+
+        async function initializeSynapse() {
+            try {
+                log('🔄 Loading WebAssembly module...');
+                
+                // Initialize the WASM module
+                await init();
+                log('✅ WASM module loaded successfully');
+                
+                // Initialize panic hook for better error messages
+                initWasm();
+                log('✅ Panic hook initialized');
+                
+                // Test basic WASM functionality
+                const testResult = test_wasm();
+                log(`🧪 WASM test result: ${testResult}`);
+                document.getElementById('wasm-test').textContent = testResult;
+                
+                // Create a Synapse node
+                const entityName = `browser-${Date.now()}`;
+                const entityType = 'browser';
+                
+                synapseNode = new WasmSynapseNode(entityName, entityType);
+                log(`🚀 Synapse node created: ${synapseNode.entity_id}`);
+                
+                // Update UI
+                document.getElementById('entity-id').textContent = synapseNode.entity_id;
+                document.getElementById('entity-type').textContent = entityType;
+                document.getElementById('init-time').textContent = new Date().toLocaleString();
+                
+                setStatus('✅ Synapse WASM is ready!', 'ready');
+                enableButtons();
+                
+                // Log to both console and Synapse
+                synapseNode.log('Synapse node successfully initialized in browser!');
+                log('📱 Node logged initialization message');
+                
+            } catch (error) {
+                log(`❌ Error initializing Synapse: ${error.message}`);
+                setStatus(`❌ Initialization failed: ${error.message}`, 'error');
+            }
+        }
+
+        // Global functions for button handlers
+        window.runTest = function() {
+            try {
+                const result = test_wasm();
+                log(`🧪 Test function returned: ${result}`);
+                
+                if (synapseNode) {
+                    synapseNode.log(`Test run from browser at ${new Date().toISOString()}`);
+                    log('📱 Test logged to Synapse node');
+                }
+            } catch (error) {
+                log(`❌ Test error: ${error.message}`);
+            }
+        };
+
+        window.getTimestamp = function() {
+            try {
+                const timestamp = get_timestamp();
+                log(`⏰ Current timestamp: ${timestamp}`);
+                
+                if (synapseNode) {
+                    synapseNode.log(`Timestamp requested: ${timestamp}`);
+                }
+            } catch (error) {
+                log(`❌ Timestamp error: ${error.message}`);
+            }
+        };
+
+        window.logMessage = function() {
+            try {
+                if (!synapseNode) {
+                    log('❌ Synapse node not initialized');
+                    return;
+                }
+                
+                const message = `Test message #${++messageCounter} from browser`;
+                synapseNode.log(message);
+                log(`📱 Logged to Synapse: ${message}`);
+            } catch (error) {
+                log(`❌ Log error: ${error.message}`);
+            }
+        };
+
+        window.sendMessage = function() {
+            try {
+                if (!synapseNode) {
+                    log('❌ Synapse node not initialized');
+                    return;
+                }
+                
+                const target = document.getElementById('target-input').value || 'default-target';
+                const message = document.getElementById('message-input').value || 'Default message';
+                
+                log(`📤 Sending message to ${target}: "${message}"`);
+                
+                const response = synapseNode.send_message(target, message);
+                log(`📥 Response received: ${response}`);
+                
+                // Clear the message input for next message
+                document.getElementById('message-input').value = '';
+                
+            } catch (error) {
+                log(`❌ Send error: ${error.message}`);
+            }
+        };
+
+        window.clearLog = function() {
+            document.getElementById('log').textContent = 'Log cleared.\n';
+        };
+
+        // Initialize when page loads
+        window.addEventListener('DOMContentLoaded', () => {
+            log('🌐 Page loaded, starting Synapse initialization...');
+            initializeSynapse();
+        });
+
+        // Handle any unhandled errors
+        window.addEventListener('error', (event) => {
+            log(`❌ Unhandled error: ${event.error?.message || event.message}`);
+        });
+
+        window.addEventListener('unhandledrejection', (event) => {
+            log(`❌ Unhandled promise rejection: ${event.reason?.message || event.reason}`);
+        });
+    </script>
+</body>
+</html>
