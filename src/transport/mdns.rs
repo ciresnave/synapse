@@ -5,10 +5,13 @@ use crate::{types::SecureMessage, error::Result};
 use async_trait::async_trait;
 use std::{time::{Duration, Instant}, collections::HashMap, net::{SocketAddr, IpAddr}};
 use tracing::{info, debug, warn};
+#[cfg(feature = "mdns")]
 use trust_dns_resolver::{AsyncResolver, TokioAsyncResolver};
+#[cfg(feature = "mdns")]
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 /// mDNS service discovery and communication
+#[cfg(feature = "mdns")]
 pub struct MdnsTransport {
     service_name: String,
     #[allow(dead_code)]
@@ -31,6 +34,7 @@ pub struct MdnsPeer {
     pub weight: u16,
 }
 
+#[cfg(feature = "mdns")]
 impl MdnsTransport {
     pub async fn new(service_name: String, local_port: u16) -> Result<Self> {
         let resolver = AsyncResolver::tokio(
@@ -232,6 +236,7 @@ impl MdnsTransport {
 }
 
 #[async_trait]
+#[cfg(feature = "mdns")]
 impl Transport for MdnsTransport {
     async fn send_message(&self, target: &str, message: &SecureMessage) -> Result<String> {
         // Look for the target in discovered peers
@@ -294,6 +299,7 @@ pub struct MdnsAdvertiser {
     txt_records: HashMap<String, String>,
 }
 
+#[cfg(feature = "mdns")]
 impl MdnsAdvertiser {
     pub fn new(service_name: String, port: u16) -> Self {
         let mut txt_records = HashMap::new();

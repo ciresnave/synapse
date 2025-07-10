@@ -734,6 +734,7 @@ impl EnhancedMdnsTransport {
 /// Create a multicast UDP socket for mDNS
 async fn create_multicast_socket(config: &MdnsConfig) -> Result<TokioUdpSocket> {
     use std::net::{SocketAddrV4, Ipv4Addr};
+    #[cfg(feature = "mdns")]
     use socket2::{Socket, Domain, Type, Protocol};
     
     // Create socket with SO_REUSEADDR and SO_REUSEPORT

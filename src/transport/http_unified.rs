@@ -19,9 +19,11 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::{info, debug, warn};
 use serde_json;
+#[cfg(feature = "http")]
 use reqwest::{Client, ClientBuilder};
 
 /// HTTP/HTTPS Transport implementation
+#[cfg(feature = "http")]
 pub struct HttpTransportImpl {
     /// HTTP client for sending requests
     client: Client,
@@ -85,6 +87,7 @@ pub struct HttpServer {
     pub received_messages: Arc<Mutex<Vec<IncomingMessage>>>,
 }
 
+#[cfg(feature = "http")]
 impl HttpTransportImpl {
     /// Create a new HTTP transport instance
     pub async fn new(config: &HashMap<String, String>) -> Result<Self> {
@@ -292,6 +295,7 @@ impl HttpTransportImpl {
 }
 
 #[async_trait]
+#[cfg(feature = "http")]
 impl Transport for HttpTransportImpl {
     fn transport_type(&self) -> TransportType {
         TransportType::Http

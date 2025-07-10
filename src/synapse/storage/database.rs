@@ -4,13 +4,16 @@
 use crate::synapse::models::{ParticipantProfile, TrustBalance};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+#[cfg(feature = "database")]
 use sqlx::{PgPool, Row};
 
 /// Main database interface for Synapse
+#[cfg(feature = "database")]
 pub struct Database {
     pub pool: PgPool,
 }
 
+#[cfg(feature = "database")]
 impl Database {
     /// Create new database connection
     pub async fn new(database_url: &str) -> Result<Self> {

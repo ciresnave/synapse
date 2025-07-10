@@ -339,6 +339,7 @@ impl ErrorTelemetry {
     }
     
     /// Send a batch of errors to the remote endpoint
+    #[cfg(feature = "telemetry")]
     async fn send_batch_to_remote(&self, batch: &[ErrorReport]) -> Result<(), anyhow::Error> {
         if let Some(endpoint) = &self.config.remote_endpoint {
             // Serialize the batch to JSON

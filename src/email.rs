@@ -2,6 +2,7 @@
 
 use crate::types::{EmailConfig, SimpleMessage, SecureMessage, MessageType};
 use crate::error::{EmailError, Result};
+#[cfg(feature = "email")]
 use lettre::{
     message::{header, Mailbox, Message, SinglePart},
     transport::smtp::authentication::Credentials,
@@ -11,11 +12,13 @@ use base64::Engine;
 use std::collections::HashMap;
 
 /// Email transport for sending and receiving EMRP messages
+#[cfg(feature = "email")]
 pub struct EmailTransport {
     config: EmailConfig,
     smtp_transport: SmtpTransport,
 }
 
+#[cfg(feature = "email")]
 impl EmailTransport {
     /// Create a new email transport
     pub async fn new(config: EmailConfig) -> Result<Self> {

@@ -1,12 +1,15 @@
+#[cfg(feature = "database")]
 use sqlx::{PgPool, Row};
 use anyhow::Result;
 use tracing::{info, debug};
 
 /// Database migration manager for Synapse schema
+#[cfg(feature = "database")]
 pub struct MigrationManager {
     pool: PgPool,
 }
 
+#[cfg(feature = "database")]
 impl MigrationManager {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }

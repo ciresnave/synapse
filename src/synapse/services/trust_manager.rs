@@ -9,6 +9,7 @@ use chrono::{Duration, Utc};
 use std::sync::Arc;
 use tokio::time::{interval, Duration as TokioDuration};
 use tracing::{info, warn};
+#[cfg(feature = "database")]
 use sqlx::Row;
 
 // Security constants
@@ -287,6 +288,7 @@ impl TrustManager {
     }
     
     /// Store entity-to-entity trust rating in database
+    #[cfg(feature = "database")]
     async fn store_entity_trust_rating(
         &self,
         reporter_id: &str,

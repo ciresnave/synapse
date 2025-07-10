@@ -2,14 +2,17 @@
 // Redis-based caching for performance optimization
 
 use anyhow::{Context, Result};
+#[cfg(feature = "cache")]
 use redis::{AsyncCommands, Client};
 use serde::{Deserialize, Serialize};
 
 /// Cache interface for Synapse
+#[cfg(feature = "cache")]
 pub struct Cache {
     client: Client,
 }
 
+#[cfg(feature = "cache")]
 impl Cache {
     /// Create new cache connection
     pub async fn new(redis_url: &str) -> Result<Self> {
@@ -58,8 +61,8 @@ impl Cache {
             .context("Failed to get cached value")?;
         
         match cached {
-            Some(serialized) => {
-                let value = serde_json::from_str(&serialized)
+            Some(ref serialized) => {
+                let value = serde_json::from_str(serialized)
                     .context("Failed to deserialize cached value")?;
                 Ok(Some(value))
             }

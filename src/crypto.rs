@@ -1,11 +1,13 @@
 //! Cryptographic operations for EMRP
 
 use crate::error::{CryptoError, Result};
+#[cfg(feature = "crypto")]
 use rsa::{
     pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey},
     Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey,
     rand_core::RngCore,
 };
+#[cfg(feature = "crypto")]
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
@@ -15,6 +17,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::HashMap;
 
 /// Manages all cryptographic operations for EMRP
+#[cfg(feature = "crypto")]
 pub struct CryptoManager {
     /// Our private key
     private_key: Option<RsaPrivateKey>,
@@ -24,6 +27,7 @@ pub struct CryptoManager {
     known_keys: HashMap<String, RsaPublicKey>,
 }
 
+#[cfg(feature = "crypto")]
 impl CryptoManager {
     /// Create a new crypto manager
     pub fn new() -> Self {
@@ -277,6 +281,7 @@ impl CryptoManager {
     }
 }
 
+#[cfg(feature = "crypto")]
 impl Default for CryptoManager {
     fn default() -> Self {
         Self::new()
