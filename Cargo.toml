@@ -125,17 +125,17 @@ required-features = ["native"]
 [[example]]
 name = "hello_world"
 path = "examples/hello_world.rs"
-required-features = ["core"]
+required-features = ["minimal"]
 
 [[example]]
 name = "working_basic_chat"
 path = "examples/working_basic_chat.rs"
-required-features = ["core"]
+required-features = ["minimal"]
 
 [[example]]
 name = "simple_working_demo"
 path = "examples/simple_working_demo.rs"
-required-features = ["core"]
+required-features = ["minimal"]
 
 [[example]]
 name = "basic_chat_fixed"
@@ -183,26 +183,31 @@ path = "examples/unified_transport_demo.rs"
 required-features = ["networking"]
 
 [features]
-default = ["native"]
+default = ["minimal"]
 
-# Core functionality (minimal dependencies)
-core = [
+# Minimal feature set for basic functionality
+minimal = [
     "dep:tokio",
     "dep:bincode", 
     "dep:rand",
     "dep:dashmap",
-    "dep:ahash",
     "dep:ring",
-    "dep:rsa", 
-    "dep:aes-gcm",
     "dep:sha2",
-    "dep:ed25519-dalek",
     "dep:blake3",
     "dep:base64",
     "dep:toml",
     "dep:tracing-subscriber",
-    "dep:clap",
     "dep:config"
+]
+
+# Core functionality (minimal dependencies)
+core = [
+    "minimal",
+    "dep:ahash",
+    "dep:rsa", 
+    "dep:aes-gcm",
+    "dep:ed25519-dalek",
+    "dep:clap"
 ]
 
 # Networking feature (adds network transport capabilities)
