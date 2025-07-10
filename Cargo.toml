@@ -23,24 +23,79 @@ exclude = [
 ]
 
 [dependencies]
-# Core async and utilities (WASM-compatible)
+# Core dependencies - always included
 async-trait = "0.1"
 futures = "0.3"
-
-# Serialization (WASM-compatible)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = "1.3"
-
-# Utilities (WASM-compatible)
 uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
-
-# Basic networking (cross-platform)
 url = "2.0"
+
+# Optional dependencies behind feature flags
+tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "fs", "io-util", "io-std", "signal"], optional = true }
+bincode = { version = "2.0.1", features = ["serde"], optional = true }
+rand = { version = "0.9", optional = true }
+dashmap = { version = "6.0", optional = true }
+ahash = { version = "0.8", optional = true }
+
+# Cryptography - optional
+ring = { version = "0.17", optional = true }
+rsa = { version = "0.9", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
+ed25519-dalek = { version = "2.2.0", optional = true }
+blake3 = { version = "1.5", optional = true }
+base64 = { version = "0.22", optional = true }
+
+# Configuration - optional
+toml = { version = "0.9.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+clap = { version = "4.5.41", features = ["derive"], optional = true }
+config = { version = "0.15.13", optional = true }
+
+# Networking - optional
+reqwest = { version = "0.12.22", features = ["json"], optional = true }
+tokio-tungstenite = { version = "0.27.0", optional = true }
+tungstenite = { version = "0.27.0", optional = true }
+futures-util = { version = "0.3", optional = true }
+
+# System monitoring - optional
+sysinfo = { version = "0.36.0", optional = true }
+parking_lot = { version = "0.12", optional = true }
+
+# Email protocols - optional
+async-smtp = { version = "0.10", optional = true }
+async-imap = { version = "0.10", optional = true }
+lettre = { version = "0.11", optional = true }
+mail-parser = { version = "0.11", optional = true }
+
+# Database connections - optional
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"], optional = true }
+redis = { version = "0.32.3", features = ["tokio-comp"], optional = true }
+
+# Network discovery - optional
+simple-mdns = { version = "0.6", optional = true }
+socket2 = { version = "0.6.0", optional = true }
+dns-lookup = { version = "2.0", optional = true }
+trust-dns-resolver = { version = "0.23", optional = true }
+
+# WASM-specific dependencies
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = [
+    "console", "Window", "WebSocket", "MessageEvent", "CloseEvent", 
+    "ErrorEvent", "BinaryType", "BroadcastChannel"
+], optional = true }
+js-sys = { version = "0.3", optional = true }
+getrandom = { version = "0.3.3", optional = true }
+gloo-utils = { version = "0.2.0", optional = true }
+gloo-storage = { version = "0.3.0", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+wasm-logger = { version = "0.2", optional = true }
 
 # Development dependencies
 [dev-dependencies]
@@ -51,101 +106,6 @@ tempfile = "3.0"
 # WASM-specific dev dependencies  
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
-
-# WebAssembly dependencies (minimal, browser-only)
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-# Minimal Tokio for WASM (no networking)
-tokio = { version = "1.0", features = ["macros", "sync", "time"], default-features = false }
-# WASM-specific UUID with JS randomness
-uuid = { version = "1.6", features = ["v4", "serde", "js"] }
-# WASM-specific dependencies
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", features = [
-    "console",
-    "Window",
-    "WebSocket",
-    "MessageEvent",
-    "CloseEvent", 
-    "ErrorEvent",
-    "BinaryType",
-    "BroadcastChannel",
-    "RtcPeerConnection",
-    "RtcDataChannel",
-    "RtcConfiguration",
-    "RtcIceServer",
-    "RtcDataChannelInit",
-    "RtcPeerConnectionIceEvent",
-    "RtcSessionDescriptionInit",
-    "RtcSdpType",
-], optional = true }
-js-sys = { version = "0.3", optional = true }
-getrandom = { version = "0.2", features = ["js"] }
-# Browser utilities
-gloo-utils = { version = "0.1", optional = true }
-gloo-storage = { version = "0.2", optional = true }
-gloo-worker = { version = "0.2", optional = true }
-console_error_panic_hook = { version = "0.1", optional = true }
-wasm-logger = { version = "0.2", optional = true }
-
-# Non-WASM dependencies (all platform-specific features)
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# Full async runtime
-tokio = { version = "1.0", features = ["full"] }
-rand = "0.9"
-
-# High-performance concurrent data structures
-dashmap = "6.0"
-ahash = "0.8"
-
-# Cryptography and blockchain (requires system entropy)
-ring = "0.17"
-rsa = "0.9"
-aes-gcm = "0.10"
-sha2 = "0.10"
-ed25519-dalek = "2.0"
-blake3 = "1.5"
-base64 = "0.22"
-
-# Configuration and CLI (file system access required)
-toml = "0.8"
-tracing-subscriber = "0.3"
-clap = { version = "4.0", features = ["derive"] }
-config = "0.14"
-
-# Networking (platform-specific)
-reqwest = { version = "0.11", features = ["json"] }
-tokio-tungstenite = "0.20"
-
-# New dependencies for enhanced features
-# WebSocket support
-tungstenite = "0.20"
-futures-util = "0.3"
-
-# System monitoring
-sysinfo = "0.29"
-
-# QUIC support (conceptual - would use quinn in practice)
-# quinn = "0.10"  # Uncomment when implementing real QUIC
-
-# Additional utilities for monitoring
-parking_lot = "0.12"
-
-# Email protocols (not available in WASM)
-async-smtp = "0.10"
-async-imap = "0.10"
-lettre = "0.11"
-mail-parser = "0.11"
-
-# Database connections (not available in WASM)
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
-redis = { version = "0.24", features = ["tokio-comp"] }
-
-# Network discovery (not available in WASM)
-simple-mdns = "0.6"
-socket2 = "0.5"
-dns-lookup = "2.0"
-trust-dns-resolver = "0.23"
 
 [[bin]]
 name = "synapse-router"
@@ -165,67 +125,125 @@ required-features = ["native"]
 [[example]]
 name = "hello_world"
 path = "examples/hello_world.rs"
-required-features = ["native"]
+required-features = ["core"]
 
 [[example]]
 name = "working_basic_chat"
 path = "examples/working_basic_chat.rs"
-required-features = ["native"]
+required-features = ["core"]
 
 [[example]]
 name = "simple_working_demo"
 path = "examples/simple_working_demo.rs"
-required-features = ["native"]
+required-features = ["core"]
 
 [[example]]
 name = "basic_chat_fixed"
 path = "examples/basic_chat_fixed.rs"
-required-features = ["native"]
+required-features = ["core"]
 
 [[example]]
 name = "connectivity_demo_fixed"
 path = "examples/connectivity_demo_fixed.rs"
-required-features = ["native"]
+required-features = ["networking"]
 
 [[example]]
 name = "tool_interaction_fixed"
 path = "examples/tool_interaction_fixed.rs"
-required-features = ["native"]
+required-features = ["core"]
 
 [[example]]
 name = "comprehensive_test"
 path = "examples/comprehensive_test.rs"
-required-features = ["native"]
+required-features = ["core"]
 
 [[example]]
 name = "production_readiness_test"
 path = "examples/production_readiness_test.rs"
-required-features = ["native"]
+required-features = ["core"]
 
 [[example]]
 name = "multi_transport_demo"
 path = "examples/multi_transport_demo.rs"
-required-features = ["native"]
+required-features = ["networking"]
 
 [[example]]
 name = "circuit_breaker_demo"
 path = "examples/circuit_breaker_demo.rs"
-required-features = ["native"]
+required-features = ["networking"]
 
 [[example]]
 name = "email_server_demo"
 path = "examples/email_server_demo.rs"
-required-features = ["native"]
+required-features = ["email"]
 
 [[example]]
 name = "unified_transport_demo"
 path = "examples/unified_transport_demo.rs"
-required-features = ["native"]
+required-features = ["networking"]
 
 [features]
 default = ["native"]
-# Native platform support (includes all non-WASM features)
-native = []
+
+# Core functionality (minimal dependencies)
+core = [
+    "dep:tokio",
+    "dep:bincode", 
+    "dep:rand",
+    "dep:dashmap",
+    "dep:ahash",
+    "dep:ring",
+    "dep:rsa", 
+    "dep:aes-gcm",
+    "dep:sha2",
+    "dep:ed25519-dalek",
+    "dep:blake3",
+    "dep:base64",
+    "dep:toml",
+    "dep:tracing-subscriber",
+    "dep:clap",
+    "dep:config"
+]
+
+# Networking feature (adds network transport capabilities)
+networking = [
+    "core",
+    "dep:reqwest",
+    "dep:tokio-tungstenite",
+    "dep:tungstenite",
+    "dep:futures-util",
+    "dep:simple-mdns",
+    "dep:socket2",
+    "dep:dns-lookup",
+    "dep:trust-dns-resolver"
+]
+
+# Email feature (adds email server capabilities)
+email = [
+    "core",
+    "dep:async-smtp",
+    "dep:async-imap", 
+    "dep:lettre",
+    "dep:mail-parser"
+]
+
+# Database feature (adds database support)
+database = [
+    "core",
+    "dep:sqlx",
+    "dep:redis"
+]
+
+# Full native platform support (the original working config but with updated deps)
+native = [
+    "core",
+    "networking",
+    "email",
+    "database",
+    "dep:sysinfo",
+    "dep:parking_lot"
+]
+
 # WASM feature for browser environments
 wasm = [
     "dep:wasm-bindgen",
@@ -234,12 +252,10 @@ wasm = [
     "dep:js-sys",
     "dep:gloo-utils",
     "dep:gloo-storage",
-    "dep:gloo-worker",
     "dep:console_error_panic_hook",
-    "dep:wasm-logger"
+    "dep:wasm-logger",
+    "dep:getrandom"
 ]
-console_error_panic_hook = ["dep:console_error_panic_hook"]
-wasm-logger = ["dep:wasm-logger"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

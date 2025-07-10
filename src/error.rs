@@ -162,8 +162,14 @@ impl From<std::io::Error> for EmrpError {
     }
 }
 
-impl From<Box<bincode::ErrorKind>> for EmrpError {
-    fn from(err: Box<bincode::ErrorKind>) -> Self {
+impl From<bincode::error::EncodeError> for EmrpError {
+    fn from(err: bincode::error::EncodeError) -> Self {
+        EmrpError::Serialization(err.to_string())
+    }
+}
+
+impl From<bincode::error::DecodeError> for EmrpError {
+    fn from(err: bincode::error::DecodeError) -> Self {
         EmrpError::Serialization(err.to_string())
     }
 }

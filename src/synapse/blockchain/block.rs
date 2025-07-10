@@ -117,7 +117,7 @@ impl Transaction {
     
     /// Calculate transaction hash
     pub fn hash(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap_or_default()
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap_or_default()
     }
     
     /// Verify transaction is valid

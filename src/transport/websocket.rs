@@ -169,7 +169,7 @@ impl WebSocketTransport {
                     }
                     
                     // Try to deserialize as SecureMessage
-                    match bincode::deserialize::<SecureMessage>(&data) {
+                    match bincode::serde::decode_from_slice::<SecureMessage, _>(&data, bincode::config::standard()) {
                         Ok(message) => {
                             info!("Received valid Synapse message via WebSocket from {}", peer_id);
                             // Handle the message (would integrate with router)
@@ -236,7 +236,7 @@ impl Transport for WebSocketTransport {
         let start_time = Instant::now();
         
         // Serialize message
-        let serialized = bincode::serialize(message)?;
+        let serialized = bincode::serde::encode_to_vec(message, bincode::config::standard())?;
         
         match self.send_websocket_message(target, serialized).await {
             Ok(()) => {

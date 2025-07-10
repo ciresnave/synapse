@@ -291,7 +291,7 @@ impl Transport for QuicTransport {
         };
         
         // Serialize message
-        let serialized = bincode::serialize(message)?;
+        let serialized = bincode::serde::encode_to_vec(message, bincode::config::standard())?;
         
         // Send message
         match self.send_stream_data(&connection_id, &serialized).await {

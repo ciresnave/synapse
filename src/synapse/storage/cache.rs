@@ -17,7 +17,7 @@ impl Cache {
             .context("Failed to create Redis client")?;
         
         // Test connection by trying to set a test key
-        let mut conn = client.get_async_connection().await
+        let mut conn = client.get_multiplexed_async_connection().await
             .context("Failed to connect to Redis")?;
         
         let _: () = conn.set("test_connection", "ok").await
@@ -34,7 +34,7 @@ impl Cache {
     where
         T: Serialize + ?Sized,
     {
-        let mut conn = self.client.get_async_connection().await
+        let mut conn = self.client.get_multiplexed_async_connection().await
             .context("Failed to get Redis connection")?;
         
         let serialized = serde_json::to_string(value)
@@ -51,7 +51,7 @@ impl Cache {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let mut conn = self.client.get_async_connection().await
+        let mut conn = self.client.get_multiplexed_async_connection().await
             .context("Failed to get Redis connection")?;
         
         let cached: Option<String> = conn.get(key).await
@@ -77,7 +77,7 @@ impl Cache {
     
     /// Invalidate cache entry
     pub async fn invalidate(&self, key: &str) -> Result<()> {
-        let mut conn = self.client.get_async_connection().await
+        let mut conn = self.client.get_multiplexed_async_connection().await
             .context("Failed to get Redis connection")?;
         
         conn.del::<_, ()>(key).await
@@ -112,7 +112,7 @@ impl Cache {
     
     /// Increment rate limiting counter
     pub async fn increment_rate_limit(&self, key: &str, window_seconds: u64) -> Result<u64> {
-        let mut conn = self.client.get_async_connection().await
+        let mut conn = self.client.get_multiplexed_async_connection().await
             .context("Failed to get Redis connection")?;
         
         let count: u64 = conn.incr(&key, 1).await
@@ -128,7 +128,7 @@ impl Cache {
     
     /// Check if rate limit exceeded
     pub async fn is_rate_limited(&self, key: &str, max_requests: u64) -> Result<bool> {
-        let mut conn = self.client.get_async_connection().await
+        let mut conn = self.client.get_multiplexed_async_connection().await
             .context("Failed to get Redis connection")?;
         
         let count: Option<u64> = conn.get(&key).await
@@ -140,7 +140,7 @@ impl Cache {
     /// Store blockchain block hash for verification
     pub async fn cache_block_hash(&self, block_number: u64, hash: &str) -> Result<()> {
         let key = format!("block:{}:hash", block_number);
-        let mut conn = self.client.get_async_connection().await?;
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
         
         // Store with no expiration - blocks are immutable
         conn.set::<_, _, ()>(&key, hash).await
@@ -152,7 +152,7 @@ impl Cache {
     /// Get cached block hash
     pub async fn get_block_hash(&self, block_number: u64) -> Result<Option<String>> {
         let key = format!("block:{}:hash", block_number);
-        let mut conn = self.client.get_async_connection().await?;
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
         
         conn.get(&key).await
             .context("Failed to get cached block hash")

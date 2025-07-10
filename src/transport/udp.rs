@@ -91,7 +91,7 @@ impl UdpTransport {
                         }
                         
                         // Try to deserialize the message
-                        match bincode::deserialize::<SecureMessage>(&buffer[..size]) {
+                        match bincode::serde::decode_from_slice::<SecureMessage, _>(&buffer[..size], bincode::config::standard()) {
                             Ok(_message) => {
                                 debug!("Successfully parsed UDP message from {}", peer_addr);
                                 // In a real implementation, you'd handle the message here
@@ -181,7 +181,7 @@ impl Transport for UdpTransport {
         };
         
         // Serialize and send message
-        let serialized = bincode::serialize(message)?;
+        let serialized = bincode::serde::encode_to_vec(message, bincode::config::standard())?;
         
         match self.socket.send_to(&serialized, addr).await {
             Ok(bytes_sent) => {
