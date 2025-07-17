@@ -112,20 +112,20 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
 
-[[bin]]
-name = "synapse-router"
-path = "src/bin/router.rs"
-required-features = ["native"]
+# [[bin]]
+# name = "synapse-router"
+# path = "src/bin/router.rs"
+# required-features = ["native"]
 
-[[bin]]
-name = "synapse-client"
-path = "src/bin/client.rs"
-required-features = ["native"]
+# [[bin]]
+# name = "synapse-client"
+# path = "src/bin/client.rs"
+# required-features = ["native"]
 
-[[bin]]
-name = "synapse-demo"
-path = "src/bin/synapse_demo.rs"
-required-features = ["native"]
+# [[bin]]
+# name = "synapse-demo"
+# path = "src/bin/synapse_demo.rs"
+# required-features = ["native"]
 
 [[example]]
 name = "hello_world"
