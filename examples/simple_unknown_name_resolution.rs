@@ -1,17 +1,17 @@
 //! Simple Message Sending Example
 //! 
-//! This example demonstrates basic message sending patterns using the Enhanced EMRP Router.
+//! This example demonstrates basic message sending patterns using the Enhanced Synapse Router.
 //! It shows how to initialize the router, send messages, and handle basic communication scenarios.
 
 use synapse::{
-    EnhancedEmrpRouter, Config, 
+    EnhancedSynapseRouter, Config, 
     types::{SecurityLevel, MessageType},
-    transport::MessageUrgency,
-    error::Result as EmrpResult,
+    transport::abstraction::MessageUrgency,
+    error::Result as SynapseResult,
 };
 
 #[tokio::main]
-async fn main() -> EmrpResult<()> {
+async fn main() -> SynapseResult<()> {
     println!("� Simple Message Sending Example");
     println!("=================================");
     
@@ -19,14 +19,14 @@ async fn main() -> EmrpResult<()> {
     let config = Config::for_testing();
     
     // Initialize the enhanced router
-    let router = EnhancedEmrpRouter::new(
+    let router = EnhancedSynapseRouter::new(
         config,
         "demo-bot@company.com".to_string()
     ).await?;
     
     // Start the router services
     router.start().await?;
-    println!("🚀 Enhanced EMRP Router started successfully");
+    println!("🚀 Enhanced Synapse Router started successfully");
     
     // Example 1: Send a simple direct message
     println!("\n📝 Example 1: Sending a direct message");
@@ -111,11 +111,11 @@ async fn main() -> EmrpResult<()> {
     println!("   Multi-transport enabled: {}", status.multi_transport_enabled);
     println!("   Email server enabled: {}", status.email_server_enabled);
     println!("   Available transports: {}", status.available_transports.len());
-    println!("   Email configured: {}", status.emrp_status.email_configured);
-    println!("   Known entities: {}", status.emrp_status.known_entities);
+    println!("   Email configured: {}", status.synapse_status.email_available);
+    println!("   Known entities: {}", status.synapse_status.known_peers);
     
     println!("\n🎉 Example completed successfully!");
-    println!("This demonstrates basic message sending patterns with the Enhanced EMRP Router:");
+    println!("This demonstrates basic message sending patterns with the Enhanced Synapse Router:");
     println!("  1. Direct messages with different security levels");
     println!("  2. System notifications");
     println!("  3. Real-time messages");

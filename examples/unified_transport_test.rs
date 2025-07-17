@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
         }
     }
       // Test sending a message
-    let test_message = SimpleMessage::new(
+    let _test_message = SimpleMessage::new(
         "test-target",
         "test-system", 
         "Hello from unified transport system!"

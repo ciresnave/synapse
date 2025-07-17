@@ -1,4 +1,4 @@
-//! Multi-Transport EMRP Demo - Simple Version
+//! Multi-Transport Synapse Demo - Simple Version
 //! Demonstrates the intelligent transport selection without async dependencies
 
 use std::time::{Duration, Instant};
@@ -7,10 +7,11 @@ use std::thread;
 /// Message urgency levels for transport selection
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageUrgency {
+    Critical,    // <50ms required
     RealTime,    // <100ms required
     Interactive, // <1s acceptable  
     Background,  // Reliability preferred
-    Discovery,   // Always use email
+    Batch,       // Store and forward acceptable
 }
 
 /// Available transport routes with latency characteristics
@@ -130,9 +131,9 @@ impl MultiTransportDemo {
                 }
                 self.available_transports.last().unwrap().clone()
             }
-            MessageUrgency::Discovery => {
-                // PRIORITY: Universal reach for initial contact
-                println!("   🔍 Selected Standard Email for discovery (universal reach)");
+            MessageUrgency::Batch => {
+                // PRIORITY: Universal reach for batch processing
+                println!("   � Selected Standard Email for batch processing (universal reach)");
                 TransportRoute::StandardEmail { latency_min: 1 }
             }
         }
@@ -189,7 +190,7 @@ impl MultiTransportDemo {
     
     /// Demonstrate all transport selection scenarios
     pub fn demo_intelligent_routing(&mut self) {
-        println!("🌟 EMRP Multi-Transport Intelligent Routing Demo");
+        println!("🌟 Synapse Multi-Transport Intelligent Routing Demo");
         println!("=================================================\n");
         
         let test_scenarios = vec![
@@ -226,7 +227,7 @@ impl MultiTransportDemo {
                     to: "unknown-ai@somewhere.net".to_string(),
                     from: "Claude@anthropic.ai".to_string(),
                     content: "Hello! I'd like to establish communication".to_string(),
-                    urgency: MessageUrgency::Discovery,
+                    urgency: MessageUrgency::Batch,
                 }
             ),
         ];
@@ -292,7 +293,7 @@ impl MultiTransportDemo {
 }
 
 fn main() {
-    println!("🚀 Email-Based Message Routing Protocol (EMRP)");
+    println!("🚀 Synapse Neural Communication Network");
     println!("     Advanced Multi-Transport Architecture");
     println!("=============================================\n");
     
@@ -316,6 +317,6 @@ fn main() {
     println!("   ✅ Performance optimization (5ms to 1min latency range)");
     println!("   ✅ Universal compatibility via email backbone");
     
-    println!("\n🌟 The EMRP multi-transport system is production-ready!");
+    println!("\n🌟 The Synapse multi-transport system is production-ready!");
     println!("    From local millisecond communication to global email delivery");
 }

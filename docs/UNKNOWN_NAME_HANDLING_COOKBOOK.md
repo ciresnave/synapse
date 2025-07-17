@@ -13,7 +13,7 @@
 ```rust
 use message_routing_system::discovery::*;
 
-async fn contact_alice_from_ai_team(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn contact_alice_from_ai_team(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     let lookup = ContactLookupRequest {
         name: "Alice".to_string(),
         hints: vec![
@@ -90,7 +90,7 @@ async fn contact_alice_from_ai_team(router: &EnhancedEmrpRouter) -> Result<(), B
 **The Solution**: Use entity type and purpose hints.
 
 ```rust
-async fn find_deployment_bot(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn find_deployment_bot(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     let lookup = ContactLookupRequest {
         name: "deployment bot".to_string(),
         hints: vec![
@@ -159,7 +159,7 @@ async fn find_deployment_bot(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn 
 **The Solution**: Use professional hints and fuzzy matching.
 
 ```rust
-async fn contact_dr_smith_ml(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn contact_dr_smith_ml(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     let lookup = ContactLookupRequest {
         name: "Dr. Smith".to_string(),
         hints: vec![
@@ -245,7 +245,7 @@ When your first attempt doesn't work, try increasingly broad searches:
 
 ```rust
 async fn progressive_search(
-    router: &EnhancedEmrpRouter,
+    router: &EnhancedSynapseRouter,
     name: &str,
     initial_hints: Vec<ContactHint>
 ) -> Result<ResolutionResult, Box<dyn std::error::Error>> {
@@ -294,7 +294,7 @@ When you need to find multiple people at once:
 
 ```rust
 async fn find_team_members(
-    router: &EnhancedEmrpRouter,
+    router: &EnhancedSynapseRouter,
     team_name: &str,
     member_names: Vec<&str>
 ) -> Result<HashMap<String, ResolutionResult>, Box<dyn std::error::Error>> {
@@ -349,7 +349,7 @@ async fn find_team_members(
 Configure intelligent auto-approval based on context:
 
 ```rust
-async fn setup_smart_approval_rules(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn setup_smart_approval_rules(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     let discovery_config = DiscoveryConfig {
         allow_being_discovered: true,
         discovery_permissions: DiscoveryPermissions {

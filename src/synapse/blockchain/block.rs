@@ -1,15 +1,20 @@
 // Synapse Blockchain Block Structure
 
-use chrono::{DateTime, Utc};
+use crate::synapse::blockchain::serialization::DateTimeWrapper;
+use crate::synapse::blockchain::serialization::UuidWrapper;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use chrono::Utc;
 use uuid::Uuid;
+use sha2::{Sha256, Digest};
+use bincode::{Encode, Decode};
 
 /// A block in the Synapse blockchain
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub struct Block {
     pub number: u64,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     pub previous_hash: String,
     pub hash: String,
     pub transactions: Vec<Transaction>,
@@ -22,7 +27,7 @@ impl Block {
     pub fn genesis() -> Self {
         let mut block = Self {
             number: 0,
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             previous_hash: "0".repeat(64),
             hash: String::new(),
             transactions: vec![],
@@ -35,17 +40,21 @@ impl Block {
     }
     
     /// Create a new block
-    pub fn new(number: u64, previous_hash: String, transactions: Vec<Transaction>, validator: String) -> Self {
+    pub fn new(
+        number: u64,
+        previous_hash: String,
+        transactions: Vec<Transaction>,
+        validator: String,
+    ) -> Self {
         let mut block = Self {
             number,
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             previous_hash,
             hash: String::new(),
             transactions,
             nonce: 0,
             validator,
         };
-        
         block.hash = block.calculate_hash();
         block
     }
@@ -54,7 +63,7 @@ impl Block {
     pub fn calculate_hash(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.number.to_be_bytes());
-        hasher.update(self.timestamp.timestamp().to_be_bytes());
+        hasher.update(self.timestamp.0.timestamp().to_be_bytes());
         hasher.update(&self.previous_hash);
         hasher.update(self.nonce.to_be_bytes());
         hasher.update(&self.validator);
@@ -92,10 +101,20 @@ impl Block {
         
         true
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
+    }
 }
 
 /// Transactions that can be stored in blocks
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub enum Transaction {
     /// Trust report about a participant
     TrustReport(TrustReport),
@@ -115,9 +134,26 @@ impl Transaction {
         format!("{:x}", Sha256::digest(self.hash()))
     }
     
-    /// Calculate transaction hash
+    /// Get hash of this transaction
     pub fn hash(&self) -> Vec<u8> {
-        bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap_or_default()
+        let mut hasher = Sha256::new();
+        match self {
+            Transaction::TrustReport(report) => {
+                hasher.update(&report.id);
+                hasher.update(&report.reporter_id);
+                hasher.update(&report.subject_id);
+                hasher.update(report.timestamp.0.timestamp().to_be_bytes());
+            }
+            Transaction::Stake(stake) => {
+                hasher.update(&stake.id);
+                hasher.update(&stake.participant_id);
+                hasher.update(stake.amount.to_be_bytes());
+                hasher.update(stake.timestamp.0.timestamp().to_be_bytes());
+            }
+            // Handle other transaction types...
+            _ => {}
+        }
+        hasher.finalize().to_vec()
     }
     
     /// Verify transaction is valid
@@ -130,10 +166,20 @@ impl Transaction {
             Transaction::Registration(reg) => reg.verify(),
         }
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
+    }
 }
 
 /// A trust report submitted to the blockchain
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub struct TrustReport {
     pub id: String,
     pub reporter_id: String,
@@ -143,7 +189,7 @@ pub struct TrustReport {
     pub category: String,
     pub evidence_hash: Option<String>, // Hash of evidence data
     pub stake_amount: u32, // Trust points staked on this report
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     pub signature: Vec<u8>, // Digital signature from reporter
 }
 
@@ -158,7 +204,7 @@ impl TrustReport {
         stake_amount: u32,
     ) -> Self {
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: UuidWrapper::new(Uuid::new_v4()).to_string(),
             reporter_id,
             subject_id,
             report_type,
@@ -166,7 +212,7 @@ impl TrustReport {
             category,
             evidence_hash: None,
             stake_amount,
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             signature: vec![], // Would be populated with actual signature
         }
     }
@@ -192,9 +238,19 @@ impl TrustReport {
         
         true
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub enum TrustReportType {
     /// Report good behavior
     Positive,
@@ -206,25 +262,37 @@ pub enum TrustReportType {
     CollaborationFeedback,
 }
 
+impl TrustReportType {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
+    }
+}
+
 /// Stake trust points transaction
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub struct StakeTransaction {
     pub id: String,
     pub participant_id: String,
     pub amount: u32,
     pub purpose: StakePurpose,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     pub signature: Vec<u8>,
 }
 
 impl StakeTransaction {
     pub fn new(participant_id: String, amount: u32, purpose: StakePurpose) -> Self {
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: UuidWrapper::new(Uuid::new_v4()).to_string(),
             participant_id,
             amount,
             purpose,
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             signature: vec![],
         }
     }
@@ -234,7 +302,9 @@ impl StakeTransaction {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub enum StakePurpose {
     /// Stake to become consensus validator
     ConsensusValidator,
@@ -245,13 +315,15 @@ pub enum StakePurpose {
 }
 
 /// Unstake trust points transaction
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub struct UnstakeTransaction {
     pub id: String,
     pub participant_id: String,
     pub amount: u32,
     pub stake_id: String, // Reference to original stake
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     pub signature: Vec<u8>,
 }
 
@@ -262,14 +334,16 @@ impl UnstakeTransaction {
 }
 
 /// Transfer trust points between participants
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub struct TransferTransaction {
     pub id: String,
     pub from_participant: String,
     pub to_participant: String,
     pub amount: u32,
     pub reason: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     pub signature: Vec<u8>,
 }
 
@@ -280,14 +354,16 @@ impl TransferTransaction {
 }
 
 /// Participant registration transaction
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub struct RegistrationTransaction {
     pub id: String,
     pub participant_id: String,
     pub public_key: Vec<u8>,
     pub initial_trust_points: u32,
     pub entity_type: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     pub signature: Vec<u8>,
 }
 

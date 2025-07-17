@@ -7,7 +7,8 @@ use crate::{
     types::*,
     error::Result,
     circuit_breaker::CircuitBreaker,
-    transport::{Transport, TransportRoute, TransportMetrics, MessageUrgency},
+    transport::{Transport, TransportRoute, TransportMetrics, abstraction::MessageUrgency},
+    synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper},
 };
 use async_trait::async_trait;
 use std::{
@@ -326,10 +327,11 @@ impl Transport for QuicTransport {
     async fn supports_urgency(&self, urgency: MessageUrgency) -> bool {
         // QUIC is excellent for all urgency levels
         matches!(urgency, 
+            MessageUrgency::Critical |
             MessageUrgency::RealTime | 
             MessageUrgency::Interactive | 
             MessageUrgency::Background |
-            MessageUrgency::Discovery
+            MessageUrgency::Batch
         )
     }
     

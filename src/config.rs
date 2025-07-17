@@ -113,7 +113,7 @@ impl Config {
             entity: EntityConfig {
                 local_name: local_name.clone(),
                 entity_type: entity_type.clone(),
-                domain: "emrp.local".to_string(),
+                domain: "synapse.local".to_string(),
                 capabilities: Self::default_capabilities_for_type(&entity_type),
                 display_name: Some(format!("{} ({})", local_name, entity_type)),
             },
@@ -121,7 +121,7 @@ impl Config {
                 smtp: SmtpConfig {
                     host: "localhost".to_string(),
                     port: 587,
-                    username: format!("{}@emrp.local", local_name.to_lowercase()),
+                    username: format!("{}@synapse.local", local_name.to_lowercase()),
                     password: "changeme".to_string(),
                     use_tls: true,
                     use_ssl: false,
@@ -129,7 +129,7 @@ impl Config {
                 imap: ImapConfig {
                     host: "localhost".to_string(),
                     port: 993,
-                    username: format!("{}@emrp.local", local_name.to_lowercase()),
+                    username: format!("{}@synapse.local", local_name.to_lowercase()),
                     password: "changeme".to_string(),
                     use_ssl: true,
                 },
@@ -147,7 +147,7 @@ impl Config {
                 public_key_path: Some(format!("{}_public.pem", local_name.to_lowercase())),
                 auto_generate_keys: true,
                 default_security_level: "private".to_string(),
-                trusted_domains: vec!["emrp.local".to_string()],
+                trusted_domains: vec!["synapse.local".to_string()],
                 require_encryption_for: vec!["human".to_string()],
             },
             logging: LoggingConfig {
@@ -295,6 +295,12 @@ impl Config {
     /// Create a configuration suitable for testing
     pub fn for_testing() -> Self {
         Self::default_for_entity("test_entity", "test")
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::default_for_entity("default", "ai_model")
     }
 }
 

@@ -269,8 +269,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use uuid::Uuid;
+use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 
 /// Types of entities in the global network
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,7 +333,7 @@ impl std::fmt::Display for MessageType {
 }
 
 /// Security levels for different message types
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityLevel {
     /// No encryption needed
@@ -441,7 +442,7 @@ pub struct GlobalIdentity {
     /// Trust level (0-100)
     pub trust_level: u8,
     /// Last seen timestamp
-    pub last_seen: DateTime<Utc>,
+    pub last_seen: DateTimeWrapper,
     /// Routing preferences
     #[serde(default)]
     pub routing_preferences: HashMap<String, String>,
@@ -456,7 +457,7 @@ impl Default for GlobalIdentity {
             public_key: String::new(),
             capabilities: Vec::new(),
             trust_level: 0,
-            last_seen: Utc::now(),
+            last_seen: DateTimeWrapper::new(Utc::now()),
             routing_preferences: HashMap::new(),
         }
     }
@@ -477,7 +478,7 @@ impl GlobalIdentity {
             public_key: public_key.into(),
             capabilities: Vec::new(),
             trust_level: 50,
-            last_seen: Utc::now(),
+            last_seen: DateTimeWrapper::new(Utc::now()),
             routing_preferences: HashMap::new(),
         }
     }
@@ -494,15 +495,15 @@ impl GlobalIdentity {
 
     /// Update the last seen timestamp
     pub fn update_last_seen(&mut self) {
-        self.last_seen = Utc::now();
+        self.last_seen = DateTimeWrapper::new(Utc::now());
     }
 }
 
 /// Secure message for network transport
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct SecureMessage {
     /// Unique message identifier
-    pub message_id: Uuid,
+    pub message_id: UuidWrapper,
     /// Recipient's global ID
     pub to_global_id: String,
     /// Sender's global ID
@@ -512,7 +513,7 @@ pub struct SecureMessage {
     /// Digital signature
     pub signature: Vec<u8>,
     /// Message timestamp
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     /// Security level applied
     pub security_level: SecurityLevel,
     /// Routing path taken
@@ -533,12 +534,12 @@ impl SecureMessage {
         security_level: SecurityLevel,
     ) -> Self {
         Self {
-            message_id: Uuid::new_v4(),
+            message_id: UuidWrapper::new(Uuid::new_v4()),
             to_global_id: to_global_id.into(),
             from_global_id: from_global_id.into(),
             encrypted_content,
             signature,
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             security_level,
             routing_path: Vec::new(),
             metadata: HashMap::new(),
@@ -553,6 +554,16 @@ impl SecureMessage {
     /// Add metadata to the message
     pub fn add_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.metadata.insert(key.into(), value.into());
+    }
+
+    /// Get the content as a string (for testing compatibility)
+    pub fn content(&self) -> String {
+        String::from_utf8_lossy(&self.encrypted_content).to_string()
+    }
+
+    /// Check if content is empty (for testing compatibility)
+    pub fn content_is_empty(&self) -> bool {
+        self.encrypted_content.is_empty()
     }
 }
 
@@ -643,7 +654,7 @@ pub struct StreamChunk {
     /// Base64 encoded payload
     pub data: String,
     /// Timestamp
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     /// Priority level
     pub priority: StreamPriority,
     /// Is this the final chunk?
@@ -665,7 +676,7 @@ impl StreamChunk {
             sequence_number,
             chunk_type: "data".to_string(),
             data: data.into(),
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             priority,
             is_final: false,
             compression: "none".to_string(),
@@ -679,7 +690,7 @@ impl StreamChunk {
             sequence_number,
             chunk_type: "end".to_string(),
             data: String::new(),
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             priority: StreamPriority::Background,
             is_final: true,
             compression: "none".to_string(),
@@ -699,7 +710,7 @@ pub struct StreamMetadata {
     /// Destination email address
     pub destination: String,
     /// When stream started
-    pub started_at: DateTime<Utc>,
+    pub started_at: DateTimeWrapper,
     /// Expected duration in seconds
     pub expected_duration: Option<u64>,
     /// Total size estimate in bytes
@@ -724,7 +735,7 @@ impl StreamMetadata {
             stream_type,
             source: source.into(),
             destination: destination.into(),
-            started_at: Utc::now(),
+            started_at: DateTimeWrapper::new(Utc::now()),
             expected_duration: None,
             total_size_estimate: None,
             chunk_size: 32 * 1024, // 32KB default

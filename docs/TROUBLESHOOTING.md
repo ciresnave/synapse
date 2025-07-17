@@ -444,7 +444,7 @@ tokio::spawn(async move {
 #[tokio::test]
 async fn test_basic_connectivity() {
     let config = Config::test_config().build();
-    let router = EnhancedEmrpRouter::new(config, "test@example.com".to_string()).await.unwrap();
+    let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await.unwrap();
     
     // Test each transport individually
     assert!(router.test_tcp_transport().await.is_ok());
@@ -462,8 +462,8 @@ async fn test_message_roundtrip() {
     let config1 = Config::test_config().tcp_port(8080).build();
     let config2 = Config::test_config().tcp_port(8081).build();
     
-    let router1 = EnhancedEmrpRouter::new(config1, "alice@test.com".to_string()).await.unwrap();
-    let router2 = EnhancedEmrpRouter::new(config2, "bob@test.com".to_string()).await.unwrap();
+    let router1 = EnhancedSynapseRouter::new(config1, "alice@test.com".to_string()).await.unwrap();
+    let router2 = EnhancedSynapseRouter::new(config2, "bob@test.com".to_string()).await.unwrap();
     
     // Cross-register
     router1.register_peer("Bob", "bob@test.com").await.unwrap();
@@ -513,7 +513,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .log_level(LogLevel::Debug)
         .build();
     
-    let router = EnhancedEmrpRouter::new(config, "test@example.com".to_string()).await?;
+    let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await?;
     
     // Steps that trigger the problem
     router.start().await?;

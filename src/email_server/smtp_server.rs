@@ -1,16 +1,19 @@
 //! High-performance SMTP server for EMRP
 
-use crate::error::{EmrpError, Result};
+use crate::error::{SynapseError, Result};
 use crate::types::SecureMessage;
+use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, error, debug};
+use uuid::Uuid;
+use chrono::Utc;
 
 /// High-performance SMTP server optimized for EMRP
-pub struct EmrpSmtpServer {
+pub struct SynapseSmtpServer {
     /// Server configuration
     config: SmtpServerConfig,
     /// Message storage
@@ -123,7 +126,7 @@ impl Default for SmtpServerConfig {
     }
 }
 
-impl EmrpSmtpServer {
+impl SynapseSmtpServer {
     /// Create a new SMTP server
     pub fn new(
         config: SmtpServerConfig,
@@ -142,7 +145,7 @@ impl EmrpSmtpServer {
     pub async fn start(&self) -> Result<()> {
         let addr = format!("0.0.0.0:{}", self.config.port);
         let listener = TcpListener::bind(&addr).await
-            .map_err(|e| EmrpError::Network(format!("Failed to bind SMTP server to {}: {}", addr, e)))?;
+            .map_err(|e| SynapseError::NetworkError(format!("Failed to bind SMTP server to {}: {}", addr, e)))?;
 
         info!("EMRP SMTP Server listening on {}", addr);
 
@@ -372,12 +375,12 @@ impl EmrpSmtpServer {
         
         // Convert SMTP message to EMRP SecureMessage
         let secure_message = SecureMessage {
-            message_id: uuid::Uuid::new_v4(),
+            message_id: UuidWrapper::new(Uuid::new_v4()),
             to_global_id: message.to[0].clone(), // Use first recipient
             from_global_id: message.from,
             encrypted_content: message.data,
             signature: Vec::new(),
-            timestamp: chrono::Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             security_level: crate::types::SecurityLevel::Private,
             routing_path: Vec::new(),
             metadata: std::collections::HashMap::new(),
@@ -420,7 +423,7 @@ impl EmrpSmtpServer {
     }
 }
 
-impl Clone for EmrpSmtpServer {
+impl Clone for SynapseSmtpServer {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
@@ -448,7 +451,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
         }
         
         let value = CHARS.iter().position(|&x| x == byte)
-            .ok_or_else(|| EmrpError::Crypto(crate::error::CryptoError::Decryption("Invalid base64 character".to_string())))?;
+            .ok_or_else(|| SynapseError::Crypto("Invalid base64 character".to_string()))?;
         
         buffer = (buffer << 6) | (value as u32);
         bits += 6;

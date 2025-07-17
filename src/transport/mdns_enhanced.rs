@@ -3,13 +3,12 @@
 //! This module provides comprehensive multicast DNS service discovery 
 //! and announcement capabilities for local network communication.
 
-use super::{Transport, TransportMetrics};
+use super::{TransportMetrics};
 use crate::{
     types::SecureMessage, 
     error::Result,
-    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
+    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
 };
-use async_trait::async_trait;
 use std::{
     time::{Duration, Instant},
     collections::HashMap,
@@ -312,7 +311,7 @@ impl EnhancedMdnsTransport {
                 }
             }
         } else {
-            Err(crate::error::EmrpError::Transport(
+            Err(crate::error::SynapseError::TransportError(
                 format!("No addresses available for peer {}", peer.entity_id)
             ).into())
         }
@@ -496,6 +495,7 @@ impl EnhancedMdnsTransport {
     }
 }
 
+/* TODO: Update EnhancedMdnsTransport to implement new Transport trait interface
 #[async_trait]
 impl Transport for EnhancedMdnsTransport {
     /// Send a message via this transport
@@ -503,7 +503,7 @@ impl Transport for EnhancedMdnsTransport {
         // Check circuit breaker before proceeding
         if !self.circuit_breaker.can_proceed().await {
             debug!("Circuit breaker is open, rejecting message to {}", target);
-            return Err(crate::error::EmrpError::Transport(
+            return Err(crate::error::SynapseError::TransportError(
                 format!("Circuit breaker is open for target {}", target)
             ).into());
         }
@@ -520,7 +520,7 @@ impl Transport for EnhancedMdnsTransport {
             if let Some(peer) = self.find_peer(target).await {
                 self.send_to_peer(&peer, message).await
             } else {
-                Err(crate::error::EmrpError::Transport(
+                Err(crate::error::SynapseError::TransportError(
                     format!("Peer {} not found on local network", target)
                 ).into())
             }
@@ -599,7 +599,7 @@ impl Transport for EnhancedMdnsTransport {
                         Ok(metrics)
                     }
                     None => {
-                        Err(crate::error::EmrpError::Transport(
+                        Err(crate::error::SynapseError::TransportError(
                             format!("Cannot reach target {} via mDNS", target)
                         ).into())
                     }
@@ -629,7 +629,7 @@ impl Transport for EnhancedMdnsTransport {
         
         if !breaker.can_proceed().await {
             debug!("Circuit breaker is open, rejecting message to {}", target);
-            return Err(crate::error::EmrpError::Transport(
+            return Err(crate::error::SynapseError::TransportError(
                 format!("Circuit breaker is open for target {}", target)
             ).into());
         }
@@ -713,6 +713,7 @@ impl Transport for EnhancedMdnsTransport {
         0.95 // Very reliable on local networks
     }
 }
+*/
 
 impl EnhancedMdnsTransport {
     /// Get access to the circuit breaker for monitoring and control
@@ -732,9 +733,9 @@ impl EnhancedMdnsTransport {
 }
 
 /// Create a multicast UDP socket for mDNS
+#[cfg(feature = "mdns")]
 async fn create_multicast_socket(config: &MdnsConfig) -> Result<TokioUdpSocket> {
     use std::net::{SocketAddrV4, Ipv4Addr};
-    #[cfg(feature = "mdns")]
     use socket2::{Socket, Domain, Type, Protocol};
     
     // Create socket with SO_REUSEADDR and SO_REUSEPORT
@@ -748,19 +749,32 @@ async fn create_multicast_socket(config: &MdnsConfig) -> Result<TokioUdpSocket> 
     let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.multicast_port);
     socket.bind(&bind_addr.into())?;
     
-    // Join the multicast group
-    socket.join_multicast_v4(&config.multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
+    // Convert to tokio UdpSocket
+    let std_socket: std::net::UdpSocket = socket.into();
+    std_socket.set_nonblocking(true)?;
+    let tokio_socket = TokioUdpSocket::from_std(std_socket)?;
+    
+    Ok(tokio_socket)
+}
+
+/// Create a multicast UDP socket for mDNS (fallback without socket2)
+#[cfg(not(feature = "mdns"))]
+async fn create_multicast_socket(config: &MdnsConfig) -> Result<TokioUdpSocket> {
+    use std::net::{SocketAddrV4, Ipv4Addr};
+    
+    // Fallback implementation that just creates a standard UDP socket
+    // This will be used when the mdns feature is disabled
+    let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.multicast_port);
+    let socket = TokioUdpSocket::bind(bind_addr).await?;
+    
+    socket.join_multicast_v4(config.multicast_addr, Ipv4Addr::UNSPECIFIED)?;
     
     // Set multicast loop and TTL
     socket.set_multicast_loop_v4(false)?;
     socket.set_multicast_ttl_v4(255)?;
     
-    // Convert to Tokio socket
-    socket.set_nonblocking(true)?;
-    let tokio_socket = TokioUdpSocket::from_std(socket.into())?;
-    
     info!("Created mDNS multicast socket on port {}", config.multicast_port);
-    Ok(tokio_socket)
+    Ok(socket)
 }
 
 /// mDNS utility functions
@@ -776,7 +790,7 @@ pub mod utils {
         
         loop {
             if pos >= data.len() {
-                return Err(crate::error::EmrpError::Transport(
+                return Err(crate::error::SynapseError::TransportError(
                     "DNS name parsing: unexpected end of data".to_string()
                 ).into());
             }
@@ -796,7 +810,7 @@ pub mod utils {
                 jump_count += 1;
                 
                 if jump_count > 10 {
-                    return Err(crate::error::EmrpError::Transport(
+                    return Err(crate::error::SynapseError::TransportError(
                         "DNS name parsing: too many jumps".to_string()
                     ).into());
                 }
@@ -811,7 +825,7 @@ pub mod utils {
             }
             
             if pos + len > data.len() {
-                return Err(crate::error::EmrpError::Transport(
+                return Err(crate::error::SynapseError::TransportError(
                     "DNS name parsing: label too long".to_string()
                 ).into());
             }
@@ -1102,7 +1116,7 @@ impl EnhancedMdnsServiceBrowser {
             }
             MdnsPacket::Response { .. } => {
                 // Response encoding would be more complex
-                return Err(crate::error::EmrpError::Transport(
+                return Err(crate::error::SynapseError::TransportError(
                     "Response packet encoding not implemented yet".to_string()
                 ).into());
             }
@@ -1264,7 +1278,7 @@ impl EnhancedMdnsTransport {
         EnhancedMdnsServiceBrowser::new(
             vec![
                 "_synapse._tcp.local.".to_string(),
-                "_emrp._tcp.local.".to_string(),
+                "_synapse._tcp.local.".to_string(),
                 "_synapse-router._tcp.local.".to_string(),
             ],
             None

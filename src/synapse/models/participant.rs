@@ -1,5 +1,7 @@
 // Synapse Participant Registry - Core Data Models
 
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use super::trust::TrustRatings;
@@ -42,6 +44,22 @@ pub enum EntityType {
     Bot,
     Organization,
     Department,
+}
+
+impl FromStr for EntityType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "human" => Ok(EntityType::Human),
+            "ai_model" => Ok(EntityType::AiModel),
+            "service" => Ok(EntityType::Service),
+            "bot" => Ok(EntityType::Bot),
+            "organization" => Ok(EntityType::Organization),
+            "department" => Ok(EntityType::Department),
+            _ => Err(format!("Unknown entity type: {}", s)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

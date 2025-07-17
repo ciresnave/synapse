@@ -4,15 +4,16 @@ This guide provides a comprehensive overview of the Synapse Neural Communication
 
 ## 📖 Quick Navigation
 
-- [Core Components](#core-components)
-- [Participant Registry](#participant-registry)
-- [Trust System](#trust-system)
-- [Blockchain](#blockchain)
-- [Transport Layer](#transport-layer)
-- [Storage](#storage)
-- [WebAssembly Support](#webassembly-support)
-- [Error Handling](#error-handling)
-- [Configuration](#configuration)
+- [Core Components](#️-core-components)
+- [Router API](#-router-api)
+- [Message Types](#-message-types)
+- [Streaming API](#-streaming-api)
+- [Transport System](#-transport-system)
+- [WebRTC Transport](#-webrtc-transport)
+- [Trust System](#-trust-system)
+- [WASM Storage](#-wasm-storage)
+- [Error Handling](#-error-handling)
+- [Configuration](#️-configuration)
 
 ## 🏗️ Core Components
 
@@ -232,9 +233,9 @@ let message = SimpleMessage {
 };
 ```
 
-### Message Types
+### Available Message Types
 
-#### Direct Messages
+#### Direct Message Type
 
 ```rust
 MessageType::Direct  // One-to-one private communication
@@ -242,7 +243,7 @@ MessageType::Direct  // One-to-one private communication
 
 **Use Cases:** Private conversations, specific requests, personal communication
 
-#### Broadcast Messages
+#### Broadcast Message Type
 
 ```rust
 MessageType::Broadcast  // One-to-many public announcements
@@ -540,149 +541,540 @@ match tcp_result {
 }
 ```
 
-### Error Recovery Mechanisms
+### Enhanced Transport Selection
 
-Synapse implements several error recovery patterns to ensure reliability even in challenging network conditions:
+The transport system now includes intelligent selection algorithms that choose optimal transports based on message properties and network conditions.
 
-#### Circuit Breaker Pattern
+#### Intelligent Transport Routing
 
 ```rust
-use synapse::transport::error_recovery::CircuitBreaker;
+use synapse::transport::{TransportType, MessageUrgency, TransportTarget};
+
+// The router automatically selects the best transport
+// based on target type and message urgency
+let message = SimpleMessage {
+    to: "remote_entity".to_string(),
+    from_entity: "local_entity".to_string(),
+    content: "Urgent notification".to_string(),
+    message_type: MessageType::Notification,
+    metadata: HashMap::new(),
+};
+
+// High urgency messages prefer faster transports
+router.send_message_detailed(
+    message,
+    SecurityLevel::Authenticated,
+    MessageUrgency::RealTime  // Prefers TCP/UDP over email
+).await?;
+```
+
+#### Transport Selection Logic
+
+```rust
+// The system considers multiple factors for transport selection:
+
+// 1. Message urgency
+match urgency {
+    MessageUrgency::RealTime => {
+        // Prefers: TCP -> UDP -> mDNS -> Email
+        println!("Using fastest available transport");
+    },
+    MessageUrgency::Interactive => {
+        // Prefers: TCP -> mDNS -> Email -> UDP
+        println!("Balancing speed and reliability");
+    },
+    MessageUrgency::Background => {
+        // Prefers: Email -> mDNS -> TCP -> UDP
+        println!("Using most reliable transport");
+    }
+}
+
+// 2. Target type
+match target {
+    TransportTarget::Local(_) => {
+        // Prefers local network transports (mDNS, TCP)
+        println!("Using local network transport");
+    },
+    TransportTarget::Remote(_) => {
+        // Prefers internet-routable transports (TCP, Email)
+        println!("Using remote transport");
+    },
+    TransportTarget::Email(_) => {
+        // Forces email transport
+        println!("Using email transport");
+    }
+}
+```
+
+#### Route Caching
+
+```rust
+// The transport system caches successful routes for performance
 use std::time::Duration;
 
-// Create a circuit breaker for a specific service
-let breaker = CircuitBreaker::new(
-    "email-transport",      // Name of the protected service
-    3,                      // Failure threshold before opening circuit
-    Duration::from_secs(30) // Reset timeout before allowing retry
+// Routes are cached to avoid repeated selection overhead
+let cached_route = router.get_cached_route("target_entity").await?;
+if let Some(route) = cached_route {
+    println!("Using cached route: {:?}", route.transport_type);
+} else {
+    // Perform transport selection and cache the result
+    let selected_route = router.select_optimal_transport(
+        &target,
+        &message,
+        urgency
+    ).await?;
+    println!("Selected and cached new route: {:?}", selected_route);
+}
+
+// Cache duration can be configured
+let cache_duration = Duration::from_secs(300); // 5 minutes
+router.set_route_cache_duration(cache_duration).await?;
+```
+
+#### Transport Availability Checking
+
+```rust
+// Check which transports are available for a target
+let available_transports = router.get_available_transports("target_entity").await?;
+
+for transport in available_transports {
+    match transport {
+        TransportType::Tcp => println!("TCP transport available"),
+        TransportType::Udp => println!("UDP transport available"),
+        TransportType::Email => println!("Email transport available"),
+        TransportType::Http => println!("HTTP transport available"),
+        // Additional transports...
+    }
+}
+
+// Test specific transport connectivity
+let tcp_available = router.test_transport_connectivity(
+    TransportType::Tcp,
+    "target_entity"
+).await.is_ok();
+
+if tcp_available {
+    println!("TCP connection successful");
+} else {
+    println!("TCP connection failed, will use fallback");
+}
+```
+
+#### Transport Factory System
+
+```rust
+// The enhanced transport system uses factories for creation
+use synapse::transport::abstraction::{TransportFactory, TransportType};
+
+// Factories are automatically registered and managed
+let factories = router.get_transport_factories().await?;
+for factory in factories {
+    let transport_type = factory.get_transport_type();
+    println!("Available factory: {:?}", transport_type);
+    
+    if factory.is_available().await? {
+        println!("  Factory is ready for use");
+    }
+}
+
+// Create transport via factory
+let tcp_factory = router.get_transport_factory(TransportType::Tcp).await?;
+let tcp_transport = tcp_factory.create_transport().await?;
+```
+
+## 🌊 Streaming API
+
+The Streaming API provides real-time data streaming capabilities for continuous data transmission between entities.
+
+### StreamManager
+
+The `StreamManager` handles real-time message streams with proper entity identification and chunked data transmission.
+
+```rust
+use synapse::streaming::{StreamManager, StreamSession};
+use std::sync::Arc;
+
+// Create stream manager
+let stream_manager = StreamManager::new(Arc::clone(&router));
+
+// Start a streaming session
+let mut session = stream_manager.start_stream(
+    "target_entity",     // Where to send
+    "source_entity"      // Who is sending
+).await?;
+
+// Send data chunks
+let data = b"Hello, streaming world!";
+stream_manager.send_chunk(&mut session, data).await?;
+
+// Send more data
+let more_data = b"This is chunk 2";
+stream_manager.send_chunk(&mut session, more_data).await?;
+
+// Finish the stream
+stream_manager.finish_stream(&mut session).await?;
+```
+
+### StreamSession Management
+
+```rust
+// StreamSession provides information about the active stream
+println!("Stream ID: {}", session.stream_id);
+println!("To: {}", session.to_entity);
+println!("From: {}", session.from_entity);
+println!("Chunk count: {}", session.chunk_counter);
+
+// Sessions track message attribution for auditing
+let session_info = format!(
+    "Stream from {} to {} (ID: {})",
+    session.from_entity,
+    session.to_entity,
+    session.stream_id
 );
-
-// Before making a potentially failing call
-if breaker.allow_request() {
-    match send_operation().await {
-        Ok(result) => {
-            // Record success to reset failure counter
-            breaker.record_success();
-            println!("Operation succeeded: {:?}", result);
-        },
-        Err(e) => {
-            // Record failure to potentially trip the circuit
-            breaker.record_failure();
-            eprintln!("Operation failed: {}", e);
-        }
-    }
-} else {
-    // Circuit is open, don't attempt the operation
-    eprintln!("Circuit breaker is open, skipping request");
-}
 ```
 
-#### Retry Policy
+### Processing Incoming Streams
 
 ```rust
-use synapse::transport::error_recovery::RetryPolicy;
-
-// Create a retry policy with exponential backoff
-let policy = RetryPolicy::new(3, 100)   // 3 attempts starting at 100ms
-    .with_max_backoff(30)               // Maximum 30 seconds
-    .with_jitter_factor(0.1);           // Add 10% randomization
-
-// Execute an operation with retry
-let result = policy.execute(|| {
-    // Return a BoxFuture with your operation
-    Box::pin(async {
-        // Your operation that might fail transiently
-        api_call().await
-    })
-}).await;
-
-match result {
-    Ok(data) => println!("Operation succeeded after retries: {:?}", data),
-    Err(e) => eprintln!("Operation failed after all retries: {}", e),
-}
-```
-
-#### Connection Health Monitoring
-
-```rust
-use synapse::transport::error_recovery::ConnectionHealthMonitor;
-
-// Create a health monitor
-let monitor = ConnectionHealthMonitor::new();
-
-// Record successful and failed operations
-match operation().await {
-    Ok(_) => monitor.record_success(),
-    Err(_) => monitor.record_failure()
-}
-
-// Check health status
-if monitor.is_healthy() {
-    // Connection is healthy, proceed normally
-} else {
-    // Connection is unhealthy, take remedial action
-    let status = monitor.get_status();
-    println!("Connection is unhealthy with {} consecutive failures", 
-             status.consecutive_failures);
-}
-```
-
-## ⚙️ Configuration
-
-### Builder Pattern
-
-```rust
-let config = Config::builder()
-    // Network configuration
-    .tcp_port(8080)
-    .udp_port(8081)
-    .enable_mdns(true)
+// Process incoming stream chunks
+let message = receiver.recv().await?;
+if let Some(chunk) = stream_manager.process_chunk(&message).await? {
+    println!("Received chunk {} for stream {}", 
+        chunk.sequence_number, 
+        chunk.stream_id
+    );
     
-    // Email configuration
-    .smtp_server("smtp.gmail.com".to_string())
-    .smtp_port(587)
-    .email_username("bot@gmail.com".to_string())
-    .email_password("app_password".to_string())
+    // Handle the chunk data
+    let data = base64::decode(&chunk.data)?;
+    process_stream_data(&data).await?;
     
-    // Security configuration
-    .enable_encryption(true)
-    .require_authentication(true)
-    .key_size(4096)
-    
-    // Performance configuration
-    .max_retries(3)
-    .connection_timeout(Duration::from_secs(10))
-    .worker_threads(4)
-    
-    .build();
-```
-
-### Configuration Validation
-
-```rust
-// Validate configuration before use
-let validation_result = config.validate();
-match validation_result {
-    Ok(_) => println!("Configuration is valid"),
-    Err(errors) => {
-        for error in errors {
-            eprintln!("Config error: {}", error);
-        }
+    // Check if this is the final chunk
+    if chunk.is_final {
+        println!("Stream {} completed", chunk.stream_id);
     }
 }
 ```
 
-### Environment-Based Configuration
+### Stream Prioritization
 
 ```rust
-// Load from environment variables
-let config = Config::from_env()?;
+// Streams support different priority levels
+use synapse::types::StreamPriority;
 
-// Or combine with builder
-let config = Config::from_env()?
-    .builder()
-    .tcp_port(9090)  // Override specific settings
-    .build();
+// Priority is automatically managed, but you can query it
+match chunk.priority {
+    StreamPriority::RealTime => {
+        // Handle high-priority stream data immediately
+        handle_realtime_data(&chunk).await?;
+    },
+    StreamPriority::Interactive => {
+        // Handle interactive stream data
+        handle_interactive_data(&chunk).await?;
+    },
+    StreamPriority::Background => {
+        // Queue background stream data
+        queue_background_data(&chunk).await?;
+    }
+}
+```
+
+## 🌐 WebRTC Transport
+
+WebRTC transport enables peer-to-peer communication in browser environments with comprehensive testing and validation.
+
+### WASM WebRTC Integration
+
+```rust
+#[cfg(target_arch = "wasm32")]
+use synapse::wasm::transport::WasmTransport;
+use synapse::wasm::config::WasmConfig;
+
+// Create WebRTC transport in browser
+let config = WasmConfig::default();
+let transport = WasmTransport::new(config).await?;
+
+// Check connection capabilities
+if transport.is_connected() {
+    println!("WebRTC transport ready for peer connections");
+}
+```
+
+### Data Channel Management
+
+```rust
+// Get data channel information
+let channel_info = transport.get_channel_info().await?;
+
+if channel_info.supports_binary {
+    // Send binary data
+    let binary_data = vec![1, 2, 3, 4, 5];
+    transport.send_binary(&binary_data).await?;
+}
+
+if channel_info.supports_text {
+    // Send text data
+    transport.send_text("Hello WebRTC!").await?;
+}
+```
+
+### WebRTC Connection States
+
+```rust
+// Monitor connection state changes
+use synapse::transport::webrtc::ConnectionState;
+
+let state = transport.get_connection_state().await?;
+match state {
+    ConnectionState::New => println!("Connection initiated"),
+    ConnectionState::Connecting => println!("Establishing connection"),
+    ConnectionState::Connected => println!("Connection established"),
+    ConnectionState::Disconnected => println!("Connection lost"),
+    ConnectionState::Failed => println!("Connection failed"),
+    ConnectionState::Closed => println!("Connection closed"),
+}
+```
+
+### WebRTC with IndexedDB Storage
+
+```rust
+// WebRTC transport integrates with IndexedDB for data persistence
+let storage = transport.get_storage().await?;
+
+// Store WebRTC session data
+storage.store_session_data("peer_id", &session_data).await?;
+
+// Retrieve stored data
+let stored_data = storage.retrieve_session_data("peer_id").await?;
+```
+
+## 🔐 Trust System
+
+The Trust System provides blockchain-based trust verification with staking mechanisms and decay patterns.
+
+### Trust Manager Initialization
+
+```rust
+use synapse::trust::{TrustManager, TrustConfig};
+use synapse::blockchain::{BlockchainManager, BlockchainConfig};
+
+// Initialize blockchain for trust system
+let blockchain_config = BlockchainConfig::default();
+let blockchain_manager = BlockchainManager::new(blockchain_config).await?;
+
+// Initialize trust manager
+let trust_config = TrustConfig::default();
+let mut trust_manager = TrustManager::new(trust_config, blockchain_manager).await?;
+```
+
+### Entity Registration with Staking
+
+```rust
+use std::collections::HashMap;
+
+// Register entity with stake
+let entity_id = "trusted_entity";
+let stake_amount = 100.0;
+let metadata = HashMap::new();
+
+let registration = trust_manager.register_entity_with_stake(
+    entity_id,
+    stake_amount,
+    metadata,
+).await?;
+
+// Verify stake information
+let stake_info = trust_manager.get_stake_info(entity_id).await?;
+println!("Stake amount: {}", stake_info.amount);
+println!("Stake active: {}", stake_info.is_active);
+```
+
+### Trust Score Calculation
+
+```rust
+// Calculate trust score with staking
+let trust_score = trust_manager.calculate_trust_score(entity_id).await?;
+println!("Trust score: {:.2}", trust_score);
+
+// Trust scores are influenced by:
+// - Stake amount (higher stake = higher initial trust)
+// - Historical interactions
+// - Report submissions
+// - Time decay factors
+```
+
+### Trust Report Submission
+
+```rust
+use synapse::trust::{TrustReport, TrustInteraction};
+
+// Submit trust report
+let report = TrustReport {
+    reporter_id: "reporter_entity".to_string(),
+    subject_id: "subject_entity".to_string(),
+    interaction_type: TrustInteraction::MessageExchange,
+    score: 0.8,
+    timestamp: chrono::Utc::now(),
+    details: "Successful message exchange".to_string(),
+};
+
+trust_manager.submit_trust_report(report).await?;
+```
+
+### Trust Decay Mechanism
+
+```rust
+// Trust scores decay over time without activity
+let initial_score = trust_manager.calculate_trust_score(entity_id).await?;
+
+// Simulate time passage
+tokio::time::sleep(Duration::from_secs(3600)).await; // 1 hour
+
+let decayed_score = trust_manager.calculate_trust_score(entity_id).await?;
+println!("Score decay: {:.2} -> {:.2}", initial_score, decayed_score);
+
+// Refresh trust through activity
+trust_manager.refresh_trust_through_activity(entity_id).await?;
+```
+
+### Trust Verification Workflow
+
+```rust
+// Complete trust verification workflow
+async fn verify_entity_trust(trust_manager: &TrustManager, entity_id: &str) -> Result<bool> {
+    // 1. Check if entity is registered
+    if !trust_manager.is_entity_registered(entity_id).await? {
+        return Ok(false);
+    }
+    
+    // 2. Calculate current trust score
+    let trust_score = trust_manager.calculate_trust_score(entity_id).await?;
+    
+    // 3. Check minimum trust threshold
+    const MIN_TRUST_THRESHOLD: f64 = 0.5;
+    if trust_score < MIN_TRUST_THRESHOLD {
+        return Ok(false);
+    }
+    
+    // 4. Verify stake is active
+    let stake_info = trust_manager.get_stake_info(entity_id).await?;
+    if !stake_info.is_active {
+        return Ok(false);
+    }
+    
+    Ok(true)
+}
+```
+
+## 💾 WASM Storage
+
+WASM Storage provides comprehensive browser-based storage including IndexedDB for large data persistence.
+
+### Storage Manager
+
+```rust
+use synapse::wasm::storage::WasmStorage;
+
+// Create storage manager with IndexedDB support
+let mut storage = WasmStorage::new().await?;
+
+// Initialize IndexedDB database
+storage.init_indexed_db().await?;
+```
+
+### IndexedDB Operations
+
+```rust
+// Store large data in IndexedDB
+let large_data = vec![0u8; 1024 * 1024]; // 1MB of data
+storage.store_data("large_dataset", &large_data).await?;
+
+// Retrieve data from IndexedDB
+let retrieved_data = storage.retrieve_data("large_dataset").await?;
+println!("Retrieved {} bytes", retrieved_data.len());
+
+// Store structured data
+#[derive(Serialize, Deserialize)]
+struct UserSession {
+    user_id: String,
+    session_token: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+let session = UserSession {
+    user_id: "user123".to_string(),
+    session_token: "abc123".to_string(),
+    expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+};
+
+let session_data = serde_json::to_vec(&session)?;
+storage.store_data("user_session", &session_data).await?;
+```
+
+### Storage Configuration
+
+```rust
+// Configure storage preferences
+let storage = WasmStorage::new_with_config(
+    "app_prefix",        // Key prefix for organization
+    true,               // Use localStorage
+    true,               // Use sessionStorage
+    true,               // Use IndexedDB
+).await?;
+
+// Check storage capabilities
+if storage.supports_indexed_db() {
+    println!("IndexedDB available for large data storage");
+}
+```
+
+### Data Lifecycle Management
+
+```rust
+// Check data existence
+if storage.has_data("user_preferences").await? {
+    let prefs = storage.retrieve_data("user_preferences").await?;
+    apply_user_preferences(&prefs);
+}
+
+// Remove data
+storage.remove_data("temporary_cache").await?;
+
+// Clear all data with prefix
+storage.clear_all_data().await?;
+```
+
+### Storage Quotas and Limits
+
+```rust
+// Check storage usage
+let usage_info = storage.get_storage_usage().await?;
+println!("Used storage: {} bytes", usage_info.used_bytes);
+println!("Available storage: {} bytes", usage_info.available_bytes);
+
+// Handle storage quota exceeded
+if usage_info.quota_exceeded {
+    // Clean up old data
+    storage.cleanup_old_data().await?;
+}
+```
+
+### Integration with WebRTC
+
+```rust
+// Storage integrates seamlessly with WebRTC transport
+let webrtc_transport = WasmTransport::new(config).await?;
+let storage = webrtc_transport.get_storage().await?;
+
+// Store WebRTC connection state
+let connection_state = webrtc_transport.get_connection_state().await?;
+let state_data = serde_json::to_vec(&connection_state)?;
+storage.store_data("webrtc_state", &state_data).await?;
+
+// Restore connection state after page reload
+if let Ok(state_data) = storage.retrieve_data("webrtc_state").await {
+    let connection_state: ConnectionState = serde_json::from_slice(&state_data)?;
+    webrtc_transport.restore_connection_state(connection_state).await?;
+}
 ```
 
 ## ❌ Error Handling
@@ -756,7 +1148,7 @@ pub enum ApiErrorType {
 
 ```rust
 // Retry with fallback
-async fn send_with_retry(router: &EnhancedEmrpRouter, target: &str, content: &str) -> Result<()> {
+async fn send_with_retry(router: &EnhancedSynapseRouter, target: &str, content: &str) -> Result<()> {
     let mut attempts = 0;
     let max_attempts = 3;
     
@@ -895,7 +1287,7 @@ mod tests {
     #[tokio::test]
     async fn test_message_sending() {
         let config = Config::test_config().build();
-        let router = EnhancedEmrpRouter::new(config, "test@example.com".to_string()).await.unwrap();
+        let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await.unwrap();
         
         router.register_peer("TestPeer", "peer@example.com").await.unwrap();
         
@@ -929,7 +1321,7 @@ let config = Config::builder()
     .enable_encryption(true)
     .build();
 
-let router = EnhancedEmrpRouter::new(config, "mybot@example.com".to_string()).await?;
+let router = EnhancedSynapseRouter::new(config, "mybot@example.com".to_string()).await?;
 router.start().await?;
 ```
 

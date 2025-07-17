@@ -326,7 +326,7 @@ impl LlmDiscoveryManager {
             }
         }
         
-        Err(crate::error::EmrpError::Transport(
+        Err(crate::error::SynapseError::TransportError(
             format!("Failed to connect to LLM {}", llm.entity_id)
         ).into())
     }

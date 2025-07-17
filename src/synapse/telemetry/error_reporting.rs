@@ -10,6 +10,9 @@ use std::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
+use uuid::Uuid;
+
+use crate::blockchain::serialization::UuidWrapper;
 
 /// Error source categories
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -151,7 +154,7 @@ impl ErrorTelemetry {
         
         // Create the error report
         let error = ErrorReport {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: UuidWrapper::new(Uuid::new_v4()).to_string(),
             timestamp: Utc::now(),
             source,
             severity,
@@ -340,24 +343,33 @@ impl ErrorTelemetry {
     
     /// Send a batch of errors to the remote endpoint
     #[cfg(feature = "telemetry")]
-    async fn send_batch_to_remote(&self, batch: &[ErrorReport]) -> Result<(), anyhow::Error> {
+    async fn send_batch_to_remote(&self, _batch: &[ErrorReport]) -> Result<(), anyhow::Error> {
         if let Some(endpoint) = &self.config.remote_endpoint {
-            // Serialize the batch to JSON
-            let json = serde_json::to_string(batch)?;
+            #[cfg(feature = "http")]
+            {
+                // Serialize the batch to JSON
+                let json = serde_json::to_string(_batch)?;
+                
+                // Send to remote endpoint
+                let client = reqwest::Client::new();
+                let response = client.post(endpoint)
+                    .header("Content-Type", "application/json")
+                    .body(json)
+                    .send()
+                    .await?;
+                
+                // Check for success
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body = response.text().await?;
+                    anyhow::bail!("Remote endpoint returned error: {}, {}", status, body);
+                }
+            }
             
-            // Send to remote endpoint
-            let client = reqwest::Client::new();
-            let response = client.post(endpoint)
-                .header("Content-Type", "application/json")
-                .body(json)
-                .send()
-                .await?;
-            
-            // Check for success
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await?;
-                anyhow::bail!("Remote endpoint returned error: {}, {}", status, body);
+            #[cfg(not(feature = "http"))]
+            {
+                use tracing::warn;
+                warn!("HTTP feature not enabled, cannot upload events to {}", endpoint);
             }
         }
         

@@ -4,6 +4,8 @@
 use crate::synapse::models::{ParticipantProfile, TrustBalance};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+
+use crate::blockchain::serialization::DateTimeWrapper;
 #[cfg(feature = "database")]
 use sqlx::{PgPool, Row};
 
@@ -196,7 +198,7 @@ impl Database {
             .bind(balance.available_points as i32)
             .bind(balance.staked_points as i32)
             .bind(balance.earned_lifetime as i32)
-            .bind(balance.last_activity)
+            .bind(balance.last_activity.clone().into_inner())
             .bind(balance.decay_rate)
             .execute(&self.pool)
             .await
@@ -228,7 +230,7 @@ impl Database {
                     available_points: row.get::<i32, _>("available_points") as u32,
                     staked_points: row.get::<i32, _>("staked_points") as u32,
                     earned_lifetime: row.get::<i32, _>("earned_lifetime") as u32,
-                    last_activity: row.get("last_activity"),
+                    last_activity: DateTimeWrapper::new(row.get("last_activity")),
                     decay_rate: row.get("decay_rate"),
                 };
                 Ok(Some(balance))
@@ -302,7 +304,7 @@ impl Database {
                 available_points: row.get::<i32, _>("available_points") as u32,
                 staked_points: row.get::<i32, _>("staked_points") as u32,
                 earned_lifetime: row.get::<i32, _>("earned_lifetime") as u32,
-                last_activity: row.get("last_activity"),
+                last_activity: DateTimeWrapper::new(row.get("last_activity")),
                 decay_rate: row.get("decay_rate"),
             };
             results.push(balance);

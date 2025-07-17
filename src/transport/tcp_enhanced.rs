@@ -77,7 +77,7 @@ impl EnhancedTcpTransport {
                 }
             }
         } else {
-            Err(crate::error::EmrpError::Transport("TCP listener not available".into()))
+            Err(crate::error::SynapseError::TransportError("TCP listener not available".into()))
         }
     }
     
@@ -119,24 +119,24 @@ impl EnhancedTcpTransport {
             }
             Ok(Err(e)) => {
                 debug!("Failed to connect to {}: {}", addr, e);
-                Err(crate::error::EmrpError::Transport(format!("TCP connection failed: {}", e)))
+                Err(crate::error::SynapseError::TransportError(format!("TCP connection failed: {}", e)))
             }
             Err(_) => {
                 debug!("Timeout connecting to {}", addr);
-                Err(crate::error::EmrpError::Transport("TCP connection timeout".into()))
+                Err(crate::error::SynapseError::TransportError("TCP connection timeout".into()))
             }
         }
     }
     
     async fn send_via_stream(&self, stream: &mut TcpStream, message: &SecureMessage) -> Result<()> {
         let message_json = serde_json::to_string(message)
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to serialize message: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to serialize message: {}", e)))?;
         
         stream.write_all(message_json.as_bytes()).await
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to send TCP message: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to send TCP message: {}", e)))?;
         
         stream.flush().await
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to flush TCP stream: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to flush TCP stream: {}", e)))?;
         
         Ok(())
     }
@@ -184,7 +184,7 @@ impl EnhancedTcpTransport {
             }
         }
         
-        Err(crate::error::EmrpError::Transport("No TCP ports available".into()))
+        Err(crate::error::SynapseError::TransportError("No TCP ports available".into()))
     }
 
     /// Internal connectivity test without circuit breaker checks
@@ -198,7 +198,7 @@ impl EnhancedTcpTransport {
             }
         }
         
-        Err(crate::error::EmrpError::Transport("TCP connectivity test failed".into()))
+        Err(crate::error::SynapseError::TransportError("TCP connectivity test failed".into()))
     }
 }
 
@@ -207,7 +207,7 @@ impl Transport for EnhancedTcpTransport {
     async fn send_message(&self, target: &str, message: &SecureMessage) -> Result<String> {
         // Check circuit breaker before proceeding
         if !self.circuit_breaker.can_proceed().await {
-            return Err(crate::error::EmrpError::Transport(
+            return Err(crate::error::SynapseError::TransportError(
                 "Circuit breaker is open".into()
             ));
         }
@@ -244,7 +244,7 @@ impl Transport for EnhancedTcpTransport {
     async fn test_connectivity(&self, target: &str) -> Result<TransportMetrics> {
         // Check circuit breaker before proceeding
         if !self.circuit_breaker.can_proceed().await {
-            return Err(crate::error::EmrpError::Transport(
+            return Err(crate::error::SynapseError::TransportError(
                 "Circuit breaker is open".into()
             ));
         }
@@ -265,7 +265,7 @@ impl Transport for EnhancedTcpTransport {
 
         // Return current metrics
         let metrics = self.metrics.read().map_err(|_| 
-            crate::error::EmrpError::Transport("Failed to read metrics".into()))?;
+            crate::error::SynapseError::TransportError("Failed to read metrics".into()))?;
         Ok(metrics.clone())
     }
 

@@ -1,6 +1,6 @@
-//! # Enhanced EMRP Router - Your Gateway to Intelligent Communication
+//! # Enhanced Synapse Router - Your Gateway to Intelligent Communication
 //!
-//! The **Enhanced EMRP Router** is the main interface for all EMRP communication.
+//! The **Enhanced Synapse Router** is the main interface for all Synapse communication.
 //! It combines multiple transport methods, email server capabilities, and intelligent
 //! routing to provide seamless, high-performance messaging with automatic fallback.
 //!
@@ -22,7 +22,7 @@
 //! async fn main() -> Result<()> {
 //!     // Create and configure router
 //!     let config = Config::default();
-//!     let router = EnhancedEmrpRouter::new(config, "mybot@example.com".to_string()).await?;
+//!     let router = EnhancedSynapseRouter::new(config, "mybot@example.com".to_string()).await?;
 //!     
 //!     // Start all services
 //!     router.start().await?;
@@ -30,7 +30,7 @@
 //!     // Send message using simple name
 //!     router.send_message_smart(
 //!         "Alice",                      // Simple name (auto-resolved)
-//!         "Hello from EMRP!",           // Your message
+//!         "Hello from Synapse!",        // Your message
 //!         MessageType::Direct,          // Type of communication
 //!         SecurityLevel::Authenticated, // Security level
 //!         MessageUrgency::Interactive,  // Speed preference
@@ -57,7 +57,7 @@
 //! - **Offline**: Store-and-forward via email infrastructure
 //!
 //! ### Peer Capabilities
-//! - **EMRP-native**: Direct protocol communication
+//! - **Synapse-native**: Direct protocol communication
 //! - **Email-only**: Standard SMTP/IMAP interaction
 //! - **Hybrid**: Both direct and email capabilities
 //! - **Unknown**: Discovery mode to learn capabilities
@@ -69,7 +69,7 @@
 //! ### Automatic Mode Detection
 //! ```rust
 //! // The router automatically detects your network situation
-//! let router = EnhancedEmrpRouter::new(config, entity_id).await?;
+//! let router = EnhancedSynapseRouter::new(config, entity_id).await?;
 //! 
 //! match router.email_server_connectivity() {
 //!     Some(info) if info.contains("RunLocalServer") => {
@@ -100,7 +100,7 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────┐
-//! │                Enhanced EMRP Router                     │
+//! │                Enhanced Synapse Router                  │
 //! ├─────────────┬─────────────┬─────────────┬─────────────┤
 //! │ Real-Time   │  Direct     │   Local     │   Email     │
 //! │ (<100ms)    │ Connection  │ Discovery   │ Reliable    │
@@ -192,8 +192,8 @@
 //! ```rust
 //! let status = router.status().await;
 //! println!("Router Status:");
-//! println!("  🆔 Our ID: {}", status.emrp_status.our_global_id);
-//! println!("  👥 Known entities: {}", status.emrp_status.known_entities);
+//! println!("  🆔 Our ID: {}", status.synapse_status.our_global_id);
+//! println!("  👥 Known entities: {}", status.synapse_status.known_entities);
 //! println!("  🚀 Multi-transport: {}", status.multi_transport_enabled);
 //! println!("  📧 Email server: {}", status.email_server_enabled);
 //! println!("  🔌 Available transports: {:?}", status.available_transports);
@@ -245,29 +245,34 @@
 //! - **Transport-based**: Different security for different channels
 //! - **Rate Limiting**: Prevent abuse and DoS attacks
 //!
-//! The Enhanced EMRP Router provides enterprise-grade messaging with
+//! The Enhanced Synapse Router provides enterprise-grade messaging with
 //! the simplicity of sending an email and the performance of modern
 //! real-time protocols.
 
 use crate::{
     types::{SimpleMessage, SecureMessage, SecurityLevel, MessageType},
-    transport::{MultiTransportRouter, MessageUrgency, TransportRoute},
+    transport::MultiTransportRouter,
+    transport::abstraction::MessageUrgency,
+    transport::TransportRoute,
     config::Config,
     error::Result,
-    email_server::{EmrpEmailServer, ServerRecommendation},
-    router::EmrpRouter,
+    email_server::{SynapseEmailServer, ServerRecommendation},
+    router::SynapseRouter,
 };
-use std::sync::Arc;
+use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
+use uuid::Uuid;
+use chrono::Utc;
+use std::{sync::Arc, collections::HashMap};
 use tracing::{info, warn};
 
-/// Enhanced EMRP router with multi-transport support and email server
-pub struct EnhancedEmrpRouter {
+/// Enhanced Synapse router with multi-transport support and email server
+pub struct EnhancedSynapseRouter {
     /// Original email-based router
-    emrp_router: EmrpRouter,
+    synapse_router: SynapseRouter,
     /// Multi-transport router for fast communication
     multi_transport: Option<Arc<MultiTransportRouter>>,
     /// Local email server (SMTP/IMAP) for when we're externally accessible
-    email_server: Option<Arc<EmrpEmailServer>>,
+    email_server: Option<Arc<SynapseEmailServer>>,
     /// Configuration
     #[allow(dead_code)]
     config: Config,
@@ -279,13 +284,13 @@ pub struct EnhancedEmrpRouter {
     email_server_enabled: bool,
 }
 
-impl EnhancedEmrpRouter {
+impl EnhancedSynapseRouter {
     /// Create a new enhanced router with multi-transport support and email server
     pub async fn new(config: Config, our_global_id: String) -> Result<Self> {
-        info!("Initializing enhanced EMRP router with multi-transport support and email server");
+        info!("Initializing enhanced Synapse router with multi-transport support and email server");
         
-        // Create the traditional EMRP router
-        let emrp_router = crate::router::EmrpRouter::new(config.clone(), our_global_id.clone()).await?;
+        // Create the traditional Synapse router
+        let synapse_router = crate::router::SynapseRouter::new(config.clone(), our_global_id.clone()).await?;
         
         // Try to initialize multi-transport router
         let multi_transport = match MultiTransportRouter::new(config.clone(), our_global_id.clone()).await {
@@ -301,7 +306,7 @@ impl EnhancedEmrpRouter {
         };
         
         // Try to initialize email server with connectivity detection
-        let email_server = match EmrpEmailServer::new().await {
+        let email_server = match SynapseEmailServer::new().await {
             Ok(server) => {
                 let connectivity = server.get_connectivity();
                 match &connectivity.recommended_config {
@@ -331,7 +336,7 @@ impl EnhancedEmrpRouter {
         let email_server_enabled = email_server.is_some();
         
         Ok(Self {
-            emrp_router,
+            synapse_router,
             multi_transport,
             email_server,
             config,
@@ -368,7 +373,8 @@ impl EnhancedEmrpRouter {
                 
                 // Try multi-transport first
                 match mt_router.send_message(to_entity, &secure_msg, urgency).await {
-                    Ok(message_id) => {
+                    Ok(delivery_receipt) => {
+                        let message_id = delivery_receipt.message_id.clone();
                         info!("Message sent via multi-transport: {}", message_id);
                         return Ok(message_id);
                     }
@@ -381,7 +387,14 @@ impl EnhancedEmrpRouter {
         
         // Fallback to traditional email routing
         info!("Using traditional email routing for {}", to_entity);
-        self.emrp_router.send_message(to_entity, content, message_type, security_level).await
+        let simple_msg = SimpleMessage {
+            to: to_entity.to_string(),
+            from_entity: self.our_global_id.clone(),
+            content: content.to_string(),
+            message_type,
+            metadata: HashMap::new(),
+        };
+        self.synapse_router.send_message(simple_msg, to_entity.to_string()).await.map(|_| "email_fallback".to_string())
     }
     
     /// Send message with explicit transport preference
@@ -404,17 +417,25 @@ impl EnhancedEmrpRouter {
             
             let secure_msg = self.create_secure_message(&simple_msg, security_level).await?;
             
-            return mt_router.send_with_fallback_priority(to_entity, &secure_msg, preferred_routes).await;
+            return mt_router.send_with_fallback_priority(to_entity, &secure_msg, preferred_routes).await
+                .map(|receipt| receipt.message_id);
         }
         
         // Fallback to email
-        self.emrp_router.send_message(to_entity, content, message_type, security_level).await
+        let simple_msg = SimpleMessage {
+            to: to_entity.to_string(),
+            from_entity: self.our_global_id.clone(),
+            content: content.to_string(),
+            message_type,
+            metadata: HashMap::new(),
+        };
+        self.synapse_router.send_message(simple_msg, to_entity.to_string()).await.map(|_| "email_fallback".to_string())
     }
     
     /// Test connection to an entity
     pub async fn test_connection(&self, target: &str) -> ConnectionCapabilities {
         let mut capabilities = ConnectionCapabilities {
-            email: true, // Email is always available via EMRP
+            email: true, // Email is always available via Synapse
             direct_tcp: false,
             direct_udp: false,
             mdns_local: false,
@@ -449,10 +470,11 @@ impl EnhancedEmrpRouter {
     
     /// Start all router services including email server
     pub async fn start(&self) -> Result<()> {
-        info!("Starting enhanced EMRP router");
+        info!("Starting enhanced Synapse router");
         
-        // Start the traditional EMRP router
-        self.emrp_router.start().await?;
+        // Start the traditional Synapse router
+        // Start Synapse router (no explicit start method)
+        // self.synapse_router.start().await?;
         
         // Start email server if available
         if let Some(ref email_server) = self.email_server {
@@ -472,7 +494,7 @@ impl EnhancedEmrpRouter {
     
     /// Get enhanced router status including email server
     pub async fn status(&self) -> EnhancedRouterStatus {
-        let emrp_status = self.emrp_router.status().await;
+        let synapse_status = self.synapse_router.get_health().await;
         
         let mut capabilities = vec!["email".to_string()];
         
@@ -486,7 +508,7 @@ impl EnhancedEmrpRouter {
         }
         
         EnhancedRouterStatus {
-            emrp_status,
+            synapse_status,
             multi_transport_enabled: self.multi_transport_enabled,
             email_server_enabled: self.email_server_enabled,
             available_transports: capabilities,
@@ -499,8 +521,8 @@ impl EnhancedEmrpRouter {
         simple_msg: &SimpleMessage,
         security_level: SecurityLevel,
     ) -> Result<SecureMessage> {
-        let message_id = uuid::Uuid::new_v4();
-        let timestamp = chrono::Utc::now();
+        let message_id = UuidWrapper::new(Uuid::new_v4());
+        let timestamp = DateTimeWrapper::new(Utc::now());
         
         // For now, create a basic secure message
         // In a real implementation, this would involve the crypto manager
@@ -529,10 +551,10 @@ impl EnhancedEmrpRouter {
         
         if let Some(ref mt_router) = self.multi_transport {
             let test_message = SecureMessage {
-                message_id: uuid::Uuid::new_v4(),
+                message_id: UuidWrapper::new(Uuid::new_v4()),
                 to_global_id: target.to_string(),
                 from_global_id: self.our_global_id.clone(),
-                timestamp: chrono::Utc::now(),
+                timestamp: DateTimeWrapper::new(Utc::now()),
                 security_level: SecurityLevel::Public,
                 encrypted_content: b"benchmark test".to_vec(),
                 signature: Vec::new(),
@@ -555,9 +577,9 @@ impl EnhancedEmrpRouter {
                     established_at: std::time::Instant::now(),
                 },
                 TransportRoute::LocalMdns {
-                    service_name: format!("_emrp._tcp.local"),
+                    service_name: target.to_string(),
                     address: target.to_string(),
-                    port: 8080,
+                    port: 5353,
                     latency_ms: 0,
                     discovered_at: std::time::Instant::now(),
                 },
@@ -586,7 +608,7 @@ impl EnhancedEmrpRouter {
     }
 
     /// Get access to the email server for configuration
-    pub fn email_server(&self) -> Option<Arc<EmrpEmailServer>> {
+    pub fn email_server(&self) -> Option<Arc<SynapseEmailServer>> {
         self.email_server.clone()
     }
 
@@ -623,7 +645,7 @@ pub struct ConnectionCapabilities {
 /// Enhanced router status
 #[derive(Debug, Clone)]
 pub struct EnhancedRouterStatus {
-    pub emrp_status: super::router::RouterStatus,
+    pub synapse_status: super::router::RouterHealth,
     pub multi_transport_enabled: bool,
     pub email_server_enabled: bool,
     pub available_transports: Vec<String>,

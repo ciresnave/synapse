@@ -1,9 +1,10 @@
 // Synapse Trust System - Models for dual trust architecture
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use dashmap::DashMap;
+use crate::synapse::blockchain::serialization::DateTimeWrapper;
 
 /// Comprehensive trust information for a participant
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -33,7 +34,7 @@ pub struct EntityTrustRatings {
     /// Aggregated statistics
     pub average_received: f64,
     pub total_ratings_received: u32,
-    pub last_updated: DateTime<Utc>,
+    pub last_updated: DateTimeWrapper,
 }
 
 impl Default for EntityTrustRatings {
@@ -43,7 +44,7 @@ impl Default for EntityTrustRatings {
             given_ratings: DashMap::new(),
             average_received: 0.0,
             total_ratings_received: 0,
-            last_updated: Utc::now(),
+            last_updated: DateTimeWrapper::new(Utc::now()),
         }
     }
 }
@@ -54,7 +55,7 @@ pub struct DirectTrustScore {
     pub score: u8, // 0-100
     pub category: TrustCategory,
     pub given_by: String,
-    pub given_at: DateTime<Utc>,
+    pub given_at: DateTimeWrapper,
     pub comment: Option<String>,
     pub relationship_context: Option<super::participant::RelationshipType>,
 }
@@ -85,7 +86,7 @@ pub struct NetworkTrustRating {
     pub recent_actions: Vec<VerifiableActionSummary>,
     
     /// Last score calculation
-    pub last_calculated: DateTime<Utc>,
+    pub last_calculated: DateTimeWrapper,
 }
 
 /// Trust point balance for staking system
@@ -96,7 +97,7 @@ pub struct TrustBalance {
     pub available_points: u32, // Not currently staked
     pub staked_points: u32,
     pub earned_lifetime: u32,
-    pub last_activity: DateTime<Utc>,
+    pub last_activity: DateTimeWrapper,
     pub decay_rate: f64, // Percentage decay per month (default 2%)
 }
 
@@ -127,7 +128,7 @@ pub struct ParticipationMetrics {
     // Account metrics
     pub account_age: chrono::Duration,
     pub days_active: u64,
-    pub last_active: DateTime<Utc>,
+    pub last_active: DateTimeWrapper,
 }
 
 /// Summary of a verifiable action (from blockchain)
@@ -136,7 +137,7 @@ pub struct VerifiableActionSummary {
     pub action_id: String,
     pub action_type: ActionType,
     pub impact_score: i32,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: DateTimeWrapper,
     pub blockchain_hash: String,
     pub consensus_score: f64, // How strong the consensus was
 }
@@ -174,7 +175,7 @@ pub struct NetworkProximity {
     pub propagated_trust: HashMap<String, f64>,
     
     /// Last calculation timestamp
-    pub last_calculated: DateTime<Utc>,
+    pub last_calculated: DateTimeWrapper,
 }
 
 /// Identity verification information
@@ -182,13 +183,13 @@ pub struct NetworkProximity {
 pub struct IdentityVerification {
     pub verification_level: VerificationLevel,
     pub verification_method: Option<VerificationMethod>,
-    pub verified_at: Option<DateTime<Utc>>,
+    pub verified_at: Option<DateTimeWrapper>,
     pub verified_by: Option<String>, // Verifier participant ID
-    pub verification_expires: Option<DateTime<Utc>>,
+    pub verification_expires: Option<DateTimeWrapper>,
     pub verified_claims: Vec<VerifiedClaim>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum VerificationLevel {
     Unverified,   // No verification
     Basic,        // Basic email/domain verification
@@ -211,8 +212,8 @@ pub enum VerificationMethod {
 pub struct VerifiedClaim {
     pub claim_type: ClaimType,
     pub claim_value: String,
-    pub verified_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub verified_at: DateTimeWrapper,
+    pub expires_at: Option<DateTimeWrapper>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,7 +253,7 @@ impl TrustBalance {
             available_points: 0,
             staked_points: 0,
             earned_lifetime: 0,
-            last_activity: Utc::now(),
+            last_activity: DateTimeWrapper::new(Utc::now()),
             decay_rate: 0.02, // 2% per month
         }
     }
@@ -262,7 +263,7 @@ impl TrustBalance {
         self.total_points += points;
         self.available_points += points;
         self.earned_lifetime += points;
-        self.last_activity = Utc::now();
+        self.last_activity = DateTimeWrapper::new(Utc::now());
         
         tracing::info!(
             participant_id = %self.participant_id,
@@ -292,8 +293,8 @@ impl TrustBalance {
     
     /// Apply time-based decay to prevent hoarding
     pub fn apply_decay(&mut self) -> u32 {
-        let now = Utc::now();
-        let days_since_activity = (now - self.last_activity).num_days();
+        let now = DateTimeWrapper::new(Utc::now());
+        let days_since_activity = (now.into_inner() - self.last_activity.clone().into_inner()).num_days();
         
         if days_since_activity > 30 {
             let months_elapsed = days_since_activity as f64 / 30.0;
@@ -364,7 +365,7 @@ impl NetworkTrustRating {
         
         // Keep score in valid range
         self.network_score = score.max(0.0).min(100.0);
-        self.last_calculated = Utc::now();
+        self.last_calculated = DateTimeWrapper::new(Utc::now());
         
         self.network_score
     }
@@ -377,7 +378,7 @@ impl Default for NetworkTrustRating {
             trust_balance: TrustBalance::new("".to_string()),
             participation_metrics: ParticipationMetrics::default(),
             recent_actions: Vec::new(),
-            last_calculated: Utc::now(),
+            last_calculated: DateTimeWrapper::new(Utc::now()),
         }
     }
 }

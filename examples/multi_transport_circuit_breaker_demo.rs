@@ -1,17 +1,24 @@
 //! Multi-Transport Circuit Breaker Integration Demo
 //!
 //! This example demonstrates the circuit breaker functionality
-//! integrated across multiple transport types: mDNS, TCP, and Email.
+//! integrated across multiple transport types: mDNS and TCP.
 
 use synapse::{
     transport::{
         Transport, 
-        mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig},
-        tcp_enhanced::EnhancedTcpTransport,
-        email_enhanced::EmailEnhancedTransport,
+        EnhancedMdnsTransport, MdnsConfig,
+        EnhancedTcpTransport,
+        TransportTarget,
+        abstraction::Transport as AbstractTransport,
     },
-    types::{SecureMessage, SecurityLevel, EmailConfig, SmtpConfig, ImapConfig},
+    types::{SecureMessage, SecurityLevel},
     error::Result,
+};
+
+#[cfg(feature = "email")]
+use synapse::{
+    transport::EmailEnhancedTransport,
+    types::{EmailConfig, SmtpConfig, ImapConfig},
 };
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
@@ -53,6 +60,7 @@ async fn main() -> Result<()> {
     
     let tcp_transport = EnhancedTcpTransport::new(8081).await?;
     
+    #[cfg(feature = "email")]
     let email_transport = EmailEnhancedTransport::new(email_config).await?;
     
     // Start mDNS service
@@ -63,11 +71,13 @@ async fn main() -> Result<()> {
     // Get circuit breaker references for monitoring
     let mdns_cb = mdns_transport.get_circuit_breaker();
     let tcp_cb = tcp_transport.get_circuit_breaker();
+    #[cfg(feature = "email")]
     let email_cb = email_transport.get_circuit_breaker();
     
     // Subscribe to circuit breaker events for all transports
     let mut mdns_events = mdns_cb.subscribe_events();
     let mut tcp_events = tcp_cb.subscribe_events();
+    #[cfg(feature = "email")]
     let mut email_events = email_cb.subscribe_events();
     
     // Spawn event monitors for each transport
@@ -117,6 +127,7 @@ async fn main() -> Result<()> {
         }
     });
     
+    #[cfg(feature = "email")]
     let email_monitor = tokio::spawn(async move {
         info!("📡 Starting Email circuit breaker event monitor");
         while let Ok(event) = email_events.recv().await {
@@ -151,16 +162,20 @@ async fn main() -> Result<()> {
         SecurityLevel::Public,
     );
     
+    /* TODO: mDNS transport is temporarily disabled
     // Test mDNS transport
     info!("🔍 Testing mDNS transport circuit breaker...");
     for i in 1..=5 {
         info!("📡 mDNS Attempt {} - testing connectivity", i);
-        match mdns_transport.test_connectivity("non-existent-peer").await {
+        match mdns_transport.test_connectivity(
+            &TransportTarget::new("non-existent-peer".to_string())
+        ).await {
             Ok(_) => info!("✅ mDNS connectivity test succeeded"),
             Err(e) => warn!("❌ mDNS connectivity test failed: {}", e),
         }
         sleep(Duration::from_millis(500)).await;
     }
+    */
     
     // Test TCP transport
     info!("🔍 Testing TCP transport circuit breaker...");
@@ -174,35 +189,54 @@ async fn main() -> Result<()> {
     }
     
     // Test Email transport
-    info!("🔍 Testing Email transport circuit breaker...");
-    for i in 1..=5 {
-        info!("📡 Email Attempt {} - testing connectivity", i);
-        match email_transport.test_connectivity("nonexistent@example.com").await {
-            Ok(_) => info!("✅ Email connectivity test succeeded"),
-            Err(e) => warn!("❌ Email connectivity test failed: {}", e),
+    #[cfg(feature = "email")]
+    {
+        info!("🔍 Testing Email transport circuit breaker...");
+        for i in 1..=5 {
+            info!("📡 Email Attempt {} - testing connectivity", i);
+            match email_transport.test_connectivity(
+            &TransportTarget::new("nonexistent@example.com".to_string())
+        ).await {
+                Ok(_) => info!("✅ Email connectivity test succeeded"),
+                Err(e) => warn!("❌ Email connectivity test failed: {}", e),
+            }
+            sleep(Duration::from_millis(500)).await;
         }
-        sleep(Duration::from_millis(500)).await;
     }
     
     // Test message sending through circuit breakers
     info!("📤 Testing message sending with circuit breaker protection");
     
+    /* TODO: mDNS transport is temporarily disabled
     // Try mDNS
-    match mdns_transport.send_message_with_breaker("non-existent-peer", &test_message, None).await {
+    match mdns_transport.send_message(
+        &TransportTarget::new("non-existent-peer".to_string()),
+        &test_message
+    ).await {
         Ok(_) => info!("✅ mDNS message sent successfully"),
         Err(e) => warn!("❌ mDNS message sending failed: {}", e),
     }
+    */
     
     // Try TCP
-    match tcp_transport.send_message_with_breaker("192.168.999.999:8080", &test_message, None).await {
+    match tcp_transport.send_message(
+        "192.168.999.999:8080",
+        &test_message
+    ).await {
         Ok(_) => info!("✅ TCP message sent successfully"),
         Err(e) => warn!("❌ TCP message sending failed: {}", e),
     }
     
     // Try Email
-    match email_transport.send_message_with_breaker("nonexistent@example.com", &test_message, None).await {
-        Ok(_) => info!("✅ Email message sent successfully"),
-        Err(e) => warn!("❌ Email message sending failed: {}", e),
+    #[cfg(feature = "email")]
+    {
+        match email_transport.send_message(
+            &TransportTarget::new("nonexistent@example.com".to_string()),
+            &test_message
+        ).await {
+            Ok(_) => info!("✅ Email message sent successfully"),
+            Err(e) => warn!("❌ Email message sending failed: {}", e),
+        }
     }
     
     // Display final statistics
@@ -220,10 +254,13 @@ async fn main() -> Result<()> {
           tcp_stats.total_requests, tcp_stats.failure_count, 
           tcp_stats.success_count, tcp_stats.rejection_count);
     
-    let email_stats = email_transport.get_circuit_breaker_stats();
-    info!("  Email: {} requests, {} failures, {} successes, {} rejections", 
-          email_stats.total_requests, email_stats.failure_count, 
-          email_stats.success_count, email_stats.rejection_count);
+    #[cfg(feature = "email")]
+    {
+        let email_stats = email_transport.get_circuit_breaker_stats();
+        info!("  Email: {} requests, {} failures, {} successes, {} rejections", 
+              email_stats.total_requests, email_stats.failure_count, 
+              email_stats.success_count, email_stats.rejection_count);
+    }
     
     info!("🏁 Multi-Transport Circuit Breaker Demo completed successfully!");
     info!("💡 Key benefits demonstrated:");
@@ -236,6 +273,7 @@ async fn main() -> Result<()> {
     // Clean up monitors
     mdns_monitor.abort();
     tcp_monitor.abort();
+    #[cfg(feature = "email")]
     email_monitor.abort();
     
     Ok(())

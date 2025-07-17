@@ -15,7 +15,7 @@
 
 ```rust
 // Check if basic discovery is working
-async fn diagnose_basic_discovery(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn diagnose_basic_discovery(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Test local name resolution first
     match router.resolve_local_name("Alice") {
         Some(global_id) => {
@@ -103,7 +103,7 @@ nslookup alice.company.com
 **Diagnostic Steps:**
 
 ```rust
-async fn diagnose_false_positives(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn diagnose_false_positives(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     let lookup = ContactLookupRequest {
         name: "John".to_string(),
         hints: vec![
@@ -206,7 +206,7 @@ DiscoveryMethod::DirectoryLookup {
 
 ```rust
 async fn diagnose_contact_requests(
-    router: &EnhancedEmrpRouter,
+    router: &EnhancedSynapseRouter,
     request_id: &str
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Check request status
@@ -302,7 +302,7 @@ if router.send_contact_request(&target, message, permissions).await.is_err() {
 **Diagnostic Steps:**
 
 ```rust
-async fn diagnose_performance(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn diagnose_performance(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Instant;
     
     let start = Instant::now();
@@ -401,7 +401,7 @@ router.configure_discovery_cache(DiscoveryCacheConfig {
 ### Debug Mode Discovery
 
 ```rust
-async fn debug_discovery_process(router: &EnhancedEmrpRouter, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn debug_discovery_process(router: &EnhancedSynapseRouter, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Enable debug logging
     router.set_debug_mode(true).await?;
     
@@ -449,7 +449,7 @@ async fn debug_discovery_process(router: &EnhancedEmrpRouter, name: &str) -> Res
 ### Network Connectivity Tester
 
 ```rust
-async fn test_network_connectivity(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_network_connectivity(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing network connectivity...");
     
     // Test basic network access
@@ -497,7 +497,7 @@ async fn test_network_connectivity(router: &EnhancedEmrpRouter) -> Result<(), Bo
 ### Discovery Method Benchmark
 
 ```rust
-async fn benchmark_discovery_methods(router: &EnhancedEmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
+async fn benchmark_discovery_methods(router: &EnhancedSynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
     let test_cases = vec![
         ("Known contact", "Alice", vec![ContactHint::Domain("company.com".to_string())]),
         ("Unknown contact", "RandomPerson", vec![ContactHint::Domain("company.com".to_string())]),
@@ -568,7 +568,7 @@ pub struct MethodMetrics {
     pub error_rate: f64,
 }
 
-impl EnhancedEmrpRouter {
+impl EnhancedSynapseRouter {
     pub async fn get_discovery_metrics(&self) -> Result<DiscoveryMetrics, Box<dyn std::error::Error>> {
         // Implementation would gather metrics from internal counters
         todo!()

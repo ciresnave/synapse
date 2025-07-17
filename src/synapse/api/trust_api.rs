@@ -4,7 +4,9 @@ use crate::synapse::models::trust::TrustCategory;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, debug};
-use uuid;
+use uuid::Uuid;
+use chrono::Utc;
+use crate::synapse::blockchain::serialization::UuidWrapper;
 
 /// HTTP API for trust system operations
 pub struct TrustAPI {
@@ -169,10 +171,10 @@ impl TrustAPI {
             category: request.category,
             stake_amount: request.stake_amount,
             status: "pending".to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: Utc::now().to_rfc3339(),
         };
-
-        Ok(APIResponse {
+ 
+         Ok(APIResponse {
             success: true,
             data: Some(response),
             error: None,
@@ -218,7 +220,7 @@ impl TrustAPI {
                 available_points: balance.available_points,
                 staked_points: balance.staked_points,
                 earned_lifetime: balance.earned_lifetime,
-                last_activity: balance.last_activity.to_rfc3339(),
+                last_activity: balance.last_activity.clone().into_inner().to_rfc3339(),
             },
             recent_activity,
         };
@@ -274,7 +276,7 @@ impl TrustAPI {
         }
 
         // Perform staking (placeholder implementation)
-        let stake_id = format!("stake_{}", uuid::Uuid::new_v4().to_string());
+        let stake_id = format!("stake_{}", UuidWrapper::new(Uuid::new_v4()).to_string());
         info!("Staking {} trust points for participant {} (placeholder)", request.amount, participant_id);
 
         info!("Trust points staked successfully: {} for participant: {}", 
@@ -330,7 +332,7 @@ impl TrustAPI {
         }
 
         // Perform unstaking (placeholder implementation)
-        let unstake_id = format!("unstake_{}", uuid::Uuid::new_v4().to_string());
+        let unstake_id = format!("unstake_{}", UuidWrapper::new(Uuid::new_v4()).to_string());
         info!("Unstaking {} trust points for participant {} (placeholder)", request.amount, participant_id);
 
         info!("Trust points unstaked successfully: {} for participant: {}", 

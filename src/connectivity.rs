@@ -4,19 +4,22 @@
 //! IPv6-only networks, and other connectivity challenges.
 
 use crate::{
-    router::EmrpRouter, 
+    router::SynapseRouter, 
     config::Config,
-    types::{MessageType, SecurityLevel},
+    types::{MessageType, SecurityLevel, SimpleMessage},
     error::Result,
 };
+use crate::synapse::blockchain::serialization::UuidWrapper;
+use uuid::Uuid;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{info, warn, debug, error};
+use uuid;
 
 /// Network connectivity assistant that helps entities communicate
 /// regardless of their network constraints
 pub struct ConnectivityManager {
-    router: EmrpRouter,
+    router: SynapseRouter,
     polling_interval: Duration,
     adaptive_polling: bool,
     backup_email_providers: Vec<EmailProviderConfig>,
@@ -36,7 +39,7 @@ pub struct EmailProviderConfig {
 
 impl ConnectivityManager {
     /// Create a new connectivity manager
-    pub fn new(router: EmrpRouter) -> Self {
+    pub fn new(router: SynapseRouter) -> Self {
         Self {
             router,
             polling_interval: Duration::from_secs(30), // Default 30 seconds
@@ -128,9 +131,28 @@ impl ConnectivityManager {
         message_type: MessageType,
         security_level: SecurityLevel,
     ) -> Result<String> {
+        use std::collections::HashMap;
+        
+        // Generate a unique message ID for tracking
+        let message_id = UuidWrapper::new(Uuid::new_v4()).to_string();
+        
+        // Create the message
+        let simple_msg = SimpleMessage {
+            to: to_entity.to_string(),
+            from_entity: self.router.get_our_global_id().to_string(),
+            content: content.to_string(),
+            message_type,
+            metadata: {
+                let mut meta = HashMap::new();
+                meta.insert("message_id".to_string(), message_id.clone());
+                meta.insert("security_level".to_string(), security_level.to_string());
+                meta
+            },
+        };
+        
         // Try primary provider first
-        match self.router.send_message(to_entity, content, message_type.clone(), security_level.clone()).await {
-            Ok(message_id) => {
+        match self.router.send_message(simple_msg.clone(), to_entity.to_string()).await {
+            Ok(_) => {
                 info!("Message sent successfully via primary provider");
                 return Ok(message_id);
             }
@@ -145,10 +167,10 @@ impl ConnectivityManager {
             
             // In a real implementation, temporarily switch providers
             // For demonstration, we'll just retry with current provider
-            match self.router.send_message(to_entity, content, message_type.clone(), security_level.clone()).await {
-                Ok(message_id) => {
+            match self.router.send_message(simple_msg.clone(), to_entity.to_string()).await {
+                Ok(_) => {
                     info!("Message sent successfully via backup provider: {}", provider.name);
-                    return Ok(message_id);
+                    return Ok(message_id.clone());
                 }
                 Err(e) => {
                     warn!("Backup provider {} failed: {}", provider.name, e);
@@ -156,7 +178,7 @@ impl ConnectivityManager {
             }
         }
 
-        Err(crate::error::EmrpError::Network("All email providers failed".to_string()))
+        Err(crate::error::SynapseError::NetworkError("All email providers failed".to_string()))
     }
 
     /// Default backup email providers that work well with NAT/IPv6
@@ -348,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn test_network_constraint_detection() {
         let config = Config::default_for_entity("test", "tool");
-        let router = EmrpRouter::new(config, "test@example.com".to_string()).await.unwrap();
+        let router = SynapseRouter::new(config, "test@example.com".to_string()).await.unwrap();
         let connectivity_manager = ConnectivityManager::new(router);
         
         let constraints = connectivity_manager.detect_network_constraints().await;

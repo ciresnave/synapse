@@ -4,6 +4,7 @@ use synapse::{
     email_server::{ConnectivityDetector, create_test_auth_handler},
     types::{SecureMessage, SecurityLevel},
     error::Result,
+    synapse::blockchain::serialization::{UuidWrapper, DateTimeWrapper},
 };
 use tokio::time::{sleep, Duration};
 use tracing::{info, Level};
@@ -73,12 +74,12 @@ async fn main() -> Result<()> {
     // Step 4: Create a test message to demonstrate the system
     info!("📨 Creating test EMRP message...");
     let test_message = SecureMessage {
-        message_id: Uuid::new_v4(),
+        message_id: UuidWrapper(Uuid::new_v4()),
         to_global_id: "test@example.com".to_string(),
-        from_global_id: "sender@emrp.local".to_string(),
+        from_global_id: "sender@synapse.local".to_string(),
         encrypted_content: "Hello from EMRP Email Server!".as_bytes().to_vec(),
         signature: vec![],
-        timestamp: Utc::now(),
+        timestamp: DateTimeWrapper(Utc::now()),
         security_level: SecurityLevel::Public,
         routing_path: vec![],
         metadata: HashMap::new(),

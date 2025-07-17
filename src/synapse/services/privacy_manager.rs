@@ -1,14 +1,29 @@
 use crate::synapse::models::DiscoverabilityLevel;
-use crate::synapse::storage::{Database, Cache};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use tracing::{info, debug, warn};
+use uuid::Uuid;
+use crate::blockchain::serialization::UuidWrapper;
+
+// Feature-gated storage imports
+#[cfg(feature = "database")]
+use crate::synapse::storage::Database;
+#[cfg(feature = "cache")]
+use crate::synapse::storage::Cache;
 
 /// Privacy management service for the Synapse network
+#[cfg(all(feature = "database", feature = "cache"))]
 pub struct PrivacyManager {
     database: Database,
     cache: Cache,
+    /// Privacy policies cached by participant ID
+    privacy_cache: HashMap<String, PrivacyPolicy>,
+}
+
+/// Simplified privacy manager when storage features are not available
+#[cfg(not(all(feature = "database", feature = "cache")))]
+pub struct PrivacyManager {
     /// Privacy policies cached by participant ID
     privacy_cache: HashMap<String, PrivacyPolicy>,
 }
@@ -65,6 +80,7 @@ pub enum ContactApproval {
     RateLimited,
 }
 
+#[cfg(all(feature = "database", feature = "cache"))]
 impl PrivacyManager {
     pub fn new(database: Database, cache: Cache) -> Self {
         Self {
@@ -297,7 +313,7 @@ impl PrivacyManager {
         violation_type: PrivacyViolationType,
         _description: String,
     ) -> Result<String> {
-        let report_id = uuid::Uuid::new_v4().to_string();
+        let report_id = UuidWrapper::new(Uuid::new_v4()).to_string();
         
         warn!("Privacy violation reported: {} by {} against {}", 
               violation_type, reporter_id, violator_id);
@@ -306,6 +322,74 @@ impl PrivacyManager {
         // and potentially trigger automated responses
 
         Ok(report_id)
+    }
+}
+
+#[cfg(not(all(feature = "database", feature = "cache")))]
+impl PrivacyManager {
+    pub fn new() -> Self {
+        Self {
+            privacy_cache: HashMap::new(),
+        }
+    }
+
+    /// Check if a contact request should be allowed (simplified version without storage)
+    pub async fn can_contact(
+        &self,
+        _from_id: &str,
+        _to_id: &str,
+        _request: &ContactRequest,
+    ) -> Result<ContactApproval> {
+        // Default policy: allow all contacts when storage is not available
+        Ok(ContactApproval::Approved)
+    }
+
+    /// Get effective privacy policy for a participant (simplified version)
+    pub async fn get_privacy_policy(&self, participant_id: &str) -> Result<PrivacyPolicy> {
+        // Check cache first
+        if let Some(cached) = self.privacy_cache.get(participant_id) {
+            return Ok(cached.clone());
+        }
+
+        // Return default policy when storage is not available
+        let policy = PrivacyPolicy {
+            participant_id: participant_id.to_string(),
+            discoverability: DiscoverabilityLevel::Public,
+            contact_filtering: ContactFiltering {
+                allow_anonymous: true,
+                require_introduction: false,
+                trust_threshold: 0.0,
+                rate_limits: RateLimits {
+                    max_contacts_per_hour: 10,
+                    max_contacts_per_day: 50,
+                    cooldown_period_seconds: 300,
+                },
+                blocked_domains: vec![],
+                allowed_domains: vec![],
+            },
+            data_sharing: DataSharingPolicy {
+                share_activity_status: true,
+                share_capabilities: true,
+                share_organization: true,
+                share_location: false,
+                share_trust_metrics: false,
+            },
+            updated_at: DateTimeWrapper::new(Utc::now()),
+        };
+
+        Ok(policy)
+    }
+
+    async fn has_connection_context(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
+        Ok(true) // Default to allowing contacts
+    }
+
+    async fn is_explicitly_allowed(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
+        Ok(true)
+    }
+
+    async fn is_pre_authorized(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
+        Ok(true)
     }
 }
 

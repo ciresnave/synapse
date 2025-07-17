@@ -1,25 +1,29 @@
 //! Multi-transport layer for EMRP
 //! 
 //! This module provides the core transport abstraction and implementations
-//! for different communication methods: TCP/UDP, mDNS, NAT traversal, and email.
+//! for different communication methods: TCP/UDP, auto-discovery, NAT traversal, and email.
 
 // Core abstraction layer
 pub mod abstraction;
 pub mod manager;
 
-// Unified transport implementations (temporarily disabled)
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod tcp_unified;
+// Dependency injection providers for testability
+pub mod providers;
+
+#[cfg(test)]
+mod providers_test;
+
+// Transport implementations
+#[cfg(not(target_arch = "wasm32"))]
+pub mod discovery; // New auto-discovery based implementation
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod udp_unified;
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod email_unified;
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod mdns_unified;
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod websocket_unified;
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod quic_unified;
+
+// Re-export key types
+pub use abstraction::{TransportType, TransportCapabilities};
+pub use discovery::DiscoveryTransport;
+pub use auto_discovery::config::DiscoveryConfig;
 
 // Simple, working transport implementation (template)
 #[cfg(not(target_arch = "wasm32"))]
@@ -34,8 +38,8 @@ pub mod tcp_enhanced;
 pub mod udp;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http_unified;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod mdns;
+// #[cfg(not(target_arch = "wasm32"))]
+// pub mod mdns;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mdns_enhanced;
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,19 +64,6 @@ use serde::{Serialize, Deserialize};
 // Platform-specific imports
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time::timeout;
-
-/// Message urgency levels for transport selection
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MessageUrgency {
-    /// Real-time messages requiring <100ms latency
-    RealTime,
-    /// Interactive messages allowing up to 1s latency
-    Interactive, 
-    /// Background messages where reliability > speed
-    Background,
-    /// Discovery messages for connection establishment
-    Discovery,
-}
 
 /// Available transport routes with performance characteristics
 #[derive(Debug, Clone)]
@@ -162,7 +153,7 @@ pub enum TransportRoute {
 
 /// NAT traversal methods (not available in WASM)
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NatMethod {
     Upnp,
     Stun { server: String },
@@ -257,7 +248,7 @@ pub trait Transport: Send + Sync {
         if let Some(breaker) = circuit_breaker {
             // Check if circuit allows request
             if !breaker.can_proceed().await {
-                return Err(crate::error::EmrpError::Transport(
+                return Err(crate::error::SynapseError::TransportError(
                     "Circuit breaker open - request rejected".to_string()
                 ).into());
             }
@@ -293,7 +284,7 @@ pub trait Transport: Send + Sync {
     ) -> Result<TransportMetrics> {
         if let Some(breaker) = circuit_breaker {
             if !breaker.can_proceed().await {
-                return Err(crate::error::EmrpError::Transport(
+                return Err(crate::error::SynapseError::TransportError(
                     "Circuit breaker open - connectivity test rejected".to_string()
                 ).into());
             }
@@ -416,7 +407,7 @@ impl TransportDiscovery {
             }
         }
         
-        Err(crate::error::EmrpError::Transport("No direct TCP connection available".into()))
+        Err(crate::error::SynapseError::TransportError("No direct TCP connection available".into()))
     }
     
     #[cfg(not(target_arch = "wasm32"))]
@@ -448,14 +439,14 @@ impl TransportDiscovery {
             }
         }
         
-        Err(crate::error::EmrpError::Transport("No direct UDP connection available".into()))
+        Err(crate::error::SynapseError::TransportError("No direct UDP connection available".into()))
     }
     
     #[cfg(not(target_arch = "wasm32"))]
     async fn discover_mdns_peer(&self, _target: &str) -> Result<TransportRoute> {
         // mDNS discovery implementation will be in mdns.rs
         // For now, return an error indicating it's not available
-        Err(crate::error::EmrpError::Transport("mDNS discovery not yet implemented".into()))
+        Err(crate::error::SynapseError::TransportError("mDNS discovery not yet implemented".into()))
     }
     
     #[cfg(not(target_arch = "wasm32"))]
@@ -504,12 +495,12 @@ impl TransportSelector {
     pub async fn choose_optimal_transport(
         &mut self, 
         target: &str, 
-        urgency: MessageUrgency
+        urgency: abstraction::MessageUrgency
     ) -> Result<TransportRoute> {
         let available_routes = self.discovery.discover_transports(target).await?;
         
         match urgency {
-            MessageUrgency::RealTime => {
+            abstraction::MessageUrgency::Critical | abstraction::MessageUrgency::RealTime => {
                 // Only use transports with <100ms latency
                 for route in available_routes {
                     match route {
@@ -521,19 +512,15 @@ impl TransportSelector {
                         _ => continue,
                     }
                 }
-                Err(crate::error::EmrpError::Transport("No real-time transport available".into()))
+                Err(crate::error::SynapseError::TransportError("No real-time transport available".into()))
             }
-            MessageUrgency::Interactive => {
+            abstraction::MessageUrgency::Interactive => {
                 // Accept up to 1s latency, prefer faster options
                 self.select_best_route(available_routes, 1000).await
             }
-            MessageUrgency::Background => {
+            abstraction::MessageUrgency::Background | abstraction::MessageUrgency::Batch => {
                 // Prefer reliability over speed
                 self.select_most_reliable_route(available_routes).await
-            }
-            MessageUrgency::Discovery => {
-                // Always use email for discovery
-                Ok(TransportRoute::StandardEmail { estimated_latency_min: 1 })
             }
         }
     }
@@ -543,7 +530,7 @@ impl TransportSelector {
     pub async fn choose_optimal_transport(
         &mut self, 
         _target: &str, 
-        _urgency: MessageUrgency
+        _urgency: abstraction::MessageUrgency
     ) -> Result<TransportRoute> {
         // WASM currently only supports basic message passing
         Ok(TransportRoute::WebAssembly { 
@@ -568,7 +555,7 @@ impl TransportSelector {
         }
         
         best_route.ok_or_else(|| {
-            crate::error::EmrpError::Transport("No suitable transport found".into())
+            crate::error::SynapseError::TransportError("No suitable transport found".into())
         })
     }
     
@@ -662,6 +649,7 @@ pub use manager::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use udp_unified::{UdpTransportImpl, UdpTransportFactory};
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "http")]
 pub use http_unified::{HttpTransportImpl, HttpTransportFactory};
 
 // Simple transport implementations
@@ -672,10 +660,16 @@ pub use tcp_simple::{SimpleTcpTransport, SimpleTcpTransportFactory};
 #[cfg(not(target_arch = "wasm32"))]
 pub use tcp::TcpTransport;
 #[cfg(not(target_arch = "wasm32"))]
-pub use mdns::{MdnsTransport, MdnsAdvertiser};
+pub use tcp_enhanced::EnhancedTcpTransport;
+// #[cfg(not(target_arch = "wasm32"))]
+// #[cfg(feature = "mdns")]
+// pub use mdns::{MdnsTransport, MdnsAdvertiser};
+#[cfg(not(target_arch = "wasm32"))]
+pub use mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use nat_traversal::{NatTraversalTransport, IceCandidate};
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "email")]
 pub use email_enhanced::{EmailEnhancedTransport, FastEmailRelay};
 #[cfg(not(target_arch = "wasm32"))]
 pub use router::MultiTransportRouter;

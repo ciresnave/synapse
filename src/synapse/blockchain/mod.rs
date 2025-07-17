@@ -2,6 +2,7 @@
 
 pub mod block;
 pub mod consensus;
+pub mod serialization;  // Add this line
 pub mod staking;
 pub mod verification;
 
@@ -12,11 +13,11 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tracing::info;
-
-pub use block::{Block, Transaction, TrustReport, TrustReportType};
-pub use consensus::ConsensusEngine;
-pub use staking::StakingManager;
-pub use verification::VerificationEngine;
+ 
+ pub use block::{Block, Transaction, TrustReport, TrustReportType};
+ pub use consensus::ConsensusEngine;
+ pub use staking::StakingManager;
+ pub use verification::VerificationEngine;
 
 /// Configuration for Synapse blockchain
 #[derive(Debug, Clone)]
@@ -311,7 +312,7 @@ impl SynapseBlockchain {
                 if let Transaction::TrustReport(report) = transaction {
                     if report.subject_id == participant_id {
                         // Weight recent reports more heavily
-                        let age_days = (Utc::now() - report.timestamp).num_days();
+                        let age_days = (Utc::now() - report.timestamp.0).num_days();
                         let weight = if age_days < 30 { 1.0 } else { 0.5 };
                         
                         total_score += report.score as f64 * weight;
@@ -334,7 +335,7 @@ impl SynapseBlockchain {
         let min_activity_days = self.config.trust_decay_config.min_activity_days;
         
         // Get cutoff time for decay processing
-        let cutoff_time = chrono::Utc::now() - chrono::Duration::days(min_activity_days as i64);
+        let cutoff_time = Utc::now() - chrono::Duration::days(min_activity_days as i64);
         
         // Fetch participants with balances that need decay processing
         let participants = self.staking_manager.get_all_participants().await?;
@@ -345,9 +346,9 @@ impl SynapseBlockchain {
             
             for mut balance in balances {
                 // Check if decay should be applied
-                if balance.last_activity < cutoff_time {
+                if balance.last_activity.clone().into_inner() < cutoff_time {
                     // Calculate days since last activity
-                    let duration = chrono::Utc::now() - balance.last_activity;
+                    let duration = Utc::now() - balance.last_activity.clone().into_inner();
                     let days_inactive = duration.num_days() as f64;
                     let months_inactive = days_inactive / 30.0;
                     
@@ -408,7 +409,7 @@ impl SynapseBlockchain {
             pending_transactions: pending.len(),
             total_trust_reports: total_reports,
             total_stakes: total_stakes,
-            last_block_time: chain.last().map(|b| b.timestamp),
+            last_block_time: chain.last().map(|b| b.timestamp.0),
         })
     }
 }

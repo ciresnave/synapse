@@ -1,8 +1,10 @@
 # 🧠 Synapse: Neural Communication Network
 
+![Synapse](Synapse.jpeg)
+
 [![Rust](https://img.shields.io/badge/rust-2021%2B-brightgreen.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-orange.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-1.1.0-orange.svg)](Cargo.toml)
 [![Status](https://img.shields.io/badge/status-production%20ready-brightgreen.svg)](PRODUCTION_READY_CONFIRMATION.md)
 
 > **A revolutionary neural communication network for AI and distributed systems with federated identity, dual trust systems, and privacy-respecting discovery.**
@@ -45,13 +47,13 @@ router.send_to("Alice", message).await?;  // 🎉 Automatically resolved!
 
 ## 🏗️ Architecture Overview
 
-EMRP operates on multiple layers to provide maximum flexibility and performance:
+Synapse operates on multiple layers to provide maximum flexibility and performance:
 
 ### Transport Layer Hierarchy
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│                    EMRP Message Layer                       │
+│                  Synapse Message Layer                      │
 │  Simple names, security, routing, message types            │
 ├─────────────────────────────────────────────────────────────┤
 │                    Identity Resolution                       │
@@ -95,7 +97,7 @@ use message_routing_system::*;
 async fn main() -> Result<()> {
     // 1. Initialize the enhanced router
     let config = Config::default();
-    let router = EnhancedEmrpRouter::new(config, "MyBot@example.com".to_string()).await?;
+    let router = EnhancedSynapseRouter::new(config, "MyBot@example.com".to_string()).await?;
     
     // 2. Register some identities (optional - auto-discovery also works)
     router.register_peer("Alice", "alice@ai-lab.example.com").await?;
@@ -107,7 +109,7 @@ async fn main() -> Result<()> {
     // 4. Send messages using simple names!
     router.send_message_smart(
         "Alice",                              // Just use the name
-        "Hello from EMRP!",                   // Your message
+        "Hello from Synapse!",                // Your message
         MessageType::Direct,                  // Message type
         SecurityLevel::Authenticated,         // Security level
         MessageUrgency::Interactive,          // Urgency (affects transport choice)
@@ -122,7 +124,7 @@ async fn main() -> Result<()> {
 ```rust
 // AI agents coordinating on a research project
 async fn ai_research_collaboration() -> Result<()> {
-    let claude = EnhancedEmrpRouter::new(config, "claude@anthropic.com".to_string()).await?;
+    let claude = EnhancedSynapseRouter::new(config, "claude@anthropic.com".to_string()).await?;
     
     // Real-time brainstorming (uses TCP/UDP if available, falls back to email)
     claude.send_message_smart(
@@ -157,7 +159,7 @@ async fn ai_research_collaboration() -> Result<()> {
 
 ### 1. Multi-Transport Intelligence
 
-EMRP automatically selects the best transport method based on:
+Synapse automatically selects the best transport method based on:
 
 - **Message urgency** (real-time vs. reliable delivery)
 - **Network conditions** (latency, bandwidth, connectivity)
@@ -175,11 +177,11 @@ EMRP automatically selects the best transport method based on:
 
 ### 2. Email Server Integration
 
-EMRP can run its own email infrastructure when externally accessible:
+Synapse can run its own email infrastructure when externally accessible:
 
 ```rust
 // Automatic email server with intelligent connectivity detection
-let router = EnhancedEmrpRouter::new(config, entity_id).await?;
+let router = EnhancedSynapseRouter::new(config, entity_id).await?;
 
 if router.is_running_email_server() {
     println!("🏃 Running local SMTP/IMAP server");
@@ -190,7 +192,124 @@ if router.is_running_email_server() {
 }
 ```
 
-### 3. Security by Default
+### 3. Circuit Breaker Infrastructure
+
+Comprehensive circuit breaker protection across all transports:
+
+```rust
+// Automatic circuit breaker protection
+let transport = EnhancedMdnsTransport::new("entity-id", 8080, None).await?;
+
+// Circuit breaker automatically protects against failures
+let result = transport.send_message("target", &message).await;
+
+// Monitor circuit breaker state
+let stats = transport.get_circuit_breaker().get_stats();
+println!("Circuit state: {:?}, failures: {}", stats.state, stats.failure_count);
+```
+
+**Key Features:**
+
+- **Automatic failure detection** based on configurable thresholds
+- **Intelligent recovery** with half-open testing
+- **External triggers** for performance degradation
+- **Comprehensive monitoring** with real-time statistics
+
+### 4. Blockchain Trust System
+
+Decentralized trust verification with staking mechanisms:
+
+```rust
+// Blockchain-based trust verification
+let blockchain = SynapseBlockchain::new(config).await?;
+
+// Stake tokens to vouch for network participants
+blockchain.stake_for_participant("alice@ai-lab.com", 1000).await?;
+
+// Verify trust scores before communication
+let trust_score = blockchain.get_trust_score("alice@ai-lab.com").await?;
+if trust_score.reputation > 0.8 {
+    // Proceed with high-trust communication
+}
+```
+
+**Key Features:**
+
+- **Proof-of-stake consensus** for network trust
+- **Reputation scoring** with decay mechanisms
+- **Staking requirements** for network participation
+- **Trust decay** based on activity and time
+
+### 5. Real-Time Streaming
+
+Live streaming capabilities for continuous communication:
+
+```rust
+// Start a streaming session
+let stream = router.start_stream("Alice").await?;
+
+// Send streaming data
+stream.send_chunk(b"Live data chunk 1").await?;
+stream.send_chunk(b"Live data chunk 2").await?;
+
+// End the stream
+stream.finalize().await?;
+```
+
+**Key Features:**
+
+- **Stream chunking** with automatic reassembly
+- **Priority-based** delivery for different stream types
+- **Session management** for multiple concurrent streams
+- **Reliability guarantees** with acknowledgment tracking
+
+### 6. OAuth & Federated Authentication
+
+Enterprise-grade authentication with OAuth 2.0 support:
+
+```rust
+// OAuth provider integration
+let auth_manager = SynapseAuthManager::new(auth_config).await?;
+
+// Authenticate with multiple providers
+let token = auth_manager.authenticate_oauth("google", credentials).await?;
+
+// Use federated identity
+let user_context = auth_manager.get_user_context(&token).await?;
+```
+
+**Key Features:**
+
+- **OAuth 2.0 provider** integration (Google, Microsoft, etc.)
+- **Multi-factor authentication** support
+- **JWT token management** with automatic refresh
+- **Federated identity** across organizations
+
+### 7. Advanced Monitoring & Metrics
+
+Comprehensive system monitoring and performance tracking:
+
+```rust
+// Get system metrics
+let metrics = router.get_metrics().await?;
+println!("Messages/sec: {}", metrics.message_throughput);
+println!("Average latency: {:?}", metrics.average_latency);
+
+// Subscribe to performance alerts
+let mut alerts = router.subscribe_alerts().await?;
+while let Some(alert) = alerts.recv().await {
+    println!("Alert: {}", alert.message);
+}
+```
+
+**Key Features:**
+
+- **Real-time metrics** collection and reporting
+- **Performance monitoring** with historical data
+- **Alert system** for performance degradation
+- **Health diagnostics** for system components
+
+### 8. Security by Default
 
 - **🔐 PGP Encryption**: All messages encrypted with recipient's public key
 - **✍️ Digital Signatures**: Verify sender authenticity
@@ -198,11 +317,11 @@ if router.is_running_email_server() {
 - **🔑 Key Management**: Automatic key generation and distribution
 - **🚪 Access Control**: Domain-based and user-based permissions
 
-### 4. Federation & Interoperability
+### 9. Federation & Interoperability
 
 ```rust
-// Your EMRP system automatically interoperates with:
-// • Other EMRP systems
+// Your Synapse system automatically interoperates with:
+// • Other Synapse systems
 // • Standard email servers
 // • Existing AI communication platforms
 // • Legacy enterprise messaging systems
@@ -212,18 +331,19 @@ if router.is_running_email_server() {
 
 ### Core Concepts
 
-- **[Identity System](docs/identity.md)**: How names resolve to addresses
-- **[Transport Layer](docs/transports.md)**: Multi-transport architecture
-- **[Security Model](docs/security.md)**: Encryption and authentication
-- **[Email Integration](docs/email-server.md)**: SMTP/IMAP server capabilities
-- **[Configuration](docs/configuration.md)**: Setup and customization
+- **[Complete Architecture](docs/SYNAPSE_COMPLETE_ARCHITECTURE.md)**: System architecture and design
+- **[Transport Layer](docs/API_REFERENCE.md#-transport-system)**: Multi-transport architecture
+- **[Security Model](docs/API_REFERENCE.md#-error-handling)**: Encryption and authentication
+- **[Email Integration](docs/API_REFERENCE.md#-transport-system)**: SMTP/IMAP server capabilities
+- **[Configuration](docs/CONFIGURATION_GUIDE.md)**: Setup and customization
 
 ### API Reference
 
-- **[Enhanced Router](docs/api/router.md)**: Main interface
-- **[Message Types](docs/api/messages.md)**: Communication patterns
-- **[Error Handling](docs/api/errors.md)**: Result types and error management
-- **[Connectivity](docs/api/connectivity.md)**: Network detection and management
+- **[Enhanced Router](docs/API_REFERENCE.md#️-core-components)**: Main interface
+- **[Message Types](docs/API_REFERENCE.md#-message-types)**: Communication patterns
+- **[Streaming API](docs/API_REFERENCE.md#-streaming-api)**: Real-time streaming support
+- **[WebRTC Transport](docs/API_REFERENCE.md#-webrtc-transport)**: Browser-based communication
+- **[Trust System](docs/API_REFERENCE.md#-trust-system)**: Blockchain-based trust verification
 
 ### Examples
 
@@ -298,11 +418,29 @@ tests/                  # Integration tests
 - **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation with examples  
 - **[Configuration Guide](docs/CONFIGURATION_GUIDE.md)** - All configuration options and settings
 - **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Common issues and solutions
+- **[New Features](docs/NEW_FEATURES.md)** - Latest features and capabilities in v1.0.0
+
+### 🏗️ Architecture and Design
+
+- **[Complete Architecture](docs/SYNAPSE_COMPLETE_ARCHITECTURE.md)** - System architecture and design
+- **[Deployment Guide](docs/DEPLOYMENT_GUIDE.md)** - Production deployment instructions
+- **[Advanced Monitoring](docs/ADVANCED_MONITORING.md)** - Monitoring and observability
+- **[Security Audit](security/TRUST_SYSTEM_SECURITY_AUDIT.md)** - Security analysis and trust system
+
+### 🧪 Specialized Features
+
+- **[LLM Discovery Guide](docs/LLM_DISCOVERY_GUIDE.md)** - AI agent discovery and communication
+- **[Identity Resolution](docs/IDENTITY_RESOLUTION_TROUBLESHOOTING.md)** - Name resolution troubleshooting
+- **[Unknown Name Handling](docs/UNKNOWN_NAME_HANDLING_COOKBOOK.md)** - Handling unknown entities
+- **[Circuit Breaker System](docs/CIRCUIT_BREAKER_SYSTEM.md)** - Fault tolerance patterns
+- **[Blockchain Trust System](docs/BLOCKCHAIN_TRUST_SYSTEM.md)** - Trust verification system
+- **[OAuth Authentication](docs/OAUTH_AUTHENTICATION.md)** - Authentication integration
+- **[WASM Support](docs/WASM_README.md)** - WebAssembly and browser support
 
 ### 🚀 Examples and Tutorials
 
 - **[Examples Directory](examples/)** - Working examples for different use cases
-- **[Hello World Example](examples/hello_world.rs)** - Simplest EMRP application
+- **[Hello World Example](examples/hello_world.rs)** - Simplest Synapse application
 - **[AI Assistant Example](examples/ai_assistant.rs)** - Multi-AI agent communication
 
 ### 🔧 Technical References
@@ -313,9 +451,10 @@ tests/                  # Integration tests
 
 ### 📊 Project Status
 
-- **[TODO Completion Summary](TODO_COMPLETION_SUMMARY.md)** - Development progress tracker
-- **[Multi-Transport Status](MULTI_TRANSPORT_STATUS.md)** - Transport layer implementation status
-- **[Network Connectivity Report](NETWORK_CONNECTIVITY.md)** - Network configuration guidance
+- **[Renaming Progress](RENAMING_RECOMMENDATIONS.md)** - Current renaming status and next steps
+- **[New Features](docs/NEW_FEATURES.md)** - Latest features and capabilities added in v1.0.0
+- **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation with examples
+- **[Developer Guide](docs/DEVELOPER_GUIDE.md)** - Development tutorials and best practices
 
 ## �📄 License
 

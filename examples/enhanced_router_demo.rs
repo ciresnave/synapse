@@ -1,4 +1,4 @@
-//! Enhanced EMRP Router with Email Server Integration Demo
+//! Enhanced Synapse Router with Email Server Integration Demo
 //! 
 //! This example demonstrates:
 //! - Automatic connectivity detection
@@ -8,10 +8,10 @@
 //! - Smart message routing
 
 use synapse::{
-    EnhancedEmrpRouter,
+    EnhancedSynapseRouter,
     config::{Config, EntityConfig, RouterConfig, SecurityConfig, LoggingConfig},
     types::{MessageType, SecurityLevel, EmailConfig, SmtpConfig, ImapConfig},
-    MessageUrgency,
+    transport::abstraction::MessageUrgency,
     error::Result,
 };
 use tracing::{info, warn, error};
@@ -23,21 +23,21 @@ async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
     
-    info!("🚀 Starting Enhanced EMRP Router with Email Server Integration Demo");
+    info!("🚀 Starting Enhanced Synapse Router with Email Server Integration Demo");
     
     // Create configuration
     let config = create_demo_config();
-    let our_entity_id = "enhanced-demo@emrp.local".to_string();
+    let our_entity_id = "enhanced-demo@synapse.local".to_string();
     
     // Create enhanced router with email server integration
-    info!("🔧 Initializing Enhanced EMRP Router...");
-    let router = match EnhancedEmrpRouter::new(config, our_entity_id.clone()).await {
+    info!("🔧 Initializing Enhanced Synapse Router...");
+    let router = match EnhancedSynapseRouter::new(config, our_entity_id.clone()).await {
         Ok(router) => {
-            info!("✅ Enhanced EMRP Router initialized successfully");
+            info!("✅ Enhanced Synapse Router initialized successfully");
             router
         }
         Err(e) => {
-            error!("❌ Failed to initialize Enhanced EMRP Router: {}", e);
+            error!("❌ Failed to initialize Enhanced Synapse Router: {}", e);
             return Err(e);
         }
     };
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
     // Check status before starting
     let status = router.status().await;
     info!("📊 Router Status:");
-    info!("  🆔 Our ID: {}", status.emrp_status.our_global_id);
+    info!("  🆔 Our ID: {}", status.synapse_status.our_global_id);
     info!("  🚀 Multi-transport: {}", status.multi_transport_enabled);
     info!("  📧 Email server: {}", status.email_server_enabled);
     info!("  🔌 Available transports: {:?}", status.available_transports);
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
     // Test different message urgency levels
     let test_targets = vec![
         "alice@example.com",
-        "bob@emrp.local",
+        "bob@synapse.local",
         "claude@anthropic.com",
     ];
     
@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
         // Send test messages with different urgency levels
         let urgency_tests = vec![
             (MessageUrgency::Background, "📝 Background task update"),
-            (MessageUrgency::Discovery, "📩 Discovery message"),
+            (MessageUrgency::Batch, "� Batch processing message"),
             (MessageUrgency::Interactive, "⚡ Interactive response needed"),
             (MessageUrgency::RealTime, "🚨 Real-time alert!"),
         ];
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
             // Add test user
             let test_user = synapse::email_server::UserAccount {
                 username: "testuser".to_string(),
-                email: "testuser@emrp.local".to_string(),
+                email: "testuser@synapse.local".to_string(),
                 password_hash: "test_hash".to_string(),
                 active: true,
                 permissions: synapse::email_server::UserPermissions {
@@ -162,10 +162,10 @@ async fn main() -> Result<()> {
             }
             
             // Add local domain
-            if let Err(e) = email_server.add_local_domain("emrp.local") {
+            if let Err(e) = email_server.add_local_domain("synapse.local") {
                 warn!("⚠️  Failed to add local domain: {}", e);
             } else {
-                info!("🏠 Local domain 'emrp.local' added");
+                info!("🏠 Local domain 'synapse.local' added");
             }
         }
     } else {
@@ -175,15 +175,15 @@ async fn main() -> Result<()> {
     // Final status check
     let final_status = router.status().await;
     info!("🏁 Final Router Status:");
-    info!("  🆔 Entity ID: {}", final_status.emrp_status.our_global_id);
-    info!("  👥 Known entities: {}", final_status.emrp_status.known_entities);
-    info!("  🔑 Known keys: {}", final_status.emrp_status.known_keys);
-    info!("  📧 Email configured: {}", final_status.emrp_status.email_configured);
+    info!("  🆔 Entity ID: {}", final_status.synapse_status.our_global_id);
+    info!("  👥 Known peers: {}", final_status.synapse_status.known_peers);
+    info!("  🔑 Known keys: {}", final_status.synapse_status.known_keys);
+    info!("  📧 Email available: {}", final_status.synapse_status.email_available);
     info!("  🚀 Multi-transport: {}", final_status.multi_transport_enabled);
     info!("  🏃 Email server: {}", final_status.email_server_enabled);
     info!("  🔌 Transport count: {}", final_status.available_transports.len());
     
-    info!("🎉 Enhanced EMRP Router Demo completed successfully!");
+    info!("🎉 Enhanced Synapse Router Demo completed successfully!");
     
     // Keep running for a bit to show server activity
     info!("⏳ Keeping services running for 10 seconds to show activity...");
@@ -198,7 +198,7 @@ fn create_demo_config() -> Config {
         entity: EntityConfig {
             local_name: "enhanced-demo".to_string(),
             entity_type: "AiModel".to_string(),
-            domain: "emrp.local".to_string(),
+            domain: "synapse.local".to_string(),
             capabilities: vec!["messaging".to_string(), "email-server".to_string()],
             display_name: Some("Enhanced Demo Router".to_string()),
         },
@@ -206,7 +206,7 @@ fn create_demo_config() -> Config {
             smtp: SmtpConfig {
                 host: "localhost".to_string(),
                 port: 2525,
-                username: "demo@emrp.local".to_string(),
+                username: "demo@synapse.local".to_string(),
                 password: "demo_password".to_string(),
                 use_tls: false,
                 use_ssl: false,
@@ -214,7 +214,7 @@ fn create_demo_config() -> Config {
             imap: ImapConfig {
                 host: "localhost".to_string(),
                 port: 1143,
-                username: "demo@emrp.local".to_string(),
+                username: "demo@synapse.local".to_string(),
                 password: "demo_password".to_string(),
                 use_ssl: false,
             },
@@ -232,7 +232,7 @@ fn create_demo_config() -> Config {
             public_key_path: None,
             auto_generate_keys: true,
             default_security_level: "Authenticated".to_string(),
-            trusted_domains: vec!["emrp.local".to_string()],
+            trusted_domains: vec!["synapse.local".to_string()],
             require_encryption_for: vec!["AiModel".to_string()],
         },
         logging: LoggingConfig {

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 /// Default authorization handler for EMRP email server
-pub struct EmrpAuthHandler {
+pub struct SynapseAuthHandler {
     /// User credentials
     users: Arc<Mutex<HashMap<String, UserAccount>>>,
     /// Email routing permissions
@@ -93,7 +93,7 @@ impl Default for RoutingPermissions {
     }
 }
 
-impl EmrpAuthHandler {
+impl SynapseAuthHandler {
     /// Create a new auth handler with default configuration
     pub fn new() -> Self {
         let mut users = HashMap::new();
@@ -217,7 +217,7 @@ impl EmrpAuthHandler {
     }
 }
 
-impl AuthHandler for EmrpAuthHandler {
+impl AuthHandler for SynapseAuthHandler {
     /// Authenticate user credentials
     fn authenticate(&self, username: &str, password: &str) -> Result<bool> {
         if let Some(user) = self.get_user(username) {
@@ -268,11 +268,11 @@ impl AuthHandler for EmrpAuthHandler {
 }
 
 /// Create a pre-configured auth handler for testing
-pub fn create_test_auth_handler() -> EmrpAuthHandler {
-    let handler = EmrpAuthHandler::new();
+pub fn create_test_auth_handler() -> SynapseAuthHandler {
+    let handler = SynapseAuthHandler::new();
     
     // Add test domains
-    handler.add_local_domain("emrp.local").unwrap();
+    handler.add_local_domain("synapse.local").unwrap();
     handler.add_local_domain("test.com").unwrap();
     handler.add_relay_domain("example.com").unwrap();
     
@@ -280,7 +280,7 @@ pub fn create_test_auth_handler() -> EmrpAuthHandler {
     handler.add_user(UserAccount {
         username: "testuser".to_string(),
         password_hash: "testpass".to_string(),
-        email: "test@emrp.local".to_string(),
+        email: "test@synapse.local".to_string(),
         permissions: UserPermissions {
             can_send: true,
             can_receive: true,

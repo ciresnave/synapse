@@ -91,7 +91,7 @@
 //!     entity_type: EntityType::AiModel,
 //!     capabilities: vec!["real-time", "file-transfer"],
 //!     public_key: Some(alice_public_key),
-//!     created_at: Utc::now(),
+//!     created_at: DateTimeWrapper::new(Utc::now()),
 //! })?;
 //! 
 //! // Quick registration (discovers details automatically)
@@ -244,12 +244,16 @@
 //! The identity system makes EMRP communication feel natural and intuitive while
 //! handling all the complex networking, security, and protocol details automatically.
 
+use crate::blockchain::serialization::UuidWrapper;
 use crate::types::{EntityType, GlobalIdentity};
 use crate::error::{IdentityError, Result};
+use crate::synapse::blockchain::serialization::DateTimeWrapper;
+use chrono::Utc;
 use dashmap::DashMap;
 use uuid::Uuid;
 
 /// Registry for managing entity identities
+#[derive(Debug)]
 pub struct IdentityRegistry {
     /// Global ID -> Identity mapping
     identities: DashMap<String, GlobalIdentity>,
@@ -446,7 +450,7 @@ impl IdentityRegistry {
             public_key: "".to_string(), // Empty public key initially
             trust_level: 0,
             capabilities: Vec::new(),
-            last_seen: chrono::Utc::now(),
+            last_seen: DateTimeWrapper::new(Utc::now()),
             routing_preferences: std::collections::HashMap::new(),
         };
         
@@ -522,7 +526,7 @@ impl IdentityRegistry {
             EntityType::Router => "routers",
         };
 
-        let uuid = Uuid::new_v4().to_string()[..8].to_string();
+        let uuid = UuidWrapper::new(Uuid::new_v4()).to_string()[..8].to_string();
         format!("{}.{}@{}.test.local", local_name.to_lowercase(), uuid, subdomain)
     }
 }

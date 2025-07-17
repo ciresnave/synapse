@@ -1,4 +1,4 @@
-use crate::synapse::blockchain::{Block, BlockchainConfig, Transaction};
+use crate::synapse::blockchain::{Block, BlockchainConfig, Transaction, serialization::DateTimeWrapper};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -222,7 +222,7 @@ impl ConsensusEngine {
         // For now, create a placeholder
         let block = Block {
             number: height,
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper(Utc::now()),
             previous_hash: "".to_string(), // Would be actual previous hash
             hash: "".to_string(), // Would be calculated
             transactions,

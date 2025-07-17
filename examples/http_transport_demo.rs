@@ -186,12 +186,12 @@ async fn main() -> Result<()> {
 /// Helper function to create a sample message
 fn create_sample_message(id: &str, content: &str) -> SecureMessage {
     SecureMessage {
-        message_id: Uuid::new_v4(),
+        message_id: synapse::blockchain::serialization::UuidWrapper(Uuid::new_v4()),
         to_global_id: "http-demo-recipient".to_string(),
         from_global_id: "http-demo-sender".to_string(),
         encrypted_content: content.as_bytes().to_vec(),
         signature: vec![0u8; 64], // Placeholder signature
-        timestamp: Utc::now(),
+        timestamp: synapse::blockchain::serialization::DateTimeWrapper(Utc::now()),
         security_level: SecurityLevel::Public,
         routing_path: Vec::new(),
         metadata: {

@@ -91,7 +91,7 @@ impl UdpTransport {
                         }
                         
                         // Try to deserialize the message
-                        match bincode::serde::decode_from_slice::<SecureMessage, _>(&buffer[..size], bincode::config::standard()) {
+                        match bincode::decode_from_slice::<SecureMessage, _>(&buffer[..size], bincode::config::standard()) {
                             Ok(_message) => {
                                 debug!("Successfully parsed UDP message from {}", peer_addr);
                                 // In a real implementation, you'd handle the message here
@@ -181,7 +181,7 @@ impl Transport for UdpTransport {
         };
         
         // Serialize and send message
-        let serialized = bincode::serde::encode_to_vec(message, bincode::config::standard())?;
+        let serialized = bincode::encode_to_vec(message, bincode::config::standard())?;
         
         match self.socket.send_to(&serialized, addr).await {
             Ok(bytes_sent) => {
@@ -196,7 +196,7 @@ impl Transport for UdpTransport {
                 }
                 
                 debug!("Sent UDP message to {} ({} bytes, {:?})", addr, bytes_sent, duration);
-                Ok(message.message_id.to_string()) // Return message ID for tracking
+                Ok(message.message_id.0.to_string()) // Return message ID for tracking
             }
             Err(e) => {
                 self.circuit_breaker.record_outcome(crate::circuit_breaker::RequestOutcome::Failure(e.to_string())).await;
@@ -222,14 +222,14 @@ impl Transport for UdpTransport {
                 // Try to resolve from known peers
                 let peers = self.known_peers.read().await;
                 *peers.get(target).ok_or_else(|| {
-                    crate::error::EmrpError::Transport(format!("Unknown UDP target: {}", target))
+                    crate::error::SynapseError::TransportError(format!("Unknown UDP target: {}", target))
                 })?
             }
         };
         
         // Send a simple ping message
         let ping_data = b"PING";
-        let success = self.socket.send_to(ping_data, addr).await.is_ok();
+        let success = self.socket.send_to(&ping_data[..], addr).await.is_ok();
         let latency = start_time.elapsed();
         
         // Return metrics compatible with the old structure

@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use tracing::info;
 
 use crate::{
-    error::{EmrpError, Result},
+    error::{SynapseError, Result},
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
     types::SecureMessage,
     transport::{
@@ -112,20 +112,20 @@ impl Transport for SimpleTcpTransport {
         
         if !self.circuit_breaker.can_proceed().await {
             self.circuit_breaker.record_outcome(RequestOutcome::Failure("Circuit breaker open".to_string())).await;
-            return Err(EmrpError::Transport("Circuit breaker is open".to_string()));
+            return Err(SynapseError::TransportError("Circuit breaker is open".to_string()));
         }
 
         let addr = if let Some(address) = &target.address {
             address.parse::<SocketAddr>()
-                .map_err(|e| EmrpError::Transport(format!("Invalid address: {}", e)))?
+                .map_err(|e| SynapseError::TransportError(format!("Invalid address: {}", e)))?
         } else {
-            return Err(EmrpError::Transport("No address provided for TCP transport".to_string()));
+            return Err(SynapseError::TransportError("No address provided for TCP transport".to_string()));
         };
 
         let stream = timeout(self.connection_timeout, TcpStream::connect(addr))
             .await
-            .map_err(|_| EmrpError::Transport("Connection timeout".to_string()))?
-            .map_err(|e| EmrpError::Transport(format!("Connection failed: {}", e)))?;
+            .map_err(|_| SynapseError::TransportError("Connection timeout".to_string()))?
+            .map_err(|e| SynapseError::TransportError(format!("Connection failed: {}", e)))?;
 
         match self.send_to_stream(stream, message).await {
             Ok(receipt) => {
@@ -161,7 +161,7 @@ impl Transport for SimpleTcpTransport {
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
         let addr = if let Some(address) = &target.address {
             address.parse::<SocketAddr>()
-                .map_err(|e| EmrpError::Transport(format!("Invalid address: {}", e)))?
+                .map_err(|e| SynapseError::TransportError(format!("Invalid address: {}", e)))?
         } else {
             return Ok(ConnectivityResult {
                 connected: false,
@@ -227,20 +227,20 @@ impl Transport for SimpleTcpTransport {
 impl SimpleTcpTransport {
     async fn send_to_stream(&self, mut stream: TcpStream, message: &SecureMessage) -> Result<DeliveryReceipt> {
         let serialized = serde_json::to_vec(message)
-            .map_err(|e| EmrpError::Transport(format!("Serialization failed: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Serialization failed: {}", e)))?;
 
         let length_bytes = (serialized.len() as u32).to_be_bytes();
         stream.write_all(&length_bytes).await
-            .map_err(|e| EmrpError::Transport(format!("Failed to send length: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Failed to send length: {}", e)))?;
         
         stream.write_all(&serialized).await
-            .map_err(|e| EmrpError::Transport(format!("Failed to send message: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Failed to send message: {}", e)))?;
 
         stream.flush().await
-            .map_err(|e| EmrpError::Transport(format!("Failed to flush stream: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Failed to flush stream: {}", e)))?;
 
         Ok(DeliveryReceipt {
-            message_id: message.message_id.to_string(),
+            message_id: message.message_id.0.to_string(),
             transport_used: TransportType::Tcp,
             delivery_time: Duration::from_millis(1), // Placeholder
             target_reached: message.to_global_id.clone(),

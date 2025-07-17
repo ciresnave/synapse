@@ -3,7 +3,7 @@
 use crate::{
     types::SecureMessage,
     error::Result,
-    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
+    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper}},,
 };
 use super::abstraction::*;
 use async_trait::async_trait;
@@ -87,7 +87,7 @@ impl TcpTransportImpl {
             
             // Clone the listener for the task - this requires cloning the socket
             let local_addr = listener.local_addr().map_err(|e| {
-                crate::error::EmrpError::Transport(format!("Failed to get local address: {}", e))
+                crate::error::SynapseError::TransportError(format!("Failed to get local address: {}", e))
             })?;
             
             tokio::spawn(async move {
@@ -183,25 +183,25 @@ impl TcpTransportImpl {
             self.connection_timeout,
             TcpStream::connect(&target_addr)
         ).await
-        .map_err(|_| crate::error::EmrpError::Transport("TCP connection timeout".to_string()))?
-        .map_err(|e| crate::error::EmrpError::Transport(format!("TCP connection failed: {}", e)))?;
+        .map_err(|_| crate::error::SynapseError::TransportError("TCP connection timeout".to_string()))?
+        .map_err(|e| crate::error::SynapseError::TransportError(format!("TCP connection failed: {}", e)))?;
         
         let connect_time = start_time.elapsed();
         debug!("TCP connection established in {:?}", connect_time);
         
         // Serialize message
         let message_json = serde_json::to_string(message)
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to serialize message: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to serialize message: {}", e)))?;
         
         // Send message
         let mut stream = stream;
         let send_start = Instant::now();
         
         stream.write_all(message_json.as_bytes()).await
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to send TCP message: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to send TCP message: {}", e)))?;
         
         stream.flush().await
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to flush TCP stream: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to flush TCP stream: {}", e)))?;
         
         let send_time = send_start.elapsed();
         let total_time = start_time.elapsed();
@@ -225,7 +225,7 @@ impl TcpTransportImpl {
         }
         
         Ok(DeliveryReceipt {
-            message_id: message.message_id.to_string(),
+            message_id: message.message_id.0.to_string(),
             transport_used: TransportType::Tcp,
             delivery_time: total_time,
             target_reached: target_addr,
@@ -246,7 +246,7 @@ impl TcpTransportImpl {
                 let host = address[..colon_pos].to_string();
                 let port_str = &address[colon_pos + 1..];
                 let port = port_str.parse::<u16>()
-                    .map_err(|_| crate::error::EmrpError::Transport(
+                    .map_err(|_| crate::error::SynapseError::TransportError(
                         format!("Invalid port in address: {}", address)
                     ))?;
                 Ok((host, port))
@@ -450,7 +450,7 @@ impl TransportFactory for TcpTransportFactory {
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
         if let Some(port_str) = config.get("listen_port") {
             if port_str.parse::<u16>().is_err() {
-                return Err(crate::error::EmrpError::Transport(
+                return Err(crate::error::SynapseError::TransportError(
                     format!("Invalid listen_port: {}", port_str)
                 ));
             }
@@ -458,7 +458,7 @@ impl TransportFactory for TcpTransportFactory {
         
         if let Some(timeout_str) = config.get("connection_timeout_ms") {
             if timeout_str.parse::<u64>().is_err() {
-                return Err(crate::error::EmrpError::Transport(
+                return Err(crate::error::SynapseError::TransportError(
                     format!("Invalid connection_timeout_ms: {}", timeout_str)
                 ));
             }

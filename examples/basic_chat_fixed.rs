@@ -4,7 +4,7 @@
 
 use synapse::{
     Config,
-    types::{SimpleMessage, MessageType},
+    types::SimpleMessage,
 };
 use anyhow::Result;
 use tracing::info;

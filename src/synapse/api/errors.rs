@@ -1,5 +1,7 @@
 use serde::{Serialize, Deserialize};
 use thiserror::Error;
+use uuid::Uuid;
+use crate::synapse::blockchain::serialization::UuidWrapper;
 
 /// API Error Types - standardized error handling for Synapse API endpoints
 #[derive(Debug, Error, Serialize, Deserialize, Clone)]
@@ -97,7 +99,7 @@ impl<T> ApiResponse<T> {
     
     /// Create an error response
     pub fn error(err: ApiError) -> Self {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = UuidWrapper::new(Uuid::new_v4()).to_string();
         
         // Log the error with request ID for traceability
         tracing::error!("API Error [{}]: {}", request_id, err);
@@ -118,7 +120,7 @@ impl<T> ApiResponse<T> {
     
     /// Create an error response with additional details
     pub fn error_with_details(err: ApiError, details: serde_json::Value) -> Self {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = UuidWrapper::new(Uuid::new_v4()).to_string();
         
         // Log the error with request ID and details for traceability
         tracing::error!("API Error [{}]: {} - Details: {:?}", request_id, err, details);

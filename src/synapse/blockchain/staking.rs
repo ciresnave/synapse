@@ -4,11 +4,14 @@
 use super::block::{Block, Transaction, StakePurpose};
 use crate::synapse::models::trust::TrustBalance;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use bincode::{Decode, Encode};
+use chrono::Utc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 /// Manages trust point staking operations
 pub struct StakingManager {
@@ -112,11 +115,11 @@ impl StakingManager {
         
         // Create stake record
         let stake = ActiveStake {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: UuidWrapper::new(Uuid::new_v4()).to_string(),
             participant_id: participant_id.to_string(),
             amount,
             purpose,
-            staked_at: Utc::now(),
+            staked_at: DateTimeWrapper::new(Utc::now()),
             locked_until: None, // Can be set based on purpose
         };
         
@@ -146,7 +149,7 @@ impl StakingManager {
         
         // Check if stake is still locked
         if let Some(locked_until) = stake.locked_until {
-            if Utc::now() < locked_until {
+            if Utc::now() < locked_until.into_inner() {
                 return Err(anyhow::anyhow!("Stake is still locked"));
             }
         }
@@ -184,7 +187,7 @@ impl StakingManager {
             // If there's remaining amount, create new stake
             if remaining_amount > 0 {
                 let remaining_stake = ActiveStake {
-                    id: uuid::Uuid::new_v4().to_string(),
+                    id: UuidWrapper::new(Uuid::new_v4()).to_string(),
                     participant_id: stake.participant_id,
                     amount: remaining_amount,
                     purpose: stake.purpose,
@@ -236,7 +239,7 @@ impl StakingManager {
     pub async fn lock_stake(&self, participant_id: &str, stake_id: &str, lock_duration: chrono::Duration) -> Result<()> {
         if let Some(mut stakes) = self.active_stakes.get_mut(participant_id) {
             if let Some(stake) = stakes.iter_mut().find(|s| s.id == stake_id) {
-                stake.locked_until = Some(Utc::now() + lock_duration);
+                stake.locked_until = Some(DateTimeWrapper::new(Utc::now() + lock_duration));
                 return Ok(());
             }
         }
@@ -258,34 +261,33 @@ impl StakingManager {
     
     /// Get all balances for a participant
     pub async fn get_participant_balances(&self, participant_id: &str) -> Result<Vec<TrustBalance>> {
-        // In a real implementation, this would query the database for all balances
-        // For now, create a mock balance from stakes
-        let stakes = self.get_participant_stakes(participant_id).await?;
-        
-        if stakes.is_empty() {
-            return Ok(vec![]);
-        }
-        
-        // Calculate total staked amount
-        let staked_amount: u32 = stakes.iter().map(|s| s.amount).sum();
-        
-        // Get total trust points from blockchain
-        let total_points = self.get_total_trust_points(participant_id).await?;
-        
-        // Create balance record
-        let balance = TrustBalance {
-            participant_id: participant_id.to_string(),
-            total_points,
-            available_points: total_points.saturating_sub(staked_amount),
-            staked_points: staked_amount,
-            earned_lifetime: total_points,
-            last_activity: stakes.iter()
-                .map(|s| s.staked_at)
+         // In a real implementation, this would query the database for all balances
+         // For now, create a mock balance from stakes
+         let stakes = self.get_participant_stakes(participant_id).await?;
+         
+         if stakes.is_empty() {
+             return Ok(vec![]);
+         }
+         
+         // Calculate total staked amount
+         let staked_amount: u32 = stakes.iter().map(|s| s.amount).sum();
+         
+         // Get total trust points from blockchain
+         let total_points = self.get_total_trust_points(participant_id).await?;
+         
+         let balance = TrustBalance {
+             participant_id: participant_id.to_string(),
+             total_points,
+             available_points: total_points.saturating_sub(staked_amount),
+             staked_points: staked_amount,
+             earned_lifetime: total_points,
+             last_activity: DateTimeWrapper::new(stakes.iter()
+                .map(|s| s.staked_at.clone().into_inner())
                 .max()
-                .unwrap_or_else(chrono::Utc::now),
-            decay_rate: 0.02, // Default 2% per month
-        };
-        
+                .unwrap_or_else(Utc::now)),
+             decay_rate: 0.02, // Default 2% per month
+         };
+         
         Ok(vec![balance])
     }
     
@@ -309,21 +311,23 @@ impl StakingManager {
 }
 
 /// An active stake record
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[serde(crate = "serde")]
+#[bincode(crate = "bincode")]
 pub struct ActiveStake {
     pub id: String,
     pub participant_id: String,
     pub amount: u32,
     pub purpose: StakePurpose,
-    pub staked_at: DateTime<Utc>,
-    pub locked_until: Option<DateTime<Utc>>,
+    pub staked_at: DateTimeWrapper,
+    pub locked_until: Option<DateTimeWrapper>,
 }
 
 impl ActiveStake {
     /// Check if stake is currently locked
     pub fn is_locked(&self) -> bool {
-        if let Some(locked_until) = self.locked_until {
-            Utc::now() < locked_until
+        if let Some(locked_until) = &self.locked_until {
+            Utc::now() < locked_until.0
         } else {
             false
         }
@@ -356,25 +360,25 @@ mod tests {
             participant_id: participant_id.to_string(),
             amount,
             purpose,
-            staked_at: Utc::now(),
+            staked_at: DateTimeWrapper::new(Utc::now()),
             locked_until: None,
         }
     }
-
+ 
     async fn create_test_blockchain_with_registration(participant_id: &str, trust_points: u32) -> Arc<RwLock<Vec<Block>>> {
         let registration = block::RegistrationTransaction {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: UuidWrapper::new(Uuid::new_v4()).to_string(),
             participant_id: participant_id.to_string(),
             public_key: vec![1, 2, 3, 4], // dummy key
             initial_trust_points: trust_points,
             entity_type: "test".to_string(),
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             signature: vec![1, 2, 3, 4], // dummy signature
         };
         
         let mut block = Block {
             number: 0,
-            timestamp: Utc::now(),
+            timestamp: DateTimeWrapper::new(Utc::now()),
             previous_hash: "0".repeat(64),
             hash: String::new(),
             transactions: vec![Transaction::Registration(registration)],

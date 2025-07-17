@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 use tokio;
 use synapse::{
-    MessageUrgency, 
+    transport::abstraction::MessageUrgency, 
     transport::TransportRoute
 };
 
@@ -105,8 +105,8 @@ impl MultiTransportDemo {
                 }
                 self.available_transports.last().unwrap().clone()
             }
-            MessageUrgency::Discovery => {
-                // Always use standard email for discovery
+            MessageUrgency::Batch => {
+                // Always use standard email for batch processing
                 TransportRoute::StandardEmail { estimated_latency_min: 1 }
             }
         }
@@ -174,7 +174,7 @@ impl MultiTransportDemo {
     
     /// Test all transport selection scenarios
     pub async fn demo_transport_selection(&self) {
-        println!("🚀 Multi-Transport EMRP Demonstration\n");
+        println!("🚀 Multi-Transport Synapse Demonstration\n");
         
         let test_messages = vec![
             SimpleMessage {
@@ -199,7 +199,7 @@ impl MultiTransportDemo {
                 to: "unknown@example.com".to_string(),
                 from: "Claude".to_string(),
                 content: "Connection discovery request".to_string(),
-                urgency: MessageUrgency::Discovery,
+                urgency: MessageUrgency::Batch,
             },
         ];
         
@@ -259,7 +259,7 @@ impl MultiTransportDemo {
 
 #[tokio::main]
 async fn main() {
-    println!("🌟 Email-Based Message Routing Protocol (EMRP)");
+    println!("🌟 Synapse Neural Communication Network");
     println!("    Multi-Transport Architecture Demo\n");
     
     let router = MultiTransportDemo::new();

@@ -1,6 +1,8 @@
 //! Cryptographic operations for EMRP
 
-use crate::error::{CryptoError, Result};
+#[cfg(feature = "crypto")]
+use std::collections::HashMap;
+
 #[cfg(feature = "crypto")]
 use rsa::{
     pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey},
@@ -12,12 +14,23 @@ use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use sha2::{Digest, Sha256};
+#[cfg(feature = "crypto")]
+use sha2::{Sha256, Digest};
+#[cfg(feature = "crypto")]
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::collections::HashMap;
+#[cfg(feature = "crypto")]
+use uuid;
+#[cfg(feature = "crypto")]
+use tracing;
+
+use crate::error::{CryptoError, Result};
+use crate::synapse::blockchain::serialization::UuidWrapper;
+use uuid::Uuid;
+
 
 /// Manages all cryptographic operations for EMRP
 #[cfg(feature = "crypto")]
+#[derive(Debug)]
 pub struct CryptoManager {
     /// Our private key
     private_key: Option<RsaPrivateKey>,
@@ -25,6 +38,49 @@ pub struct CryptoManager {
     public_key: Option<RsaPublicKey>,
     /// Known public keys of other entities
     known_keys: HashMap<String, RsaPublicKey>,
+}
+
+/// Dummy crypto manager for when crypto feature is disabled
+#[cfg(not(feature = "crypto"))]
+pub struct CryptoManager;
+
+#[cfg(not(feature = "crypto"))]
+impl CryptoManager {
+    pub fn new() -> Self {
+        Self
+    }
+    
+    pub fn has_key_for(&self, _entity: &str) -> bool {
+        false
+    }
+    
+    pub fn encrypt_message(&self, _content: &str, _recipient: &str) -> Result<String> {
+        Err(CryptoError::Encryption("Crypto feature not enabled".to_string()).into())
+    }
+    
+    pub fn sign_message(&self, _content: &str) -> Result<Vec<u8>> {
+        Err(CryptoError::Signing("Crypto feature not enabled".to_string()).into())
+    }
+    
+    pub fn decrypt_message(&self, _encrypted_data: &[u8]) -> Result<String> {
+        Err(CryptoError::Decryption("Crypto feature not enabled".to_string()).into())
+    }
+    
+    pub fn verify_signature(&self, _content: &str, _signature: &[u8], _sender: &str) -> Result<bool> {
+        Ok(false)
+    }
+    
+    pub fn import_public_key(&mut self, _global_id: &str, _public_key_pem: &str) -> Result<()> {
+        Err(CryptoError::KeyGeneration("Crypto feature not enabled".to_string()).into())
+    }
+    
+    pub fn generate_keypair(&mut self) -> Result<(String, String)> {
+        Err(CryptoError::KeyGeneration("Crypto feature not enabled".to_string()).into())
+    }
+    
+    pub fn known_entities(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(feature = "crypto")]
@@ -267,7 +323,7 @@ impl CryptoManager {
 
     /// Generate a random message ID
     pub fn generate_message_id(&self) -> String {
-        uuid::Uuid::new_v4().to_string()
+        UuidWrapper::new(Uuid::new_v4()).to_string()
     }
 
     /// Check if we have a key for an entity
@@ -288,7 +344,7 @@ impl Default for CryptoManager {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "crypto"))]
 mod tests {
     use super::*;
 

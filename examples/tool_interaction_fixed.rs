@@ -49,7 +49,7 @@ async fn demo_file_operations() -> Result<()> {
     info!("📁 === File Operations Demo ===");
 
     // AI requests file listing
-    let list_request = SimpleMessage::new(
+    let _list_request = SimpleMessage::new(
         "Claude",
         "FileSystem", 
         json!({
@@ -65,7 +65,7 @@ async fn demo_file_operations() -> Result<()> {
     info!("🤖 Claude → FileSystem: {}", "Requesting file list");
 
     // FileSystem responds with file listing
-    let list_response = SimpleMessage::new(
+    let _list_response = SimpleMessage::new(
         "FileSystem",
         "Claude",
         json!({
@@ -81,7 +81,7 @@ async fn demo_file_operations() -> Result<()> {
     info!("📁 FileSystem → Claude: Found 3 items");
 
     // AI requests file content
-    let read_request = SimpleMessage::new(
+    let _read_request = SimpleMessage::new(
         "Claude", 
         "FileSystem",
         json!({
@@ -92,7 +92,7 @@ async fn demo_file_operations() -> Result<()> {
 
     info!("🤖 Claude → FileSystem: Reading document.txt");
 
-    let read_response = SimpleMessage::new(
+    let _read_response = SimpleMessage::new(
         "FileSystem",
         "Claude", 
         json!({
@@ -111,7 +111,7 @@ async fn demo_calculation_request() -> Result<()> {
     info!("🧮 === Calculation Demo ===");
 
     // AI requests mathematical calculation
-    let calc_request = SimpleMessage::new(
+    let _calc_request = SimpleMessage::new(
         "Claude",
         "Calculator",
         json!({
@@ -124,7 +124,7 @@ async fn demo_calculation_request() -> Result<()> {
     info!("🤖 Claude → Calculator: Requesting calculation");
 
     // Calculator responds with result
-    let calc_response = SimpleMessage::new(
+    let _calc_response = SimpleMessage::new(
         "Calculator", 
         "Claude",
         json!({
@@ -149,7 +149,7 @@ async fn demo_tool_capabilities() -> Result<()> {
     info!("⚙️ === Tool Capabilities Demo ===");
 
     // AI queries tool capabilities
-    let capabilities_request = SimpleMessage::new(
+    let _capabilities_request = SimpleMessage::new(
         "Claude",
         "FileSystem",
         json!({
@@ -160,7 +160,7 @@ async fn demo_tool_capabilities() -> Result<()> {
     info!("🤖 Claude → FileSystem: Requesting capabilities");
 
     // Tool responds with its capabilities
-    let capabilities_response = SimpleMessage::new(
+    let _capabilities_response = SimpleMessage::new(
         "FileSystem",
         "Claude",
         json!({

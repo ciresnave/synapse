@@ -1,6 +1,6 @@
 //! Enhanced TCP transport implementation with circuit breaker integration
 
-use super::{Transport, TransportMetrics};
+use super::abstraction::{Transport, TransportMetrics};
 use crate::{
     types::SecureMessage, 
     error::Result,
@@ -78,7 +78,7 @@ impl TcpTransport {
                 }
             }
         } else {
-            Err(crate::error::EmrpError::Transport("TCP listener not available".into()))
+            Err(crate::error::SynapseError::TransportError("TCP listener not available".into()))
         }
     }
     
@@ -93,7 +93,7 @@ impl TcpTransport {
                 // Parse and handle the message
                 if let Ok(message_str) = String::from_utf8(buffer) {
                     if let Ok(message) = serde_json::from_str::<SecureMessage>(&message_str) {
-                        debug!("Received EMRP message via TCP: {}", message.message_id);
+                        debug!("Received Synapse message via TCP: {}", message.message_id);
                         
                         // Queue the received message
                         if let Ok(mut queue) = message_queue.try_lock() {
@@ -120,24 +120,24 @@ impl TcpTransport {
             }
             Ok(Err(e)) => {
                 debug!("Failed to connect to {}: {}", addr, e);
-                Err(crate::error::EmrpError::Transport(format!("TCP connection failed: {}", e)))
+                Err(crate::error::SynapseError::TransportError(format!("TCP connection failed: {}", e)))
             }
             Err(_) => {
                 debug!("Timeout connecting to {}", addr);
-                Err(crate::error::EmrpError::Transport("TCP connection timeout".into()))
+                Err(crate::error::SynapseError::TransportError("TCP connection timeout".into()))
             }
         }
     }
     
     pub async fn send_via_stream(&self, stream: &mut TcpStream, message: &SecureMessage) -> Result<()> {
         let message_json = serde_json::to_string(message)
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to serialize message: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to serialize message: {}", e)))?;
         
         stream.write_all(message_json.as_bytes()).await
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to send TCP message: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to send TCP message: {}", e)))?;
         
         stream.flush().await
-            .map_err(|e| crate::error::EmrpError::Transport(format!("Failed to flush TCP stream: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to flush TCP stream: {}", e)))?;
         
         Ok(())
     }
@@ -162,7 +162,7 @@ impl TcpTransport {
             }
         }
         
-        // Fallback: try common EMRP ports on the target host
+        // Fallback: try common Synapse ports on the target host
         let host = if target.contains(':') {
             target.split(':').next().unwrap_or(target)
         } else {
@@ -185,10 +185,11 @@ impl TcpTransport {
             }
         }
         
-        Err(crate::error::EmrpError::Transport("No TCP ports available".into()))
+        Err(crate::error::SynapseError::TransportError("No TCP ports available".into()))
     }
 
     /// Internal connectivity test without circuit breaker checks
+    #[allow(dead_code)]
     async fn test_connectivity_internal(&self, target: &str) -> Result<Duration> {
         let start = Instant::now();
         let ports = vec![8080, 8443, 9090, 7777];
@@ -199,115 +200,144 @@ impl TcpTransport {
             }
         }
         
-        Err(crate::error::EmrpError::Transport("TCP connectivity test failed".into()))
+        Err(crate::error::SynapseError::TransportError("TCP connectivity test failed".into()))
     }
 }
 
 #[async_trait]
 impl Transport for TcpTransport {
-    async fn send_message(&self, target: &str, message: &SecureMessage) -> Result<String> {
-        // Check circuit breaker before proceeding
-        if !self.circuit_breaker.can_proceed().await {
-            return Err(crate::error::EmrpError::Transport(
-                format!("Circuit breaker is open for target {}", target)
-            ));
-        }
-
-        let _start_time = Instant::now();
-        let result = self.send_message_internal(target, message).await;
-
-        // Record the outcome with the circuit breaker
-        match &result {
-            Ok(_) => {
-                self.circuit_breaker.record_outcome(RequestOutcome::Success).await;
-            }
-            Err(e) => {
-                self.circuit_breaker.record_outcome(RequestOutcome::Failure(e.to_string())).await;
-            }
-        }
-
-        result
+    fn transport_type(&self) -> super::abstraction::TransportType {
+        super::abstraction::TransportType::Tcp
     }
     
-    async fn test_connectivity(&self, target: &str) -> Result<super::TransportMetrics> {
-        // Check circuit breaker before proceeding
-        if !self.circuit_breaker.can_proceed().await {
-            return Err(crate::error::EmrpError::Transport(
-                format!("Circuit breaker is open for target {}", target)
-            ));
-        }
-
-        let start_time = Instant::now();
-        let result = self.test_connectivity_internal(target).await;
-
-        // Record the outcome with the circuit breaker
-        match &result {
-            Ok(_) => {
-                self.circuit_breaker.record_outcome(RequestOutcome::Success).await;
-                // Return metrics for successful connectivity test
-                Ok(super::TransportMetrics {
-                    latency: start_time.elapsed(),
-                    throughput_bps: 10_000_000, // 10Mbps for TCP
-                    packet_loss: 0.001,
-                    jitter_ms: 5,
-                    reliability_score: 0.90,
-                    last_updated: Instant::now(),
-                })
-            }
-            Err(e) => {
-                self.circuit_breaker.record_outcome(RequestOutcome::Failure(e.to_string())).await;
-                Err(e.clone())
-            }
+    fn capabilities(&self) -> super::abstraction::TransportCapabilities {
+        super::abstraction::TransportCapabilities {
+            max_message_size: 1_048_576, // 1MB
+            reliable: true,
+            real_time: true,
+            broadcast: false,
+            bidirectional: true,
+            encrypted: false,
+            network_spanning: true,
+            supported_urgencies: vec![
+                super::abstraction::MessageUrgency::RealTime,
+                super::abstraction::MessageUrgency::Interactive,
+                super::abstraction::MessageUrgency::Background
+            ],
+            features: vec![
+                "circuit_breaker".to_string(),
+                "streaming".to_string()
+            ],
         }
     }
-
-    async fn receive_messages(&self) -> Result<Vec<SecureMessage>> {
-        // Return and clear all received messages
-        let mut messages = self.received_messages.lock().await;
-        let result = messages.clone();
-        messages.clear();
-        Ok(result)
-    }
-
-    async fn can_reach(&self, target: &str) -> bool {
+    
+    async fn can_reach(&self, target: &super::abstraction::TransportTarget) -> bool {
         // Parse target into host and port
-        if let Some((host, port_str)) = target.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                // Test connectivity to specific host:port
-                return self.connect(host, port).await.is_ok();
+        if let Some(addr) = &target.address {
+            if let Some((host, port_str)) = addr.rsplit_once(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return self.connect(host, port).await.is_ok();
+                }
             }
         }
         
-        // Fallback: try EMRP default ports if no port specified
+        // Try with identifier if no specific address
+        let host = &target.identifier;
         let ports = vec![8080, 8443, 9090, 7777];
         for port in ports {
-            if self.connect(target, port).await.is_ok() {
+            if self.connect(host, port).await.is_ok() {
                 return true;
             }
         }
         false
     }
     
-    fn get_capabilities(&self) -> Vec<String> {
-        let mut caps = vec![
-            "tcp".to_string(), 
-            "streaming".to_string(), 
-            "bidirectional".to_string(),
-            "circuit_breaker".to_string(),
-        ];
-        
-        if self.listener.is_some() {
-            caps.push("server".to_string());
+    async fn estimate_metrics(&self, target: &super::abstraction::TransportTarget) -> Result<super::abstraction::TransportEstimate> {
+        Ok(super::abstraction::TransportEstimate {
+            latency: Duration::from_millis(50),
+            reliability: 0.95,
+            bandwidth: 10_000_000, // 10 Mbps
+            cost: 0.1,
+            available: self.can_reach(target).await,
+            confidence: 0.8,
+        })
+    }
+    
+    async fn send_message(&self, target: &super::abstraction::TransportTarget, message: &SecureMessage) -> Result<super::abstraction::DeliveryReceipt> {
+        // Check circuit breaker before proceeding
+        if !self.circuit_breaker.can_proceed().await {
+            return Err(crate::error::SynapseError::TransportError(
+                format!("Circuit breaker is open for target {}", target.identifier)
+            ));
         }
+
+        let start_time = Instant::now();
+        let result = self.send_message_internal(&target.identifier, message).await;
+
+        // Record the outcome with the circuit breaker
+        match &result {
+            Ok(_) => {
+                self.circuit_breaker.record_outcome(RequestOutcome::Success).await;
+                Ok(super::abstraction::DeliveryReceipt {
+                    message_id: message.message_id.0.to_string(),
+                    transport_used: self.transport_type(),
+                    delivery_time: start_time.elapsed(),
+                    target_reached: target.identifier.clone(),
+                    confirmation: super::abstraction::DeliveryConfirmation::Sent,
+                    metadata: std::collections::HashMap::new(),
+                })
+            }
+            Err(e) => {
+                self.circuit_breaker.record_outcome(RequestOutcome::Failure(e.to_string())).await;
+                Err((*e).clone())
+            }
+        }
+    }
+    
+    async fn receive_messages(&self) -> Result<Vec<super::abstraction::IncomingMessage>> {
+        let mut messages = self.received_messages.lock().await;
+        let result: Vec<_> = messages.drain(..).map(|msg| {
+            super::abstraction::IncomingMessage::new(
+                msg,
+                self.transport_type(),
+                String::new() // Source address set later
+            )
+        }).collect();
+        Ok(result)
+    }
+    
+    async fn test_connectivity(&self, target: &super::abstraction::TransportTarget) -> Result<super::abstraction::ConnectivityResult> {
+        let start = Instant::now();
+        let can_reach = self.can_reach(target).await;
+        let rtt = if can_reach { Some(start.elapsed()) } else { None };
         
-        caps
+        Ok(super::abstraction::ConnectivityResult {
+            connected: can_reach,
+            rtt,
+            error: if can_reach { None } else { Some("Could not establish connection".to_string()) },
+            quality: if can_reach { 0.9 } else { 0.0 },
+            details: std::collections::HashMap::new(),
+        })
+    }
+
+    async fn start(&self) -> Result<()> {
+        Ok(()) // Already started in new()
     }
     
-    fn estimated_latency(&self) -> Duration {
-        Duration::from_millis(50) // 50ms typical for TCP
+    async fn stop(&self) -> Result<()> {
+        Ok(()) // No cleanup needed
     }
     
-    fn reliability_score(&self) -> f32 {
-        0.90 // High reliability for TCP
+    async fn status(&self) -> super::abstraction::TransportStatus {
+        if self.listener.is_some() {
+            super::abstraction::TransportStatus::Running
+        } else {
+            super::abstraction::TransportStatus::Degraded
+        }
+    }
+    
+    async fn metrics(&self) -> super::abstraction::TransportMetrics {
+        let metrics = self.metrics.read().unwrap();
+        metrics.clone()
     }
 }

@@ -1,4 +1,4 @@
-//! EMRP Email Server Implementation
+//! Synapse Email Server Implementation
 //! 
 //! High-performance SMTP and IMAP servers optimized for low-latency communication
 
@@ -7,25 +7,25 @@ pub mod imap_server;
 pub mod connectivity;
 pub mod auth;
 
-pub use smtp_server::{EmrpSmtpServer, SmtpServerConfig, AuthHandler};
-pub use imap_server::{EmrpImapServer, ImapServerConfig};
+pub use smtp_server::{SynapseSmtpServer, SmtpServerConfig, AuthHandler};
+pub use imap_server::{SynapseImapServer, ImapServerConfig};
 pub use connectivity::{ConnectivityDetector, ConnectivityAssessment, ServerRecommendation};
-pub use auth::{EmrpAuthHandler, UserAccount, UserPermissions, create_test_auth_handler};
+pub use auth::{SynapseAuthHandler, UserAccount, UserPermissions, create_test_auth_handler};
 
 use crate::error::Result;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tracing::{info, warn};
 
-/// Complete EMRP email server with both SMTP and IMAP
-pub struct EmrpEmailServer {
-    smtp_server: EmrpSmtpServer,
-    imap_server: EmrpImapServer,
+/// Complete Synapse email server with both SMTP and IMAP
+pub struct SynapseEmailServer {
+    smtp_server: SynapseSmtpServer,
+    imap_server: SynapseImapServer,
     connectivity: ConnectivityAssessment,
-    auth_handler: Arc<EmrpAuthHandler>,
+    auth_handler: Arc<SynapseAuthHandler>,
 }
 
-impl EmrpEmailServer {
+impl SynapseEmailServer {
     /// Create a new email server with automatic configuration
     pub async fn new() -> Result<Self> {
         // Assess connectivity first
@@ -35,7 +35,7 @@ impl EmrpEmailServer {
         info!("Email server connectivity assessment: {:?}", connectivity.recommended_config);
         
         // Create auth handler
-        let auth_handler = Arc::new(EmrpAuthHandler::new());
+        let auth_handler = Arc::new(SynapseAuthHandler::new());
         
         // Configure SMTP server
         let smtp_config = match &connectivity.recommended_config {
@@ -63,8 +63,8 @@ impl EmrpEmailServer {
         let message_store = Arc::new(Mutex::new(HashMap::new()));
         
         // Create servers
-        let smtp_server = EmrpSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-        let imap_server = EmrpImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
+        let smtp_server = SynapseSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
+        let imap_server = SynapseImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
         
         Ok(Self {
             smtp_server,
@@ -80,11 +80,11 @@ impl EmrpEmailServer {
         imap_config: ImapServerConfig,
         connectivity: ConnectivityAssessment,
     ) -> Result<Self> {
-        let auth_handler = Arc::new(EmrpAuthHandler::new());
+        let auth_handler = Arc::new(SynapseAuthHandler::new());
         let message_store = Arc::new(Mutex::new(HashMap::new()));
         
-        let smtp_server = EmrpSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-        let imap_server = EmrpImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
+        let smtp_server = SynapseSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
+        let imap_server = SynapseImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
         
         Ok(Self {
             smtp_server,
@@ -146,7 +146,7 @@ impl EmrpEmailServer {
     }
 
     /// Get auth handler for configuration
-    pub fn get_auth_handler(&self) -> Arc<EmrpAuthHandler> {
+    pub fn get_auth_handler(&self) -> Arc<SynapseAuthHandler> {
         Arc::clone(&self.auth_handler)
     }
 
@@ -183,7 +183,7 @@ impl EmrpEmailServer {
 }
 
 /// Create a test email server for development
-pub async fn create_test_email_server() -> Result<EmrpEmailServer> {
+pub async fn create_test_email_server() -> Result<SynapseEmailServer> {
     let auth_handler = Arc::new(create_test_auth_handler());
     
     // Use test configuration
@@ -213,10 +213,10 @@ pub async fn create_test_email_server() -> Result<EmrpEmailServer> {
     };
     
     let message_store = Arc::new(Mutex::new(HashMap::new()));
-    let smtp_server = EmrpSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-    let imap_server = EmrpImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
+    let smtp_server = SynapseSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
+    let imap_server = SynapseImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
     
-    Ok(EmrpEmailServer {
+    Ok(SynapseEmailServer {
         smtp_server,
         imap_server,
         connectivity,

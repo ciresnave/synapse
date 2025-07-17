@@ -2,6 +2,7 @@ use crate::synapse::blockchain::{Block, Transaction, BlockchainConfig};
 use crate::synapse::blockchain::block::{TrustReport, StakeTransaction, UnstakeTransaction};
 use crate::synapse::models::trust::TrustBalance;
 use anyhow::Result;
+use chrono::Utc;
 use std::collections::HashMap;
 use tracing::{info, debug, error};
 
@@ -125,8 +126,8 @@ impl VerificationEngine {
         }
 
         // Check timestamp
-        let now = chrono::Utc::now();
-        if block.timestamp > now {
+        let now = Utc::now();
+        if block.timestamp.0 > now {
             result.errors.push("Block timestamp is in the future".to_string());
             result.is_valid = false;
         }
@@ -147,7 +148,7 @@ impl VerificationEngine {
         }
 
         // Check timestamp sequence
-        if block.timestamp <= previous_block.timestamp {
+        if block.timestamp.0 <= previous_block.timestamp.0 {
             result.errors.push("Block timestamp not increasing".to_string());
             result.is_valid = false;
         }

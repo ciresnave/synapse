@@ -1,10 +1,10 @@
-# ⚙️ EMRP Configuration Guide
+# ⚙️ Synapse Configuration Guide
 
-This guide covers all configuration options available in the Email-Based Message Routing Protocol (EMRP).
+This guide covers all configuration options available in the Synapse neural communication network.
 
 ## 🏗️ Configuration Overview
 
-EMRP uses a builder pattern for configuration, allowing you to customize every aspect of the system:
+Synapse uses a builder pattern for configuration, allowing you to customize every aspect of the system:
 
 ```rust
 use message_routing_system::*;
@@ -275,7 +275,7 @@ let config = Config::builder()
 ```rust
 let config = Config::builder()
     // mDNS configuration
-    .mdns_service_name("_emrp._tcp.local.".to_string())
+    .mdns_service_name("_synapse._tcp.local.".to_string())
     .mdns_domain("local.".to_string())
     .mdns_ttl(120)                      // Default: 120 seconds
     
@@ -296,7 +296,7 @@ let config = Config::builder()
 let config = Config::builder()
     // DNS-based discovery
     .enable_dns_discovery(true)         // Default: true
-    .dns_discovery_domain("_emrp._tcp.example.com".to_string())
+    .dns_discovery_domain("_synapse._tcp.example.com".to_string())
     
     // Registry servers
     .registry_servers(vec![

@@ -40,7 +40,8 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Copy the binary from the builder stage
-COPY --from=builder /usr/src/synapse/target/release/synapse /app/
+COPY --from=builder /usr/src/synapse/target/release/synapse-router /app/synapse-router
+COPY --from=builder /usr/src/synapse/target/release/synapse-client /app/synapse-client
 COPY --from=builder /usr/src/synapse/config /app/config
 
 # Create a non-root user for security
@@ -60,5 +61,5 @@ EXPOSE 8080
 EXPOSE 8081/udp
 EXPOSE 8082
 
-# Run the binary
-CMD ["./synapse"]
+# Run the router binary by default
+CMD ["./synapse-router"]

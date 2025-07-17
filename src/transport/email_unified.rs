@@ -1,8 +1,8 @@
 //! Email Transport implementation conforming to the unified Transport trait
 
 use crate::{
-    types::{SecureMessage, EmailConfig},
-    error::{Result, EmrpError},
+    types::{SecureMessage, EmailConfig, synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper}},,
+    error::{Result, SynapseError},
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
 };
 use super::abstraction::*;
@@ -123,20 +123,20 @@ impl EmailTransportImpl {
         
         // Basic email format validation
         if !to_address.contains('@') {
-            return Err(crate::error::EmrpError::Transport(
+            return Err(crate::error::SynapseError::TransportError(
                 "Invalid email address format".to_string()
             ));
         }
         
         // Serialize message for email body
         let message_json = serde_json::to_string(message)
-            .map_err(|e| crate::error::EmrpError::Serialization(
+            .map_err(|e| crate::error::SynapseError::SerializationError(
                 format!("Failed to serialize email message: {}", e)
             ))?;
         
         // Check message size
         if message_json.len() > self.max_message_size {
-            return Err(crate::error::EmrpError::Transport(
+            return Err(crate::error::SynapseError::TransportError(
                 format!("Message too large: {} bytes", message_json.len())
             ));
         }
@@ -264,14 +264,14 @@ impl Transport for EmailTransportImpl {
         
         // Check circuit breaker before proceeding
         if !self.circuit_breaker.can_proceed().await {
-            return Err(EmrpError::Transport("Circuit breaker is open".to_string()));
+            return Err(SynapseError::TransportError("Circuit breaker is open".to_string()));
         }
 
         let start_time = Instant::now();
         
         // Attempt to send the email
         let send_result = timeout(self.connection_timeout, self.send_smtp_message(email_address, message)).await
-            .map_err(|_| EmrpError::Transport("Timeout sending email".to_string()))?;
+            .map_err(|_| SynapseError::TransportError("Timeout sending email".to_string()))?;
         
         let duration = start_time.elapsed();
         
@@ -307,14 +307,14 @@ impl Transport for EmailTransportImpl {
     async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
         // Check circuit breaker before proceeding
         if !self.circuit_breaker.can_proceed().await {
-            return Err(EmrpError::Transport("Circuit breaker is open".to_string()));
+            return Err(SynapseError::TransportError("Circuit breaker is open".to_string()));
         }
 
         let start_time = Instant::now();
         
         // Attempt to check for new messages
         let check_result = timeout(self.connection_timeout, self.check_imap_messages()).await
-            .map_err(|_| EmrpError::Transport("Timeout checking email".to_string()))?;
+            .map_err(|_| SynapseError::TransportError("Timeout checking email".to_string()))?;
         
         match check_result {
             Ok(messages) => {

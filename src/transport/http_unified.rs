@@ -3,24 +3,27 @@
 //! This transport uses HTTP/HTTPS requests to send messages, making it useful
 //! for environments with restrictive firewalls that only allow web traffic.
 
-use crate::{
-    types::SecureMessage,
-    error::{Result, EmrpError},
-    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
-};
-use super::abstraction::*;
-use async_trait::async_trait;
-use std::{
-    time::{Duration, Instant},
-    sync::{Arc, RwLock},
-    collections::HashMap,
-    net::SocketAddr,
-};
-use tokio::sync::Mutex;
-use tracing::{info, debug, warn};
-use serde_json;
 #[cfg(feature = "http")]
-use reqwest::{Client, ClientBuilder};
+mod http_impl {
+    use crate::error::{Result, SynapseError};
+    use crate::transport::abstraction::{
+        Transport, TransportMetrics, TransportType, TransportCapabilities, 
+        TransportStatus, TransportTarget, TransportEstimate, IncomingMessage,
+        MessageUrgency, DeliveryReceipt, ConnectivityResult, DeliveryConfirmation,
+        TransportFactory,
+    };
+    use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome};
+    use crate::types::SecureMessage;
+    use tracing::{debug, info, warn};
+    use async_trait::async_trait;
+    use std::{
+        time::{Duration, Instant},
+        sync::{Arc, RwLock},
+        collections::HashMap,
+        net::SocketAddr,
+    };
+    use tokio::sync::Mutex;
+    use reqwest::{Client, ClientBuilder};
 
 /// HTTP/HTTPS Transport implementation
 #[cfg(feature = "http")]
@@ -125,7 +128,7 @@ impl HttpTransportImpl {
             .pool_max_idle_per_host(transport_config.max_connections)
             .user_agent(&transport_config.user_agent)
             .build()
-            .map_err(|e| EmrpError::Transport(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Failed to create HTTP client: {}", e)))?;
         
         // Create circuit breaker
         let circuit_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
@@ -171,7 +174,7 @@ impl HttpTransportImpl {
         
         let server_addr = format!("{}:{}", self.config.server_address, self.config.server_port)
             .parse::<SocketAddr>()
-            .map_err(|e| EmrpError::Transport(format!("Invalid server address: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Invalid server address: {}", e)))?;
         
         let server = HttpServer {
             address: server_addr,
@@ -194,11 +197,11 @@ impl HttpTransportImpl {
         
         // Serialize message
         let json_payload = serde_json::to_string(message)
-            .map_err(|e| EmrpError::Serialization(format!("Failed to serialize message: {}", e)))?;
+            .map_err(|e| SynapseError::SerializationError(e.to_string()))?;
         
         // Check message size
         if json_payload.len() > self.config.max_message_size {
-            return Err(EmrpError::Transport(format!(
+            return Err(SynapseError::TransportError(format!(
                 "Message size {} exceeds maximum {}",
                 json_payload.len(),
                 self.config.max_message_size
@@ -217,7 +220,7 @@ impl HttpTransportImpl {
         
         // Send request
         let response = request.send().await
-            .map_err(|e| EmrpError::Transport(format!("HTTP request failed: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("HTTP request failed: {}", e)))?;
         
         let status_code = response.status();
         let latency = start_time.elapsed();
@@ -244,7 +247,7 @@ impl HttpTransportImpl {
         if status_code.is_success() {
             info!("HTTP message sent successfully to {} ({}ms)", url, latency.as_millis());
             Ok(DeliveryReceipt {
-                message_id: message.message_id.to_string(),
+                message_id: message.message_id.0.to_string(),
                 target_reached: url.to_string(),
                 transport_used: TransportType::Http,
                 confirmation: DeliveryConfirmation::Sent,
@@ -259,7 +262,7 @@ impl HttpTransportImpl {
         } else {
             let error_msg = format!("HTTP request failed with status {}", status_code);
             warn!("{}", error_msg);
-            Err(EmrpError::Transport(error_msg))
+            Err(SynapseError::TransportError(error_msg))
         }
     }
     
@@ -354,7 +357,7 @@ impl Transport for HttpTransportImpl {
         
         // Check circuit breaker
         if !self.circuit_breaker.can_proceed().await {
-            return Err(EmrpError::Transport("HTTP circuit breaker is open".to_string()));
+            return Err(SynapseError::TransportError("HTTP circuit breaker is open".to_string()));
         }
         
         // Send HTTP request
@@ -519,30 +522,35 @@ impl TransportFactory for HttpTransportFactory {
         // Validate server port
         if let Some(port_str) = config.get("server_port") {
             if port_str.parse::<u16>().is_err() {
-                return Err(EmrpError::Config(crate::error::ConfigError::ValidationFailed(
+                return Err(SynapseError::Config(
                     "Invalid server port number".to_string()
-                )));
+                ));
             }
         }
         
         // Validate timeout
         if let Some(timeout_str) = config.get("timeout_ms") {
             if timeout_str.parse::<u64>().is_err() {
-                return Err(EmrpError::Config(crate::error::ConfigError::ValidationFailed(
+                return Err(SynapseError::Config(
                     "Invalid timeout value".to_string()
-                )));
+                ));
             }
         }
         
         // Validate max message size
         if let Some(size_str) = config.get("max_message_size") {
             if size_str.parse::<usize>().is_err() {
-                return Err(EmrpError::Config(crate::error::ConfigError::ValidationFailed(
+                return Err(SynapseError::Config(
                     "Invalid max message size".to_string()
-                )));
+                ));
             }
         }
         
         Ok(())
     }
 }
+
+} // end http_impl module
+
+#[cfg(feature = "http")]
+pub use http_impl::*;

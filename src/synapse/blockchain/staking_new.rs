@@ -60,14 +60,14 @@ impl StakingManager {
         amount: u32,
         purpose: StakePurpose,
     ) -> Result<String> {
-        let stake_id = format!("stake_{}", uuid::Uuid::new_v4());
+        let stake_id = format!("stake_{}", UuidWrapper::new(uuid::UuidWrapper::new(Uuid::new_v4())));
         
         let stake = ActiveStake {
             id: stake_id.clone(),
             participant_id: participant_id.clone(),
             amount,
             purpose,
-            staked_at: Utc::now(),
+            staked_at: DateTimeWrapper::new(Utc::now()),
             locked_until: None,
         };
         
@@ -142,7 +142,7 @@ impl StakingManager {
     ) -> Result<()> {
         if let Some(mut stakes) = self.active_stakes.get_mut(participant_id) {
             if let Some(stake) = stakes.iter_mut().find(|s| s.id == stake_id) {
-                stake.locked_until = Some(Utc::now() + duration);
+                stake.locked_until = Some(DateTimeWrapper::new(Utc::now()) + duration);
                 return Ok(());
             }
         }
@@ -166,7 +166,7 @@ impl ActiveStake {
     /// Check if stake is currently locked
     pub fn is_locked(&self) -> bool {
         if let Some(locked_until) = self.locked_until {
-            Utc::now() < locked_until
+            DateTimeWrapper::new(Utc::now()) < locked_until
         } else {
             false
         }

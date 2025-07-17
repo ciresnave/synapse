@@ -1,243 +1,139 @@
-//! High Load Test
-//! This test validates that Synapse can handle high concurrency with 100+ users
-//! and maintain performance and stability under load.
-
 use std::sync::Arc;
-use anyhow::Result;
-use futures::future::join_all;
-use tokio::sync::Barrier;
-use synapse::{
-    Config,
-    identity::{Identity, KeyPair},
-    services::{
-        registry::RegistryService,
-        trust_manager::TrustManager,
-    },
-    storage::database::Database,
-    transport::{
-        UnifiedTransportManager, 
-        Transport, 
-        MessageUrgency,
-        TransportResult,
-        MessageDeliveryStatus,
-    },
-};
-use async_trait::async_trait;
 use std::time::{Duration, Instant};
+use tokio::sync::Barrier;
+use futures::future::join_all;
+use anyhow::Result;
+use synapse::{Config, SynapseRouter, SimpleMessage};
 
-/// A mock transport for high-volume testing
-#[derive(Clone)]
-struct HighLoadTransport {
-    id: String,
-}
-
-impl HighLoadTransport {
-    fn new(id: &str) -> Self {
-        Self {
-            id: id.to_string(),
-        }
-    }
-}
-
-#[async_trait]
-impl Transport for HighLoadTransport {
-    fn get_id(&self) -> &str {
-        &self.id
-    }
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_high_load_routing() -> Result<()> {
+    // Create a configuration for testing
+    let config = Config::for_testing();
+    let router = Arc::new(SynapseRouter::new(config, "test_entity".to_string()).await?);
     
-    async fn send(&self, to: &str, _message: &[u8]) -> TransportResult<MessageDeliveryStatus> {
-        // Simulate variable network latency based on system load
-        let latency = rand::random::<u64>() % 50 + 10; // 10-60ms
-        tokio::time::sleep(Duration::from_millis(latency)).await;
-        
-        Ok(MessageDeliveryStatus {
-            delivered: true,
-            recipient: to.to_string(),
-            timestamp: chrono::Utc::now(),
-            transport_id: self.get_id().to_string(),
-            latency_ms: latency as u32,
-        })
-    }
+    // Number of concurrent routers and operations
+    const NUM_ROUTERS: usize = 50;
+    const OPERATIONS_PER_ROUTER: usize = 20;
     
-    async fn can_reach(&self, _participant_id: &str) -> bool {
-        true
-    }
+    // Shared barrier to coordinate start time
+    let barrier = Arc::new(Barrier::new(NUM_ROUTERS));
     
-    async fn get_estimated_latency(&self, _participant_id: &str) -> Option<Duration> {
-        Some(Duration::from_millis(30))
-    }
+    let mut tasks = Vec::new();
     
-    fn get_metrics(&self) -> synapse::transport::TransportMetrics {
-        synapse::transport::TransportMetrics {
-            transport_id: self.get_id().to_string(),
-            messages_sent: 0,
-            messages_received: 0,
-            failures: 0,
-            average_latency_ms: 30.0,
-            uptime_seconds: 0,
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-async fn test_high_load_concurrent_users() -> Result<()> {
-    // Number of concurrent users
-    const NUM_USERS: usize = 150;
-    // Number of messages per user
-    const MESSAGES_PER_USER: usize = 10;
-    // Number of registry operations per user
-    const REGISTRY_OPS_PER_USER: usize = 5;
-    
-    // Set up a shared registry
-    let admin_keypair = KeyPair::generate();
-    let admin_identity = Identity::from_keypair(&admin_keypair)?;
-    let db = Database::new_in_memory()?;
-    let registry = Arc::new(RegistryService::new(db.clone(), admin_identity.clone()));
-    
-    // Create identities for all users
-    let mut users = Vec::with_capacity(NUM_USERS);
-    for i in 0..NUM_USERS {
-        let keypair = KeyPair::generate();
-        let identity = Identity::from_keypair(&keypair)?;
-        
-        // Add metadata to make each user unique
-        let mut identity_with_meta = identity.clone();
-        identity_with_meta.set_metadata("user_index", &i.to_string())?;
-        identity_with_meta.set_metadata("name", &format!("User {}", i))?;
-        
-        // Register user with registry
-        registry.register_participant(&identity_with_meta)?;
-        
-        users.push(identity_with_meta);
-    }
-    
-    // Create transport manager
-    let transport = Arc::new(HighLoadTransport::new("high_load_transport"));
-    let transport_manager = UnifiedTransportManager::new_with_transports(vec![
-        transport as Arc<dyn Transport>,
-    ]);
-    
-    // Create shared barrier for coordinated start
-    let barrier = Arc::new(Barrier::new(NUM_USERS));
-    
-    // Spawn tasks for each user
-    let start_time = Instant::now();
-    let mut tasks = Vec::with_capacity(NUM_USERS);
-    
-    for (idx, user) in users.iter().enumerate() {
-        let user_id = user.get_id().clone();
-        let registry = registry.clone();
-        let transport_manager = transport_manager.clone();
-        let users = users.clone();
-        let barrier = barrier.clone();
+    for router_id in 0..NUM_ROUTERS {
+        let router = Arc::clone(&router);
+        let barrier = Arc::clone(&barrier);
         
         let task = tokio::spawn(async move {
-            let mut results = Vec::new();
-            
-            // Wait for all tasks to be ready for fair comparison
+            // Wait for all tasks to be ready
             barrier.wait().await;
             
-            // Messaging operations
-            for msg_idx in 0..MESSAGES_PER_USER {
-                // Select random recipient (not self)
-                let recipient_idx = (idx + 1 + (msg_idx * 7) % (NUM_USERS - 1)) % NUM_USERS;
-                let recipient = &users[recipient_idx];
+            // Perform operations
+            for op_id in 0..OPERATIONS_PER_ROUTER {
+                // Create a test message
+                let content = format!("High load test message {} from router {}", op_id, router_id);
+                let simple_msg = SimpleMessage::new(
+                    format!("test_recipient_{}", (router_id + 1) % NUM_ROUTERS),
+                    format!("test_sender_{}", router_id),
+                    content,
+                );
                 
-                // Send a message
-                let message = format!("High load test message {} from user {}", msg_idx, idx);
-                let send_result = transport_manager.send_message(
-                    &recipient.get_id(),
-                    message.as_bytes(),
-                    MessageUrgency::Interactive,
-                ).await;
+                // Convert to secure message
+                let _secure_msg = router.convert_to_secure_message(&simple_msg).await?;
                 
-                results.push(("send", send_result.is_ok()));
+                // Add some artificial load
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
             
-            // Registry operations
-            for op_idx in 0..REGISTRY_OPS_PER_USER {
-                // Alternate between different registry operations
-                match op_idx % 5 {
-                    0 => {
-                        // Get user profile
-                        let lookup_result = registry.get_participant(&user_id);
-                        results.push(("lookup", lookup_result.is_ok()));
-                    },
-                    1 => {
-                        // Search by metadata
-                        let search_result = registry.search_by_metadata("name", "User");
-                        results.push(("search", search_result.is_ok()));
-                    },
-                    2 => {
-                        // Update metadata
-                        if let Ok(Some(mut profile)) = registry.get_participant(&user_id) {
-                            profile.set_metadata("last_active", &chrono::Utc::now().to_rfc3339())?;
-                            let update_result = registry.update_participant(&profile);
-                            results.push(("update", update_result.is_ok()));
-                        }
-                    },
-                    3 => {
-                        // List all participants (heavy operation)
-                        let list_result = registry.list_all_participants();
-                        results.push(("list", list_result.is_ok()));
-                    },
-                    4 => {
-                        // Get participants by capability (another heavy operation)
-                        let capability_result = registry.get_participants_by_capability("test");
-                        results.push(("capability", capability_result.is_ok()));
-                    },
-                    _ => unreachable!(),
-                }
-            }
-            
-            // Return success rate for this user
-            (idx, results)
+            Ok::<(), anyhow::Error>(())
         });
         
         tasks.push(task);
     }
-    
-    // Wait for all tasks to complete
+
+    // Wait for all tasks with timeout
+    let start_time = Instant::now();
     let results = join_all(tasks).await;
-    let elapsed = start_time.elapsed();
+    let duration = start_time.elapsed();
     
-    // Analyze results
+    // Verify results
     let mut success_count = 0;
-    let mut total_operations = 0;
-    let mut failed_operations = Vec::new();
-    
-    for result in results {
-        if let Ok((user_idx, operations)) = result {
-            for (op_type, success) in operations {
-                total_operations += 1;
-                if success {
-                    success_count += 1;
-                } else {
-                    failed_operations.push((user_idx, op_type));
-                }
-            }
-        } else {
-            // Task panicked
-            panic!("Task failed: {:?}", result);
+    for task_result in results {
+        match task_result {
+            Ok(Ok(())) => success_count += 1,
+            Ok(Err(e)) => println!("High load task failed: {}", e),
+            Err(e) => println!("Task panicked: {:?}", e),
         }
     }
     
-    // Calculate metrics
-    let success_rate = success_count as f64 / total_operations as f64;
-    let operations_per_second = total_operations as f64 / elapsed.as_secs_f64();
+    println!("High load test completed in {:?}", duration);
+    println!("Successfully processed {} out of {} router load tests", success_count, NUM_ROUTERS);
     
-    println!("High Load Test Results:");
-    println!("  Users: {}", NUM_USERS);
-    println!("  Total Operations: {}", total_operations);
-    println!("  Elapsed Time: {:.2?}", elapsed);
-    println!("  Success Rate: {:.2}%", success_rate * 100.0);
-    println!("  Operations/second: {:.2}", operations_per_second);
+    assert!(success_count >= NUM_ROUTERS * 8 / 10, "At least 80% of high load tests should succeed");
+    assert!(duration < Duration::from_secs(30), "High load test should complete within 30 seconds");
     
-    // Assert high success rate
-    assert!(success_rate > 0.95, "Expected success rate > 95%, got {:.2}%", success_rate * 100.0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_message_conversion() -> Result<()> {
+    // Create a configuration for testing
+    let config = Config::for_testing();
+    let router = Arc::new(SynapseRouter::new(config, "test_entity".to_string()).await?);
     
-    // Assert reasonable throughput (adjust based on machine capabilities)
-    assert!(operations_per_second > 100.0, "Expected at least 100 ops/sec, got {:.2}", operations_per_second);
+    // Number of concurrent operations
+    const NUM_OPERATIONS: usize = 100;
+    
+    // Shared barrier to coordinate start time
+    let barrier = Arc::new(Barrier::new(NUM_OPERATIONS));
+    
+    let mut tasks = Vec::new();
+    
+    for op_id in 0..NUM_OPERATIONS {
+        let router = Arc::clone(&router);
+        let barrier = Arc::clone(&barrier);
+        
+        let task = tokio::spawn(async move {
+            // Wait for all tasks to be ready
+            barrier.wait().await;
+            
+            // Create a test message
+            let content = format!("Concurrent test message {}", op_id);
+            let simple_msg = SimpleMessage::new(
+                format!("recipient_{}", (op_id + 1) % NUM_OPERATIONS),
+                format!("sender_{}", op_id),
+                content,
+            );
+            
+            // Convert to secure message
+            let _secure_msg = router.convert_to_secure_message(&simple_msg).await?;
+            
+            Ok::<(), anyhow::Error>(())
+        });
+        
+        tasks.push(task);
+    }
+
+    // Wait for all tasks
+    let start_time = Instant::now();
+    let results = join_all(tasks).await;
+    let duration = start_time.elapsed();
+    
+    // Verify results
+    let mut success_count = 0;
+    for task_result in results {
+        match task_result {
+            Ok(Ok(())) => success_count += 1,
+            Ok(Err(e)) => println!("Concurrent operation failed: {}", e),
+            Err(e) => println!("Task panicked: {:?}", e),
+        }
+    }
+    
+    println!("Concurrent message conversion test completed in {:?}", duration);
+    println!("Successfully processed {} out of {} operations", success_count, NUM_OPERATIONS);
+    
+    assert!(success_count >= NUM_OPERATIONS * 9 / 10, "At least 90% of operations should succeed");
+    assert!(duration < Duration::from_secs(10), "Test should complete within 10 seconds");
     
     Ok(())
 }

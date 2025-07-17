@@ -1,6 +1,6 @@
 //! High-performance IMAP server for EMRP
 
-use crate::error::{EmrpError, Result};
+use crate::error::{SynapseError, Result};
 use crate::types::SecureMessage;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, error, debug};
 
 /// High-performance IMAP server optimized for EMRP
-pub struct EmrpImapServer {
+pub struct SynapseImapServer {
     /// Server configuration
     config: ImapServerConfig,
     /// Message store (shared with SMTP server)
@@ -78,7 +78,7 @@ impl Default for ImapServerConfig {
     }
 }
 
-impl EmrpImapServer {
+impl SynapseImapServer {
     /// Create a new IMAP server
     pub fn new(
         config: ImapServerConfig,
@@ -97,7 +97,7 @@ impl EmrpImapServer {
     pub async fn start(&self) -> Result<()> {
         let addr = format!("0.0.0.0:{}", self.config.port);
         let listener = TcpListener::bind(&addr).await
-            .map_err(|e| EmrpError::Network(format!("Failed to bind IMAP server to {}: {}", addr, e)))?;
+            .map_err(|e| SynapseError::NetworkError(format!("Failed to bind IMAP server to {}: {}", addr, e)))?;
 
         info!("EMRP IMAP Server listening on {}", addr);
 
@@ -349,7 +349,7 @@ impl EmrpImapServer {
     }
 }
 
-impl Clone for EmrpImapServer {
+impl Clone for SynapseImapServer {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),

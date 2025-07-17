@@ -2,7 +2,7 @@
 
 use crate::{
     types::SecureMessage,
-    error::{Result, EmrpError},
+    error::{Result, SynapseError},
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
 };
 use super::abstraction::*;
@@ -69,12 +69,12 @@ impl UdpTransportImpl {
         let bind_addr = format!("0.0.0.0:{}", self.bind_port);
         
         let socket = UdpSocket::bind(&bind_addr).await
-            .map_err(|e| EmrpError::Transport(
+            .map_err(|e| SynapseError::TransportError(
                 format!("Failed to bind UDP socket to {}: {}", bind_addr, e)
             ))?;
             
         let local_addr = socket.local_addr()
-            .map_err(|e| EmrpError::Transport(
+            .map_err(|e| SynapseError::TransportError(
                 format!("Failed to get UDP local address: {}", e)
             ))?;
             
@@ -139,11 +139,11 @@ impl UdpTransportImpl {
         
         // Serialize message
         let message_json = serde_json::to_string(message)
-            .map_err(|e| EmrpError::Transport(format!("Failed to serialize message: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Failed to serialize message: {}", e)))?;
         
         // Check message size
         if message_json.len() > self.max_message_size {
-            return Err(EmrpError::Transport(
+            return Err(SynapseError::TransportError(
                 format!("Message too large for UDP: {} bytes (max: {})", 
                         message_json.len(), self.max_message_size)
             ));
@@ -157,7 +157,7 @@ impl UdpTransportImpl {
         } else {
             // Create temporary socket for sending
             let temp_socket = UdpSocket::bind("0.0.0.0:0").await
-                .map_err(|e| EmrpError::Transport(
+                .map_err(|e| SynapseError::TransportError(
                     format!("Failed to create UDP socket for sending: {}", e)
                 ))?;
             temp_socket.send_to(message_json.as_bytes(), target_addr).await
@@ -186,7 +186,7 @@ impl UdpTransportImpl {
                 }
                 
                 Ok(DeliveryReceipt {
-                    message_id: message.message_id.to_string(),
+                    message_id: message.message_id.0.to_string(),
                     transport_used: TransportType::Udp,
                     delivery_time: send_time,
                     target_reached: target_addr.to_string(),
@@ -200,7 +200,7 @@ impl UdpTransportImpl {
                 })
             }
             Err(e) => {
-                Err(EmrpError::Transport(
+                Err(SynapseError::TransportError(
                     format!("Failed to send UDP message: {}", e)
                 ))
             }
@@ -217,26 +217,26 @@ impl UdpTransportImpl {
                         let host = &address[..colon_pos];
                         let port_str = &address[colon_pos + 1..];
                         let port = port_str.parse::<u16>()
-                            .map_err(|_| EmrpError::Transport(
+                            .map_err(|_| SynapseError::TransportError(
                                 format!("Invalid port in address: {}", address)
                             ))?;
                         format!("{}:{}", host, port).parse()
-                            .map_err(|e| EmrpError::Transport(
+                            .map_err(|e| SynapseError::TransportError(
                                 format!("Failed to parse address: {}", e)
                             ))
                     } else {
-                        Err(EmrpError::Transport(
+                        Err(SynapseError::TransportError(
                             format!("Invalid UDP address format: {}", address)
                         ))
                     }
                 })
-                .map_err(|e| EmrpError::Transport(
+                .map_err(|e| SynapseError::TransportError(
                     format!("Failed to parse UDP address '{}': {}", address, e)
                 ))
         } else {
             // Use identifier as hostname with default UDP port
             format!("{}:8081", target.identifier).parse()
-                .map_err(|e| EmrpError::Transport(
+                .map_err(|e| SynapseError::TransportError(
                     format!("Failed to parse identifier as UDP address: {}", e)
                 ))
         }
@@ -426,7 +426,7 @@ impl TransportFactory for UdpTransportFactory {
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
         if let Some(port_str) = config.get("bind_port") {
             if port_str.parse::<u16>().is_err() {
-                return Err(EmrpError::Transport(
+                return Err(SynapseError::TransportError(
                     format!("Invalid bind_port: {}", port_str)
                 ));
             }
@@ -435,12 +435,12 @@ impl TransportFactory for UdpTransportFactory {
         if let Some(size_str) = config.get("max_message_size") {
             if let Ok(size) = size_str.parse::<usize>() {
                 if size > 65507 {
-                    return Err(EmrpError::Transport(
+                    return Err(SynapseError::TransportError(
                         "max_message_size cannot exceed 65507 bytes for UDP".to_string()
                     ));
                 }
             } else {
-                return Err(EmrpError::Transport(
+                return Err(SynapseError::TransportError(
                     format!("Invalid max_message_size: {}", size_str)
                 ));
             }

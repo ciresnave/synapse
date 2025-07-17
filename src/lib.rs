@@ -1,4 +1,4 @@
-//! # Synapse: Neural Communication Network
+//! # Synapse: Neural Communi/// This means you can send messages using simple, human-readable names, and Synapseation Network
 //! 
 //! **A revolutionary neural communication network for AI entities, distributed systems, and modern applications
 //! with federated identity management, dual trust systems, and privacy-respecting discovery.**
@@ -27,7 +27,7 @@
 //! "LocalBot" → bot@localhost → 127.0.0.1:9090 → UDP (fast local)
 //! ```
 //!
-//! This means you can send messages using simple, human-readable names, and EMRP
+//! This means you can send messages using simple, human-readable names, and Synapse
 //! automatically figures out:
 //! - Where the recipient is located (email address, IP, domain)
 //! - How to reach them (direct connection, relay, email)
@@ -36,7 +36,7 @@
 //!
 //! ## 🏗️ Architecture Overview
 //!
-//! EMRP operates on multiple intelligent layers:
+//! Synapse operates on multiple intelligent layers:
 //!
 //! ### Layer 1: Message Layer
 //! - Simple message types: Direct, Broadcast, Conversation, Notification
@@ -69,7 +69,7 @@
 //! async fn main() -> Result<()> {
 //!     // Initialize with your identity
 //!     let config = Config::default();
-//!     let router = EnhancedEmrpRouter::new(config, "MyBot@example.com".to_string()).await?;
+//!     let router = EnhancedSynapseRouter::new(config, "MyBot@example.com".to_string()).await?;
 //!     
 //!     // Register some contacts (or use auto-discovery)
 //!     router.register_peer("Alice", "alice@ai-lab.example.com").await?;
@@ -80,7 +80,7 @@
 //!     // Send messages using simple names!
 //!     router.send_message_smart(
 //!         "Alice",                          // Just the name
-//!         "Hello from EMRP!",              // Your message  
+//!         "Hello from Synapse!",           // Your message  
 //!         MessageType::Direct,             // Type of communication
 //!         SecurityLevel::Authenticated,    // Security level
 //!         MessageUrgency::Interactive,     // Speed vs reliability preference
@@ -94,7 +94,7 @@
 //!
 //! ### Automatic Transport Selection
 //! 
-//! EMRP intelligently chooses the best transport based on:
+//! Synapse intelligently chooses the best transport based on:
 //! - **Message urgency**: Real-time vs. reliable delivery
 //! - **Network conditions**: Latency, bandwidth, connectivity  
 //! - **Security requirements**: Encryption levels, authentication
@@ -123,7 +123,7 @@
 //! When your system is externally accessible, EMRP can run a full email server:
 //!
 //! ```rust
-//! let router = EnhancedEmrpRouter::new(config, "bot@mydomain.com".to_string()).await?;
+//! let router = EnhancedSynapseRouter::new(config, "bot@mydomain.com".to_string()).await?;
 //! 
 //! if router.is_running_email_server() {
 //!     // You can receive emails directly at bot@mydomain.com
@@ -214,9 +214,13 @@ pub mod monitoring;
 
 pub mod transport;
 
+// Re-export commonly used types
+pub use crypto::CryptoManager;
+pub use email::EmailTransport;
+
 // Re-export transport types needed for tests
-pub use transport::{Transport, TransportSelector, HybridConnection, TransportMetrics};
-pub use transport::nat_traversal::NatMethod;
+pub use transport::{Transport, TransportSelector, HybridConnection, TransportMetrics, NatMethod};
+pub use transport::providers::{TransportProvider, ProductionTransportProvider, TestTransportProvider, MockTransport};
 pub use config::Config;
 
 // Synapse Neural Communication Network
@@ -228,18 +232,18 @@ pub mod synapse;
 pub mod wasm;
 
 // Re-export key types for convenience
-pub use error::EmrpError;
+pub use error::SynapseError;
 pub use types::*;
 
 // Re-export transport types for tests and external usage
 pub use transport::{
     TransportRoute,
-    MessageUrgency,
 };
+pub use transport::abstraction::MessageUrgency;
 
 // Re-export router types for tests and external usage
-pub use router::EmrpRouter;
-pub use router_enhanced::EnhancedEmrpRouter;
+pub use router::SynapseRouter;
+pub use router_enhanced::EnhancedSynapseRouter;
 pub use transport::router::MultiTransportRouter;
 
 // Re-export Synapse key types (only on non-WASM platforms)
@@ -255,10 +259,14 @@ pub use synapse::models;
 pub use synapse::services;
 pub use synapse::storage;
 
+// Auth integration module (conditional based on auth feature)
+#[cfg(feature = "auth")]
+pub mod auth_integration;
+
 #[cfg(not(target_arch = "wasm32"))]
 use tracing_subscriber;
 
-/// Initialize the EMRP system with logging (not available on WASM)
+/// Initialize the Synapse system with logging (not available on WASM)
 #[cfg(not(target_arch = "wasm32"))]
 pub fn init_logging() {
     tracing_subscriber::fmt::init();
@@ -267,16 +275,16 @@ pub fn init_logging() {
 /// Current protocol version
 pub const PROTOCOL_VERSION: &str = "1.0.0";
 
-/// Standard email headers for EMRP
+/// Standard email headers for Synapse
 pub mod headers {
-    pub const VERSION: &str = "X-EMRP-Version";
-    pub const MESSAGE_TYPE: &str = "X-EMRP-Message-Type";
-    pub const FROM_ENTITY: &str = "X-EMRP-From-Entity";
-    pub const TO_ENTITY: &str = "X-EMRP-To-Entity";
-    pub const ENTITY_TYPE: &str = "X-EMRP-Entity-Type";
-    pub const CAPABILITIES: &str = "X-EMRP-Capabilities";
-    pub const ENCRYPTED: &str = "X-EMRP-Encrypted";
-    pub const SIGNED: &str = "X-EMRP-Signed";
-    pub const REQUEST_ID: &str = "X-EMRP-Request-ID";
-    pub const TIMESTAMP: &str = "X-EMRP-Timestamp";
+    pub const VERSION: &str = "X-Synapse-Version";
+    pub const MESSAGE_TYPE: &str = "X-Synapse-Message-Type";
+    pub const FROM_ENTITY: &str = "X-Synapse-From-Entity";
+    pub const TO_ENTITY: &str = "X-Synapse-To-Entity";
+    pub const ENTITY_TYPE: &str = "X-Synapse-Entity-Type";
+    pub const CAPABILITIES: &str = "X-Synapse-Capabilities";
+    pub const ENCRYPTED: &str = "X-Synapse-Encrypted";
+    pub const SIGNED: &str = "X-Synapse-Signed";
+    pub const REQUEST_ID: &str = "X-Synapse-Request-ID";
+    pub const TIMESTAMP: &str = "X-Synapse-Timestamp";
 }

@@ -5,7 +5,7 @@
 
 use crate::{
     error::Result,
-    transport::abstraction::{TransportMetrics},
+    transport::abstraction::TransportMetrics,
 };
 use std::{
     sync::Arc,

@@ -15,7 +15,7 @@ use js_sys::{Array, Promise, Uint8Array};
 use crate::{
     types::*,
     error::Result,
-};
+, synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper}},;
 
 use super::{
     webrtc::WebRtcTransport,

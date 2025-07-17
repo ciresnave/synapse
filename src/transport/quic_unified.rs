@@ -3,7 +3,7 @@
 use crate::{
     types::SecureMessage,
     error::Result,
-    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
+    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper}},,
 };
 use super::abstraction::*;
 use async_trait::async_trait;
@@ -145,15 +145,15 @@ impl QuicTransportImpl {
             connections.get(connection_id).cloned()
         };
         
-        let mut connection = connection.ok_or_else(|| crate::error::EmrpError::Network("Network error".to_string()))?;
+        let mut connection = connection.ok_or_else(|| crate::error::SynapseError::NetworkError("Network error".to_string()))?;
         
         // Serialize message
         let message_json = serde_json::to_string(message)
-            .map_err(|e| crate::error::EmrpError::Serialization("Serialization error".to_string()))?;
+            .map_err(|e| crate::error::SynapseError::SerializationError("Serialization error".to_string()))?;
         
         // Check message size
         if message_json.len() > self.max_message_size {
-            return Err(crate::error::EmrpError::Generic("Validation error".to_string()) bytes", message_json.len()),
+            return Err(crate::error::SynapseError::Generic("Validation error".to_string()) bytes", message_json.len()),
             });
         }
         
@@ -348,13 +348,13 @@ impl Transport for QuicTransportImpl {
                 // Try to establish new connection
                 if let Some(address) = &target.address {
                     let target_addr = address.parse::<SocketAddr>()
-                        .map_err(|e| crate::error::EmrpError::Generic("Validation error".to_string())", e),
+                        .map_err(|e| crate::error::SynapseError::Generic("Validation error".to_string())", e),
                         })?;
                     
                     let connection = self.connect_to_server(target_addr).await?;
                     connection.id
                 } else {
-                    return Err(crate::error::EmrpError::Generic("Validation error".to_string()));
+                    return Err(crate::error::SynapseError::Generic("Validation error".to_string()));
                 }
             }
         };
@@ -362,7 +362,7 @@ impl Transport for QuicTransportImpl {
         // Use circuit breaker to protect against failures
         let send_result = self.circuit_breaker.call(async {
             timeout(self.connection_timeout, self.send_quic_message(&connection_id, message)).await
-                .map_err(|_| crate::error::EmrpError::Network("Network error".to_string()))?
+                .map_err(|_| crate::error::SynapseError::NetworkError("Network error".to_string()))?
         }).await;
         
         match send_result {

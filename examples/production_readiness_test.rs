@@ -6,7 +6,6 @@
 use synapse::{
     Config,
     types::SimpleMessage,
-    EmrpRouter,
 };
 use anyhow::Result;
 use tracing::info;

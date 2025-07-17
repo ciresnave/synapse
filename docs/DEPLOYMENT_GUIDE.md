@@ -168,7 +168,7 @@ cargo run --bin migrate -- up
 
 Update your `postgresql.conf`:
 
-```
+```ini
 # Connection settings
 max_connections = 100
 superuser_reserved_connections = 3
@@ -305,7 +305,7 @@ Synapse can be horizontally scaled by running multiple instances behind a load b
 
 ### Load Balancer Configuration (HAProxy)
 
-```
+```haproxy
 frontend synapse_frontend
     bind *:443 ssl crt /path/to/cert.pem
     default_backend synapse_backend
@@ -325,7 +325,7 @@ backend synapse_backend
 
 Synapse provides an endpoint for monitoring:
 
-```
+```http
 GET /health
 ```
 
@@ -370,7 +370,7 @@ Key metrics to monitor:
 
 Logs are output in JSON format for easier processing by tools like ELK or Graylog:
 
-```
+```json
 {"timestamp":"2023-05-20T15:32:10.123Z","level":"INFO","message":"Message processed","participant_id":"user@example.com","transport":"email","latency_ms":120}
 ```
 
@@ -380,11 +380,12 @@ Logs are output in JSON format for easier processing by tools like ELK or Graylo
 
 #### Database Connection Errors
 
-```
+```shell
 Error: Failed to connect to database
 ```
 
 Check:
+
 - Database server is running
 - Connection credentials are correct
 - Network connectivity between server and database
@@ -392,11 +393,12 @@ Check:
 
 #### Transport Initialization Failures
 
-```
+```shell
 Error: Failed to initialize Email transport
 ```
 
 Check:
+
 - SMTP/IMAP server is accessible
 - Credentials are correct
 - Required ports are not blocked by firewalls
@@ -467,6 +469,6 @@ systemctl start synapse
 
 For additional help:
 
-- GitHub Issues: https://github.com/yourusername/synapse/issues
-- Documentation: https://synapse.docs.example.com
-- Community Forum: https://forum.example.com/synapse
+- GitHub Issues: <https://github.com/yourusername/synapse/issues>
+- Documentation: <https://synapse.docs.example.com>
+- Community Forum: <https://forum.example.com/synapse>

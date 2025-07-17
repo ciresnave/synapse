@@ -3,7 +3,7 @@
 use crate::{
     types::SecureMessage,
     error::Result,
-    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
+    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper}},,
 };
 use super::abstraction::*;
 use async_trait::async_trait;
@@ -102,22 +102,22 @@ impl WebSocketTransportImpl {
         
         // Parse URL
         let parsed_url = Url::parse(url)
-            .map_err(|e| crate::error::EmrpError::Generic("Validation error".to_string())", e),
+            .map_err(|e| crate::error::SynapseError::Generic("Validation error".to_string())", e),
             })?;
         
         // Extract host and port
         let host = parsed_url.host_str()
-            .ok_or_else(|| crate::error::EmrpError::Generic("Validation error".to_string()))?;
+            .ok_or_else(|| crate::error::SynapseError::Generic("Validation error".to_string()))?;
         
         let port = parsed_url.port_or_known_default()
-            .ok_or_else(|| crate::error::EmrpError::Generic("Validation error".to_string()))?;
+            .ok_or_else(|| crate::error::SynapseError::Generic("Validation error".to_string()))?;
         
         // Establish TCP connection
         let tcp_stream = TcpStream::connect((host, port)).await
-            .map_err(|e| crate::error::EmrpError::Network("Network error".to_string()))?;
+            .map_err(|e| crate::error::SynapseError::NetworkError("Network error".to_string()))?;
         
         let remote_addr = tcp_stream.peer_addr()
-            .map_err(|e| crate::error::EmrpError::Network("Network error".to_string()))?;
+            .map_err(|e| crate::error::SynapseError::NetworkError("Network error".to_string()))?;
         
         // In a real implementation, this would perform WebSocket handshake
         // For now, we'll simulate a successful connection
@@ -152,16 +152,16 @@ impl WebSocketTransportImpl {
         };
         
         if connection.is_none() {
-            return Err(crate::error::EmrpError::Network("Network error".to_string()));
+            return Err(crate::error::SynapseError::NetworkError("Network error".to_string()));
         }
         
         // Serialize message
         let message_json = serde_json::to_string(message)
-            .map_err(|e| crate::error::EmrpError::Serialization("Serialization error".to_string()))?;
+            .map_err(|e| crate::error::SynapseError::SerializationError("Serialization error".to_string()))?;
         
         // Check message size
         if message_json.len() > self.max_message_size {
-            return Err(crate::error::EmrpError::Generic("Validation error".to_string()) bytes", message_json.len()),
+            return Err(crate::error::SynapseError::Generic("Validation error".to_string()) bytes", message_json.len()),
             });
         }
         
@@ -345,7 +345,7 @@ impl Transport for WebSocketTransportImpl {
                     let connection = self.connect_to_server(address).await?;
                     connection.id
                 } else {
-                    return Err(crate::error::EmrpError::Generic("Validation error".to_string()));
+                    return Err(crate::error::SynapseError::Generic("Validation error".to_string()));
                 }
             }
         };
@@ -353,7 +353,7 @@ impl Transport for WebSocketTransportImpl {
         // Use circuit breaker to protect against failures
         let send_result = self.circuit_breaker.call(async {
             timeout(self.connection_timeout, self.send_websocket_message(&connection_id, message)).await
-                .map_err(|_| crate::error::EmrpError::Network("Network error".to_string()))?
+                .map_err(|_| crate::error::SynapseError::NetworkError("Network error".to_string()))?
         }).await;
         
         match send_result {
@@ -467,10 +467,10 @@ impl Transport for WebSocketTransportImpl {
         
         // Bind TCP listener for WebSocket server
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.local_port)).await
-            .map_err(|e| crate::error::EmrpError::Network("Network error".to_string()))?;
+            .map_err(|e| crate::error::SynapseError::NetworkError("Network error".to_string()))?;
         
         let actual_port = listener.local_addr()
-            .map_err(|e| crate::error::EmrpError::Network("Network error".to_string()))?.port();
+            .map_err(|e| crate::error::SynapseError::NetworkError("Network error".to_string()))?.port();
         
         // Store listener
         self.listener.replace(listener);

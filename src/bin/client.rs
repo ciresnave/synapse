@@ -1,15 +1,15 @@
-//! EMRP Client - Interactive command-line client for the Email-Based Message Routing Protocol
+//! Synapse Client - Interactive command-line client for the Synapse Neural Communication Network
 //!
 //! This binary provides a command-line interface for sending and receiving
-//! messages using the EMRP protocol.
+//! messages using the Synapse protocol.
 
 use synapse::{
-    router::EmrpRouter, config::Config, init_logging,
+    router::SynapseRouter, config::Config, init_logging,
     types::{MessageType, SecurityLevel, SimpleMessage},
 };
 use clap::{Arg, Command, ArgMatches};
-use std::io::{self, Write};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::io::Write;
+// use tokio::io::AsyncBufReadExt;
 use tracing::{info, error, warn};
 
 #[tokio::main]
@@ -18,10 +18,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     // Parse command line arguments
-    let matches = Command::new("emrp-client")
-        .version("0.1.0")
-        .author("EMRP Development Team")
-        .about("Email-Based Message Routing Protocol Client")
+    let matches = Command::new("synapse-client")
+        .version("1.0.0")
+        .author("Synapse Development Team")
+        .about("Synapse Neural Communication Network Client")
         .subcommand(
             Command::new("send")
                 .about("Send a message to another entity")
@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create router
-    let router = EmrpRouter::new(config, global_id.clone()).await?;
+    let router = SynapseRouter::new(config, global_id.clone()).await?;
 
     match matches.subcommand() {
         Some(("send", send_matches)) => {
@@ -171,9 +171,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {
             println!("No subcommand specified. Use --help for usage information.");
             println!("Quick start:");
-            println!("  emrp-client -i your@email.com send -t Claude -m \"Hello!\"");
-            println!("  emrp-client -i your@email.com receive");
-            println!("  emrp-client -i your@email.com interactive -w Claude");
+            println!("  synapse-client -i your@email.com send -t Claude -m \"Hello!\"");
+            println!("  synapse-client -i your@email.com receive");
+            println!("  synapse-client -i your@email.com interactive -w Claude");
         }
     }
 
@@ -182,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Handle the send command
 async fn handle_send_command(
-    router: &EmrpRouter,
+    router: &SynapseRouter,
     matches: &ArgMatches,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let to = matches.get_one::<String>("to").unwrap();
@@ -192,25 +192,32 @@ async fn handle_send_command(
 
     info!("Sending message to {} (type: {:?}, security: {:?})", to, message_type, security_level);
 
-    match router.send_message(to, message, message_type, security_level).await {
-        Ok(message_id) => {
+    let simple_message = SimpleMessage {
+        to: to.clone(),
+        from_entity: router.get_our_global_id().to_string(),
+        content: message.clone(),
+        message_type,
+        metadata: std::collections::HashMap::new(),
+    };
+
+    match router.send_message(simple_message, to.clone()).await {
+        Ok(_) => {
             println!("✓ Message sent successfully");
-            println!("  Message ID: {}", message_id);
             println!("  To: {}", to);
             println!("  Content: {}", message);
+            Ok(())
         }
         Err(e) => {
-            error!("Failed to send message: {}", e);
-            println!("✗ Failed to send message: {}", e);
+            println!("✗ Failed to send message");
+            println!("  Error: {}", e);
+            Err(Box::new(e))
         }
     }
-
-    Ok(())
 }
 
 /// Handle the receive command
 async fn handle_receive_command(
-    router: &EmrpRouter,
+    router: &SynapseRouter,
     matches: &ArgMatches,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let continuous = matches.get_flag("continuous");
@@ -259,83 +266,83 @@ async fn handle_receive_command(
 
 /// Handle the interactive command
 async fn handle_interactive_command(
-    router: &EmrpRouter,
+    router: &SynapseRouter,
     matches: &ArgMatches,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let with_entity = matches.get_one::<String>("with").unwrap();
-    
-    println!("💬 Starting interactive chat with {}", with_entity);
-    println!("Type your messages and press Enter. Type 'quit' to exit.");
-    println!("{}", "=".repeat(50));
-
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
-    let mut line = String::new();
+    println!("Starting interactive chat with {}", with_entity);
+    println!("Type a message and press Enter to send. Type /quit to exit.");
 
     loop {
-        print!("You > ");
-        io::stdout().flush()?;
-        
-        line.clear();
-        reader.read_line(&mut line).await?;
-        let message = line.trim();
+        print!("> ");
+        std::io::stdout().flush()?;
 
-        if message.is_empty() {
-            continue;
-        }
+        let mut message = String::new();
+        std::io::stdin().read_line(&mut message)?;
+        message = message.trim().to_string();
 
-        if message.to_lowercase() == "quit" {
-            println!("👋 Goodbye!");
+        if message == "/quit" {
             break;
         }
 
-        // Send the message
-        match router.send_message(with_entity, message, MessageType::Direct, SecurityLevel::Private).await {
+        let simple_message = SimpleMessage {
+            to: with_entity.clone(),
+            from_entity: router.get_our_global_id().to_string(),
+            content: message.clone(),
+            message_type: MessageType::Direct,
+            metadata: std::collections::HashMap::new(),
+        };
+
+        match router.send_message(simple_message, with_entity.clone()).await {
             Ok(_) => {
-                println!("✓ Sent");
+                println!("✓ Message sent");
             }
             Err(e) => {
-                println!("✗ Failed to send: {}", e);
+                println!("✗ Failed to send message: {}", e);
             }
         }
 
-        // Check for replies (simplified - in a real implementation you'd have better real-time handling)
-        if let Ok(messages) = router.receive_messages().await {
-            for reply in messages {
-                if reply.from_entity == *with_entity {
-                    println!("{} > {}", with_entity, reply.content);
+        // Poll for incoming messages
+        match router.receive_messages().await {
+            Ok(messages) => {
+                for msg in messages {
+                    println!("\nFrom {}: {}", msg.from_entity, msg.content);
                 }
+            }
+            Err(e) => {
+                warn!("Failed to receive messages: {}", e);
             }
         }
     }
 
+    println!("Interactive session ended.");
     Ok(())
 }
 
 /// Handle the status command
-async fn handle_status_command(router: &EmrpRouter) -> Result<(), Box<dyn std::error::Error>> {
-    let status = router.status().await;
-
-    println!("📊 EMRP Client Status");
-    println!("{}", "=".repeat(30));
-    println!("Global ID: {}", status.our_global_id);
-    println!("Known Entities: {}", status.known_entities);
+async fn handle_status_command(router: &SynapseRouter) -> Result<(), Box<dyn std::error::Error>> {
+    let status = router.get_health().await;
+    
+    println!("Synapse Client Status:");
+    println!("Status: {}", status.status);
+    println!("Global ID: {}", router.get_our_global_id());
+    println!("Known Peers: {}", status.known_peers);
     println!("Known Keys: {}", status.known_keys);
-    println!("Email Configured: {}", if status.email_configured { "✓" } else { "✗" });
+    println!("Email Available: {}", if status.email_available { "✓" } else { "✗" });
 
-    if !status.email_configured {
-        println!();
-        println!("⚠️  Email is not properly configured. Please:");
-        println!("   1. Create a configuration file with valid SMTP/IMAP settings");
-        println!("   2. Use the --config flag to specify the configuration file");
+    if !status.email_available {
+        println!("\nWarning: Email transport not available!");
     }
+
+    println!("\nEncryption Status:");
+    println!("Crypto Support: {}", if status.crypto_available { "✓" } else { "✗" });
 
     Ok(())
 }
 
 /// Handle the add-entity command
 async fn handle_add_entity_command(
-    router: &EmrpRouter,
+    router: &SynapseRouter,
     matches: &ArgMatches,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let global_id = matches.get_one::<String>("global-id").unwrap();

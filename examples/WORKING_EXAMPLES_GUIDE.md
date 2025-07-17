@@ -29,7 +29,7 @@ This guide provides an overview of all working examples in the Synapse project, 
 **Run**: `cargo run --example working_basic_chat`  
 **Demonstrates**:
 
-- EmrpRouter initialization
+- SynapseRouter initialization
 - Simple message conversion
 - Basic chat simulation
 
@@ -188,7 +188,7 @@ let msg = SimpleMessage {
 
 ```rust
 let config = Config::for_testing();
-let router = EmrpRouter::new(config).await?;
+let router = SynapseRouter::new(config).await?;
 ```
 
 ### Message Processing

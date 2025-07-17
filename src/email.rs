@@ -1,21 +1,33 @@
 //! Email transport layer for EMRP
 
-use crate::types::{EmailConfig, SimpleMessage, SecureMessage, MessageType};
-use crate::error::{EmailError, Result};
+use crate::{
+    types::{SimpleMessage, MessageType, EmailConfig, SecureMessage},
+    error::{Result, EmailError},
+};
+use std::string::ToString;
+use std::collections::HashMap;
+
 #[cfg(feature = "email")]
 use lettre::{
     message::{header, Mailbox, Message, SinglePart},
     transport::smtp::authentication::Credentials,
     SmtpTransport, Transport,
 };
-use base64::Engine;
-use std::collections::HashMap;
+
+use base64::Engine as _;
 
 /// Email transport for sending and receiving EMRP messages
 #[cfg(feature = "email")]
+#[derive(Debug, Clone)]
 pub struct EmailTransport {
     config: EmailConfig,
     smtp_transport: SmtpTransport,
+}
+
+/// Dummy email transport for when email feature is disabled
+#[cfg(not(feature = "email"))]
+pub struct EmailTransport {
+    config: EmailConfig, // Configuration for email transport (stored for future use)
 }
 
 #[cfg(feature = "email")]
@@ -98,11 +110,11 @@ impl EmailTransport {
     /// Generate appropriate email subject
     fn generate_subject(&self, simple_msg: &SimpleMessage) -> String {
         match simple_msg.message_type {
-            MessageType::ToolCall => format!("[EMRP Tool Call] {} → {}", simple_msg.from_entity, simple_msg.to),
-            MessageType::ToolResponse => format!("[EMRP Tool Response] {} → {}", simple_msg.from_entity, simple_msg.to),
-            MessageType::System => format!("[EMRP System] {} → {}", simple_msg.from_entity, simple_msg.to),
-            MessageType::Broadcast => format!("[EMRP Broadcast] {}", simple_msg.from_entity),
-            MessageType::StreamChunk => format!("[EMRP Stream] {} → {}", simple_msg.from_entity, simple_msg.to),
+            MessageType::ToolCall => format!("[Synapse Tool Call] {} → {}", simple_msg.from_entity, simple_msg.to),
+            MessageType::ToolResponse => format!("[Synapse Tool Response] {} → {}", simple_msg.from_entity, simple_msg.to),
+            MessageType::System => format!("[Synapse System] {} → {}", simple_msg.from_entity, simple_msg.to),
+            MessageType::Broadcast => format!("[Synapse Broadcast] {}", simple_msg.from_entity),
+            MessageType::StreamChunk => format!("[Synapse Stream] {} → {}", simple_msg.from_entity, simple_msg.to),
             MessageType::Direct => {
                 // Extract first few words for subject
                 let words: Vec<&str> = simple_msg.content.split_whitespace().take(5).collect();
@@ -112,13 +124,13 @@ impl EmailTransport {
                 } else {
                     preview
                 };
-                format!("[EMRP] {}", preview)
+                format!("[Synapse] {}", preview)
             }
         }
     }
 
     /// Receive messages from IMAP server
-    pub async fn receive_messages(&self) -> Result<Vec<EmrpEmailMessage>> {
+    pub async fn receive_messages(&self) -> Result<Vec<SynapseEmailMessage>> {
         // Note: This is a simplified IMAP implementation
         // In production, you'd want to use async-imap for full functionality
         
@@ -131,7 +143,7 @@ impl EmailTransport {
         // 3. Select INBOX
         // 4. Search for new EMRP messages
         // 5. Parse email headers and body
-        // 6. Convert to EmrpEmailMessage structs
+        // 6. Convert to SynapseEmailMessage structs
         
         // Simulate finding some messages (empty for now)
         let messages = Vec::new();
@@ -141,7 +153,7 @@ impl EmailTransport {
     }
 
     /// Connect to IMAP and retrieve actual messages (full implementation)
-    pub async fn receive_messages_imap(&self) -> Result<Vec<EmrpEmailMessage>> {
+    pub async fn receive_messages_imap(&self) -> Result<Vec<SynapseEmailMessage>> {
         // This would be the real IMAP implementation
         // For now, we'll provide a framework that could be extended
         
@@ -190,11 +202,46 @@ impl EmailTransport {
     pub fn is_configured(&self) -> bool {
         self.is_smtp_configured() && self.is_imap_configured()
     }
+
+    /// Start the email transport
+    pub async fn start(&self) -> Result<()> {
+        // No specific startup needed for email transport
+        Ok(())
+    }
+
+    /// Stop the email transport
+    pub async fn stop(&self) -> Result<()> {
+        // No specific cleanup needed for email transport
+        Ok(())
+    }
 }
 
-/// Parsed EMRP email message
+#[cfg(not(feature = "email"))]
+impl EmailTransport {
+    pub async fn new(config: EmailConfig) -> Result<Self> {
+        Ok(Self { _config: config })
+    }
+    
+    pub async fn send_message(&self, _message: &SimpleMessage) -> Result<()> {
+        Err(crate::error::SynapseError::Anyhow("Email feature not enabled".to_string()))
+    }
+    
+    pub async fn receive_messages(&self) -> Result<Vec<SimpleMessage>> {
+        Ok(Vec::new())
+    }
+    
+    pub fn is_smtp_configured(&self) -> bool {
+        false
+    }
+    
+    pub fn is_imap_configured(&self) -> bool {
+        false
+    }
+}
+
+/// Parsed Synapse email message
 #[derive(Debug, Clone)]
-pub struct EmrpEmailMessage {
+pub struct SynapseEmailMessage {
     pub from_entity: String,
     pub to_entity: String,
     pub content: String,
@@ -205,7 +252,7 @@ pub struct EmrpEmailMessage {
     pub metadata: HashMap<String, String>,
 }
 
-impl EmrpEmailMessage {
+impl SynapseEmailMessage {
     /// Convert to SimpleMessage
     pub fn to_simple_message(&self) -> Result<SimpleMessage> {
         let message_type = match self.message_type.as_str() {
@@ -230,7 +277,7 @@ impl EmrpEmailMessage {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "email"))]
 mod tests {
     use super::*;
 
@@ -247,7 +294,7 @@ mod tests {
         };
         
         let subject = transport.generate_subject(&tool_call);
-        assert_eq!(subject, "[EMRP Tool Call] Claude → FileSystem");
+        assert_eq!(subject, "[Synapse Tool Call] Claude → FileSystem");
 
         let direct_msg = SimpleMessage {
             to: "Eric".to_string(),
@@ -258,7 +305,7 @@ mod tests {
         };
         
         let subject = transport.generate_subject(&direct_msg);
-        assert_eq!(subject, "[EMRP] Hello! How can I help...");
+        assert_eq!(subject, "[Synapse] Hello! How can I help...");
     }
 
     fn create_test_transport() -> EmailTransport {

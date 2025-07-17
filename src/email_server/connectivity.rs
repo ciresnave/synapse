@@ -1,6 +1,6 @@
 //! External connectivity detection for email server accessibility
 
-use crate::error::{EmrpError, Result};
+use crate::error::{SynapseError, Result};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
@@ -264,8 +264,8 @@ impl ConnectivityDetector {
         // Bind to the port
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
         let _listener = timeout(self.test_timeout, TcpListener::bind(addr)).await
-            .map_err(|_| EmrpError::Network("Timeout binding to port".to_string()))?
-            .map_err(|e| EmrpError::Network(format!("Failed to bind to port {}: {}", port, e)))?;
+            .map_err(|_| SynapseError::NetworkError("Timeout binding to port".to_string()))?
+            .map_err(|e| SynapseError::NetworkError(format!("Failed to bind to port {}: {}", port, e)))?;
 
         // In production, this would test external connectivity via UPnP or external services
         Ok(false) // Conservative default

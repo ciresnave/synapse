@@ -46,7 +46,7 @@ impl Default for TransportManagerConfig {
                 TransportType::Udp,
                 TransportType::Http,
                 TransportType::Email,
-                TransportType::Mdns,
+                TransportType::AutoDiscovery,
             ],
             selection_policy: TransportSelectionPolicy::Adaptive,
             failover_config: FailoverConfig::default(),
@@ -266,7 +266,7 @@ impl TransportManager {
                     .unwrap_or_else(|| factory.default_config());
                 factory.create_transport(&config).await?
             } else {
-                return Err(crate::error::EmrpError::Transport(
+                return Err(crate::error::SynapseError::TransportError(
                     format!("No factory registered for transport {:?}", transport_type)
                 ));
             }
@@ -370,7 +370,7 @@ impl TransportManager {
             }
         }
         
-        Err(crate::error::EmrpError::Transport("All transports failed".to_string()))
+        Err(crate::error::SynapseError::TransportError("All transports failed".to_string()))
     }
 
     /// Receive messages from all active transports
@@ -432,7 +432,7 @@ impl TransportManager {
         };
 
         if available_transports.is_empty() {
-            return Err(crate::error::EmrpError::Transport("No transports available".to_string()));
+            return Err(crate::error::SynapseError::TransportError("No transports available".to_string()));
         }
 
         // Check target preferences first
@@ -457,7 +457,7 @@ impl TransportManager {
             }
         }
 
-        Err(crate::error::EmrpError::Transport("No suitable transport found".to_string()))
+        Err(crate::error::SynapseError::TransportError("No suitable transport found".to_string()))
     }
 
     /// Estimate delivery for a specific transport and target
@@ -472,7 +472,7 @@ impl TransportManager {
                 cost_score: estimate.cost,
             })
         } else {
-            Err(crate::error::EmrpError::Transport(
+            Err(crate::error::SynapseError::TransportError(
                 format!("Transport {:?} not available", transport_type)
             ))
         }
@@ -517,12 +517,12 @@ impl TransportManager {
     async fn select_first_available(&self) -> Result<Vec<TransportType>> {
         let status = self.transport_status.read().await;
         let available: Vec<TransportType> = status.iter()
-            .filter(|(_, &status)| status == TransportStatus::Running)
+            .filter(|(_, status)| **status == TransportStatus::Running)
             .map(|(&transport_type, _)| transport_type)
             .collect();
         
         if available.is_empty() {
-            return Err(crate::error::EmrpError::Transport("No transports available".to_string()));
+            return Err(crate::error::SynapseError::TransportError("No transports available".to_string()));
         }
         
         Ok(available)
@@ -548,7 +548,7 @@ impl TransportManager {
                     TransportType::Quic => 1,
                     TransportType::WebSocket => 2,
                     TransportType::Tcp => 3,
-                    TransportType::Mdns => 4,
+                    TransportType::AutoDiscovery => 4,
                     _ => 10,
                 });
             }
@@ -695,7 +695,7 @@ impl TransportManager {
             if let Some(breaker) = circuit_breaker {
                 // Check if circuit breaker allows the request
                 if breaker.get_state() == crate::circuit_breaker::CircuitState::Open {
-                    return Err(crate::error::EmrpError::Transport(
+                    return Err(crate::error::SynapseError::TransportError(
                         format!("Circuit breaker is open for transport {:?}", transport_type)
                     ));
                 }
@@ -715,7 +715,7 @@ impl TransportManager {
                 transport.send_message(target, message).await
             }
         } else {
-            Err(crate::error::EmrpError::Transport(
+            Err(crate::error::SynapseError::TransportError(
                 format!("Transport {:?} not available", transport_type)
             ))
         }

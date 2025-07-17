@@ -1,7 +1,10 @@
 // Synapse Trust Manager
 // Manages dual trust system: entity-to-entity and network trust
 
+
+use crate::blockchain::serialization::DateTimeWrapper;
 use crate::synapse::models::{TrustBalance, TrustCategory};
+#[cfg(feature = "database")]
 use crate::synapse::storage::Database;
 use crate::synapse::blockchain::SynapseBlockchain;
 use anyhow::{Context, Result};
@@ -17,11 +20,19 @@ const MAX_DAILY_REPORTS: u64 = 10;
 const MAX_EVIDENCE_SIZE: usize = 1024 * 10; // 10KB max evidence size
 
 /// Trust management service for dual trust system
+#[cfg(feature = "database")]
 pub struct TrustManager {
     database: Arc<Database>,
     blockchain: Arc<SynapseBlockchain>,
 }
 
+/// Simplified trust manager when database feature is not available
+#[cfg(not(feature = "database"))]
+pub struct TrustManager {
+    blockchain: Arc<SynapseBlockchain>,
+}
+
+#[cfg(feature = "database")]
 impl TrustManager {
     /// Create new trust manager
     pub async fn new(
@@ -36,13 +47,14 @@ impl TrustManager {
     
     /// Initialize trust balance for new participant
     pub async fn initialize_participant(&self, participant_id: &str) -> Result<()> {
+
         let initial_balance = TrustBalance {
             participant_id: participant_id.to_string(),
             total_points: 100, // Genesis trust points
             available_points: 100,
             staked_points: 0,
             earned_lifetime: 100,
-            last_activity: Utc::now(),
+            last_activity: DateTimeWrapper::new(Utc::now()),
             decay_rate: 0.02, // 2% per month
         };
         
@@ -162,6 +174,38 @@ impl TrustManager {
     }
     
     /// Get network trust score (objective, blockchain-verified)
+    /// Apply a trust boost based on verification level
+    pub async fn apply_verification_boost(
+        &self,
+        participant_id: &str,
+        boost_amount: f64,
+        reason: String,
+    ) -> Result<()> {
+        // Get current trust balance
+        let balance = self.database.get_trust_balance(participant_id).await?;
+        
+        if let Some(mut balance) = balance {
+            // Apply the boost to total and available points
+            balance.total_points = ((balance.total_points as f64) + boost_amount).min(1000.0) as u32;
+            balance.available_points = ((balance.available_points as f64) + boost_amount).min(1000.0) as u32;
+            balance.earned_lifetime = ((balance.earned_lifetime as f64) + boost_amount) as u32;
+            
+            // Update last activity
+            balance.last_activity = DateTimeWrapper::new(Utc::now());
+            
+            // Save updated balance
+            self.database.upsert_trust_balance(&balance).await?;
+            
+            // Log the boost
+            info!(
+                "Applied verification trust boost of {} to {} (reason: {})",
+                boost_amount, participant_id, reason
+            );
+        }
+        
+        Ok(())
+    }
+    
     pub async fn get_network_trust_score(&self, participant_id: &str) -> Result<f64> {
         // Get trust score from blockchain
         let blockchain_score = self.blockchain.get_trust_score(participant_id).await?;
@@ -256,7 +300,7 @@ impl TrustManager {
         let mut updated_balance = reporter_balance;
         updated_balance.available_points -= stake_amount;
         updated_balance.staked_points += stake_amount;
-        updated_balance.last_activity = Utc::now();
+        updated_balance.last_activity = DateTimeWrapper::new(Utc::now());
         
         self.database.upsert_trust_balance(&updated_balance).await?;
         
@@ -289,6 +333,7 @@ impl TrustManager {
     
     /// Store entity-to-entity trust rating in database
     #[cfg(feature = "database")]
+    #[allow(dead_code)]
     async fn store_entity_trust_rating(
         &self,
         reporter_id: &str,
@@ -301,7 +346,7 @@ impl TrustManager {
             score: score.unsigned_abs().min(100) as u8,
             category,
             given_by: reporter_id.to_string(),
-            given_at: Utc::now(),
+            given_at: DateTimeWrapper::new(Utc::now()),
             comment: None,
             relationship_context: None,
         };
@@ -331,6 +376,7 @@ impl TrustManager {
                         FROM jsonb_array_elements(
                             COALESCE(trust_ratings->'entity_trust'->'given_ratings', '[]'::jsonb)
                         ) AS rating
+                        WHERE rating->>'subject_id' = $3
                     ),
                     '[]'::jsonb
                 ) || CASE
@@ -389,7 +435,8 @@ impl TrustManager {
         let mut processed = Vec::new();
         
         for mut balance in balances {
-            let days_inactive = (Utc::now() - balance.last_activity).num_days();
+            let duration = Utc::now().signed_duration_since(balance.clone().last_activity.into_inner());
+            let days_inactive = duration.num_days();
             let months_inactive = days_inactive as f64 / 30.0;
             
             // Calculate decay amount
@@ -422,10 +469,7 @@ impl TrustManager {
     /// Start background task for periodic trust decay
     pub async fn start_decay_scheduler(&self) -> Result<()> {
         let database = self.database.clone();
-        let manager = Arc::new(TrustManager {
-            database: database.clone(),
-            blockchain: self.blockchain.clone(),
-        });
+        let blockchain = self.blockchain.clone();
         
         tokio::spawn(async move {
             let mut interval = interval(TokioDuration::from_secs(24 * 60 * 60)); // Daily
@@ -433,7 +477,13 @@ impl TrustManager {
             loop {
                 interval.tick().await;
                 
-                match manager.process_decay().await {
+                // Create a temporary TrustManager for the task
+                let temp_manager = TrustManager {
+                    database: database.clone(),
+                    blockchain: blockchain.clone(),
+                };
+                
+                match temp_manager.process_decay().await {
                     Ok(processed) => {
                         if !processed.is_empty() {
                             info!("Processed trust decay for {} participants", processed.len());
@@ -505,7 +555,7 @@ impl TrustManager {
         let mut updated_balance = balance;
         updated_balance.available_points -= amount;
         updated_balance.staked_points += amount;
-        updated_balance.last_activity = Utc::now();
+        updated_balance.last_activity = DateTimeWrapper::new(Utc::now());
         
         // Update database
         self.database.upsert_trust_balance(&updated_balance).await?;
@@ -536,7 +586,7 @@ impl TrustManager {
         // Update local balance
         balance.staked_points = balance.staked_points.saturating_sub(unstaked_amount);
         balance.available_points += unstaked_amount;
-        balance.last_activity = Utc::now();
+        balance.last_activity = DateTimeWrapper::new(Utc::now());
         
         // Update database
         self.database.upsert_trust_balance(&balance).await?;
@@ -557,7 +607,7 @@ impl TrustManager {
             balance.total_points += amount;
             balance.available_points += amount;
             balance.earned_lifetime += amount;
-            balance.last_activity = Utc::now();
+            balance.last_activity = DateTimeWrapper::new(Utc::now());
             
             self.database.upsert_trust_balance(&balance).await?;
             
@@ -588,11 +638,122 @@ impl TrustManager {
     /// Update participant activity (resets decay timer)
     pub async fn update_activity(&self, participant_id: &str) -> Result<()> {
         if let Some(mut balance) = self.database.get_trust_balance(participant_id).await? {
-            balance.last_activity = Utc::now();
+            balance.last_activity = DateTimeWrapper::new(Utc::now());
             self.database.upsert_trust_balance(&balance).await?;
         }
         
         Ok(())
+    }
+}
+
+#[cfg(not(feature = "database"))]
+impl TrustManager {
+    /// Create new simplified trust manager without database
+    pub async fn new(
+        blockchain: Arc<SynapseBlockchain>,
+    ) -> Result<Self> {
+        Ok(Self {
+            blockchain,
+        })
+    }
+
+    /// Initialize trust balance for new participant (simplified)
+    pub async fn initialize_participant(&self, _participant_id: &str) -> Result<()> {
+        // Without database, just acknowledge the request
+        Ok(())
+    }
+
+    /// Calculate trust between two participants (simplified)
+    pub async fn calculate_trust(&self, _from_id: &str, _to_id: &str) -> Result<f64> {
+        // Return default trust score when database is not available
+        Ok(0.5)
+    }
+
+    /// Report trust violation (simplified)
+    pub async fn report_violation(
+        &self,
+        _reporter_id: &str,
+        _reported_id: &str,
+        _violation_type: &str,
+        _evidence: &str,
+        _stake_amount: u32,
+    ) -> Result<String> {
+        // Return a dummy report ID when database is not available
+        Ok(UuidWrapper::new(uuid::UuidWrapper::new(Uuid::new_v4())).to_string())
+    }
+
+    /// Award trust points (simplified)
+    pub async fn award_points(
+        &self,
+        _participant_id: &str,
+        _points: u32,
+        _category: &str,
+        _reason: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Get trust balance (simplified)
+    pub async fn get_trust_balance(&self, _participant_id: &str) -> Result<Option<TrustBalance>> {
+        // Return None when database is not available
+        Ok(None)
+    }
+
+    /// Stake trust points (simplified)
+    pub async fn stake_points(
+        &self,
+        _participant_id: &str,
+        _amount: u32,
+        _reason: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Unstake trust points (simplified)
+    pub async fn unstake_points(
+        &self,
+        _participant_id: &str,
+        _amount: u32,
+    ) -> Result<u32> {
+        Ok(0)
+    }
+
+    /// Process trust point decay (simplified)
+    pub async fn process_decay(&self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    /// Start decay scheduler (simplified version)
+    pub async fn start_decay_scheduler(&self) -> Result<()> {
+        // Without database, nothing to schedule
+        info!("Trust decay scheduler started (simplified mode)");
+        Ok(())
+    }
+
+    /// Get trust score (simplified version)
+    pub async fn get_trust_score(&self, _subject_id: &str, _requester_id: &str) -> Result<f64> {
+        // Return default neutral score
+        Ok(50.0)
+    }
+
+    /// Get network trust score (simplified version)
+    pub async fn get_network_trust_score(&self, participant_id: &str) -> Result<f64> {
+        // Get score from blockchain only
+        self.blockchain.get_trust_score(participant_id).await
+    }
+
+    /// Submit trust report (simplified version)
+    pub async fn submit_trust_report(
+        &self,
+        _reporter_id: &str,
+        _subject_id: &str,
+        _score: i8,
+        _category: crate::synapse::models::TrustCategory,
+        _stake_amount: u32,
+        _evidence: Option<String>,
+    ) -> Result<String> {
+        // Return a dummy report ID
+        Ok(UuidWrapper::new(uuid::UuidWrapper::new(Uuid::new_v4())).to_string())
     }
 }
 

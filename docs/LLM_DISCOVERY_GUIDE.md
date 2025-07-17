@@ -219,10 +219,10 @@ LLMs are scored on a scale of 0.0 to 1.0, with higher scores indicating better s
 The LLM discovery can be integrated with Synapse's enhanced router:
 
 ```rust
-use synapse::router_enhanced::EnhancedEmrpRouter;
+use synapse::router_enhanced::EnhancedSynapseRouter;
 
 // The router can use LLM discovery for AI-assisted routing decisions
-let router = EnhancedEmrpRouter::new(config).await?;
+let router = EnhancedSynapseRouter::new(config).await?;
 // LLM discovery integration would be added here
 ```
 

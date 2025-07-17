@@ -3,7 +3,7 @@
 //! A minimal test to verify the enhanced router with email server integration
 
 use synapse::{
-    router_enhanced::EnhancedEmrpRouter,
+    router_enhanced::EnhancedSynapseRouter,
     config::{Config, EntityConfig, RouterConfig, SecurityConfig, LoggingConfig},
     types::{EmailConfig, SmtpConfig, ImapConfig},
     error::Result,
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
     
     // Initialize router
     let config = create_test_config();
-    let router = EnhancedEmrpRouter::new(config, "test@test.local".to_string()).await?;
+    let router = EnhancedSynapseRouter::new(config, "test@test.local".to_string()).await?;
     
     // Check status
     let status = router.status().await;

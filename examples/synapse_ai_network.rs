@@ -25,7 +25,7 @@ use std::collections::HashMap;
 /// Task delegation manager for distributing work across multiple LLMs
 struct AiTaskCoordinator {
     llm_discovery: LlmDiscoveryManager,
-    task_counter: u32,
+    task_counter: u32, // Counter for tracking task assignments
 }
 
 /// Task to be processed by LLMs
@@ -97,14 +97,20 @@ impl AiTaskCoordinator {
     async fn execute_task(&mut self, task: NetworkTask) -> Result<TaskResult, Box<dyn std::error::Error>> {
         let start_time = std::time::Instant::now();
         
+        // Increment task counter for tracking
+        self.task_counter += 1;
+        let task_number = self.task_counter;
+        
+        info!("🎯 Executing task #{} ({}): {}", task_number, task.task_type, task.id);
+        
         // Find the best LLM for this task type
         if let Some(llm) = self.llm_discovery.find_best_llm(&task.task_type).await? {
-            info!("🎯 Routing {} task to: {}", task.task_type, llm.display_name);
+            info!("🎯 Routing task #{} to: {}", task_number, llm.display_name);
             
             match self.execute_task_with_llm(&task, &llm).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    warn!("❌ Primary LLM failed: {}. Trying fallback...", e);
+                    warn!("❌ Primary LLM failed for task #{}: {}. Trying fallback...", task_number, e);
                 }
             }
         }

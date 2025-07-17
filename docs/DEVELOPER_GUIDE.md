@@ -5,6 +5,7 @@ Welcome to the Synapse Neural Communication Network development! This guide will
 ## 🚀 Getting Started
 
 ### Prerequisites
+
 - Rust 1.70+ (2021 edition)
 - PostgreSQL 12+
 - Tokio async runtime familiarity
@@ -13,6 +14,7 @@ Welcome to the Synapse Neural Communication Network development! This guide will
 ### Installation
 
 Add Synapse to your `Cargo.toml`:
+
 ```toml
 [dependencies]
 synapse = "1.0.0"
@@ -195,6 +197,7 @@ router.configure_discovery(discovery_config).await?;
 ```
 
 ### 2. Message Types
+
 Choose the right message type for your use case:
 
 ```rust
@@ -212,6 +215,7 @@ MessageType::Notification
 ```
 
 ### 3. Security Levels
+
 EMRP provides multiple security options:
 
 ```rust
@@ -229,6 +233,7 @@ SecurityLevel::HighSecurity
 ```
 
 ### 4. Message Urgency
+
 Control speed vs reliability tradeoffs:
 
 ```rust
@@ -363,7 +368,7 @@ mod tests {
     async fn test_message_sending() {
         // Create test router with mock transport
         let config = Config::test_config();
-        let router = EnhancedEmrpRouter::new_with_mock_transport(
+        let router = EnhancedSynapseRouter::new_with_mock_transport(
             config, 
             "test@example.com".to_string()
         ).await.unwrap();
@@ -399,8 +404,8 @@ async fn test_full_message_flow() {
     let config1 = Config::test_config().with_tcp_port(8080);
     let config2 = Config::test_config().with_tcp_port(8081);
     
-    let router1 = EnhancedEmrpRouter::new(config1, "alice@test.com".to_string()).await.unwrap();
-    let router2 = EnhancedEmrpRouter::new(config2, "bob@test.com".to_string()).await.unwrap();
+    let router1 = EnhancedSynapseRouter::new(config1, "alice@test.com".to_string()).await.unwrap();
+    let router2 = EnhancedSynapseRouter::new(config2, "bob@test.com".to_string()).await.unwrap();
     
     // Cross-register
     router1.register_peer("Bob", "bob@test.com").await.unwrap();
@@ -486,6 +491,7 @@ for (transport_name, metric) in metrics {
 ## 🚀 Deployment Patterns
 
 ### Local Development
+
 ```rust
 let config = Config::builder()
     .tcp_port(8080)
@@ -496,6 +502,7 @@ let config = Config::builder()
 ```
 
 ### Production Deployment
+
 ```rust
 let config = Config::builder()
     .tcp_port(443)  // Standard HTTPS port
@@ -510,6 +517,7 @@ let config = Config::builder()
 ```
 
 ### Cloud/Container Deployment
+
 ```rust
 let config = Config::builder()
     .tcp_port(std::env::var("PORT")?.parse()?)
@@ -529,6 +537,126 @@ let config = Config::builder()
 3. **Join the Community**: See `CONTRIBUTING.md` for development guidelines
 4. **Performance Tuning**: See `docs/PERFORMANCE_GUIDE.md`
 5. **Security Best Practices**: See `docs/SECURITY_GUIDE.md`
+
+## 🎯 New Features and Capabilities
+
+### Real-time Streaming (New!)
+
+Synapse now supports real-time data streaming with proper entity attribution:
+
+```rust
+use synapse::streaming::StreamManager;
+use std::sync::Arc;
+
+// Create stream manager
+let stream_manager = StreamManager::new(Arc::clone(&router));
+
+// Start streaming from your entity to target
+let mut session = stream_manager.start_stream(
+    "target_entity",
+    "my_entity_id"
+).await?;
+
+// Stream data in chunks
+for chunk in data_chunks {
+    stream_manager.send_chunk(&mut session, &chunk).await?;
+}
+
+// Complete the stream
+stream_manager.finish_stream(&mut session).await?;
+```
+
+### WebRTC Browser Support (New!)
+
+Full WebRTC support for browser-based applications:
+
+```rust
+#[cfg(target_arch = "wasm32")]
+use synapse::wasm::transport::WasmTransport;
+
+// Create WebRTC transport in browser
+let transport = WasmTransport::new(config).await?;
+
+// Send peer-to-peer data
+transport.send_binary(&data).await?;
+
+// Monitor connection state
+let state = transport.get_connection_state().await?;
+```
+
+### Enhanced Trust System (New!)
+
+Blockchain-based trust with staking mechanisms:
+
+```rust
+use synapse::trust::TrustManager;
+
+// Register with stake for higher trust
+trust_manager.register_entity_with_stake(
+    "my_entity",
+    100.0,  // Stake amount
+    metadata
+).await?;
+
+// Submit trust reports
+let report = TrustReport {
+    reporter_id: "my_entity".to_string(),
+    subject_id: "other_entity".to_string(),
+    interaction_type: TrustInteraction::MessageExchange,
+    score: 0.9,
+    timestamp: Utc::now(),
+    details: "Successful interaction".to_string(),
+};
+
+trust_manager.submit_trust_report(report).await?;
+```
+
+### WASM Storage with IndexedDB (New!)
+
+Persistent storage in browser environments:
+
+```rust
+use synapse::wasm::storage::WasmStorage;
+
+// Create storage with IndexedDB support
+let mut storage = WasmStorage::new().await?;
+storage.init_indexed_db().await?;
+
+// Store large data persistently
+storage.store_data("large_dataset", &data).await?;
+
+// Retrieve data across sessions
+let retrieved = storage.retrieve_data("large_dataset").await?;
+```
+
+### Intelligent Transport Selection (Enhanced!)
+
+The transport system now features smart routing:
+
+```rust
+// Automatic transport selection based on:
+// - Message urgency (RealTime prefers TCP/UDP)
+// - Target type (Local prefers mDNS)
+// - Network conditions
+// - Historical performance
+
+router.send_message_detailed(
+    message,
+    SecurityLevel::Authenticated,
+    MessageUrgency::RealTime  // Auto-selects fastest transport
+).await?;
+
+// Route caching for performance
+let cached_route = router.get_cached_route("target").await?;
+```
+
+### Development Tips for New Features
+
+1. **Streaming**: Use streaming for large data transfers or real-time updates
+2. **WebRTC**: Ideal for browser-to-browser communication
+3. **Trust System**: Implement reputation systems with stake-based trust
+4. **WASM Storage**: Store application state in browser environments
+5. **Smart Routing**: Let the system choose optimal transports automatically
 
 ## 🆘 Getting Help
 

@@ -1,16 +1,20 @@
+//! Participant API implementation
+
 use crate::synapse::models::participant::{ParticipantProfile, DiscoverabilityLevel, EntityType};
 use crate::synapse::services::{ParticipantRegistry, TrustManager, DiscoveryService};
 use crate::synapse::api::errors::{ApiError, ApiResponse};
 use crate::synapse::telemetry::ErrorTelemetry;
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use anyhow::Result; 
+use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use std::collections::HashMap;
-use tracing::{info, debug, error, warn};
+use tracing::{debug, info, warn, error};
+use chrono::Utc;
 
 /// HTTP API for participant registry operations
 pub struct ParticipantAPI {
     registry: ParticipantRegistry,
+    #[allow(dead_code)]
     trust_manager: TrustManager,
     discovery: DiscoveryService,
     error_telemetry: Arc<ErrorTelemetry>,
@@ -296,18 +300,18 @@ impl ParticipantAPI {
         }
 
         if let Some(contact_prefs) = request.contact_preferences {
-            if let Some(accepts_unsolicited) = contact_prefs.accepts_unsolicited_contact {
-                profile.contact_preferences.accepts_unsolicited_contact = accepts_unsolicited;
-            }
-            if let Some(requires_intro) = contact_prefs.requires_introduction {
-                profile.contact_preferences.requires_introduction = requires_intro;
-            }
-        }
-
-        profile.updated_at = chrono::Utc::now();
-
-        // Save updated profile
-        self.registry.update_participant(profile.clone()).await?;
+             if let Some(accepts_unsolicited) = contact_prefs.accepts_unsolicited_contact {
+                 profile.contact_preferences.accepts_unsolicited_contact = accepts_unsolicited;
+             }
+             if let Some(requires_intro) = contact_prefs.requires_introduction {
+                 profile.contact_preferences.requires_introduction = requires_intro;
+             }
+         }
+ 
+         profile.updated_at = Utc::now();
+ 
+         // Save updated profile
+         self.registry.update_participant(profile.clone()).await?;
 
         info!("Participant updated successfully: {}", participant_id);
 
