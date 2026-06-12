@@ -1,29 +1,30 @@
 //! Transport providers for dependency injection
-//! 
+//!
 //! This module provides trait-based dependency injection for transport implementations,
 //! making the system much more testable and flexible.
 
-use super::{abstraction::Transport, TransportSelector, abstraction};
-use crate::{types::SecureMessage, error::Result, config::Config};
+use super::{TransportSelector, abstraction, abstraction::Transport};
+use crate::{config::Config, error::Result, types::SecureMessage};
 use async_trait::async_trait;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
+use tracing::{info, warn};
 
 /// Transport provider trait for dependency injection
 #[async_trait]
 pub trait TransportProvider: Send + Sync {
     /// Create a TCP transport instance
     async fn create_tcp_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>>;
-    
+
     /// Create an mDNS transport instance
     async fn create_mdns_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>>;
-    
+
     /// Create a NAT traversal transport instance
     async fn create_nat_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>>;
-    
+
     /// Create an email transport instance
     async fn create_email_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>>;
-    
+
     /// Create a transport selector
     fn create_transport_selector(&self) -> Arc<tokio::sync::RwLock<TransportSelector>>;
 }
@@ -36,8 +37,14 @@ impl TransportProvider for ProductionTransportProvider {
     async fn create_tcp_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use super::tcp::TcpTransport;
-            match TcpTransport::new(8080).await {
+            use super::tcp_unified::TcpTransportImpl;
+            use std::collections::HashMap;
+
+            let mut tcp_config = HashMap::new();
+            tcp_config.insert("listen_port".to_string(), "8080".to_string());
+            tcp_config.insert("connection_timeout_ms".to_string(), "10000".to_string());
+
+            match TcpTransportImpl::new(&tcp_config).await {
                 Ok(transport) => {
                     tracing::info!("TCP transport initialized");
                     Ok(Some(Arc::new(transport)))
@@ -53,25 +60,17 @@ impl TransportProvider for ProductionTransportProvider {
     }
 
     async fn create_mdns_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        #[cfg(all(feature = "mdns", not(target_arch = "wasm32")))]
-        {
-            // Note: mDNS transport is temporarily disabled due to missing module
-            // TODO: Re-enable once mDNS module is implemented
-            // use super::mdns::MdnsTransport;
-            // match MdnsTransport::new("_synapse._tcp.local".to_string(), 8080).await {
-            //     Ok(transport) => {
-            //         tracing::info!("mDNS transport initialized");
-            //         Ok(Some(Arc::new(transport)))
-            //     }
-            //     Err(e) => {
-            //         tracing::warn!("Failed to initialize mDNS transport: {}", e);
-            //         Ok(None)
-            //     }
-            // }
-            Ok(None)
+        use crate::transport::mdns_enhanced::EnhancedMdnsTransport;
+        match EnhancedMdnsTransport::new("_synapse._tcp.local".to_string(), 8080, None).await {
+            Ok(transport) => {
+                tracing::info!("mDNS transport initialized");
+                Ok(Some(Arc::new(transport) as Arc<dyn abstraction::Transport>))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize mDNS transport: {}", e);
+                Err(e)
+            }
         }
-        #[cfg(not(all(feature = "mdns", not(target_arch = "wasm32"))))]
-        Ok(None)
     }
 
     async fn create_nat_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
@@ -93,24 +92,20 @@ impl TransportProvider for ProductionTransportProvider {
         Ok(None)
     }
 
-    async fn create_email_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        #[cfg(feature = "email")]
-        {
-            use super::email_enhanced::EmailEnhancedTransport;
-            match EmailEnhancedTransport::new(_config.email.clone()).await {
-                Ok(transport) => {
-                    tracing::info!("Email transport initialized");
-                    Ok(Some(Arc::new(transport)))
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to initialize email transport: {}", e);
-                    // Email transport is critical, so we return an error
-                    Err(e)
-                }
+    async fn create_email_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>> {
+        use crate::transport::email_simple::SimpleEmailTransport;
+        info!("Creating simplified email transport");
+
+        match SimpleEmailTransport::new(config.email.clone()) {
+            Ok(transport) => {
+                info!("Simple email transport created successfully");
+                Ok(Some(Arc::new(transport) as Arc<dyn abstraction::Transport>))
+            }
+            Err(e) => {
+                warn!("Failed to create simple email transport: {}", e);
+                Ok(None)
             }
         }
-        #[cfg(not(feature = "email"))]
-        Ok(None)
     }
 
     fn create_transport_selector(&self) -> Arc<tokio::sync::RwLock<TransportSelector>> {
@@ -226,7 +221,7 @@ impl Transport for MockTransport {
     fn transport_type(&self) -> abstraction::TransportType {
         abstraction::TransportType::Tcp
     }
-    
+
     fn capabilities(&self) -> abstraction::TransportCapabilities {
         abstraction::TransportCapabilities {
             max_message_size: 1024 * 1024, // 1MB
@@ -240,13 +235,16 @@ impl Transport for MockTransport {
             features: vec![],
         }
     }
-    
+
     async fn can_reach(&self, target: &abstraction::TransportTarget) -> bool {
         // Mock implementation: can reach if target identifier is not empty and not failing
         !target.identifier.is_empty() && self.reliability > 0.5
     }
-    
-    async fn estimate_metrics(&self, _target: &abstraction::TransportTarget) -> Result<abstraction::TransportEstimate> {
+
+    async fn estimate_metrics(
+        &self,
+        _target: &abstraction::TransportTarget,
+    ) -> Result<abstraction::TransportEstimate> {
         Ok(abstraction::TransportEstimate {
             latency: self.latency,
             reliability: self.reliability as f64,
@@ -257,7 +255,11 @@ impl Transport for MockTransport {
         })
     }
 
-    async fn send_message(&self, target: &abstraction::TransportTarget, _message: &SecureMessage) -> Result<abstraction::DeliveryReceipt> {
+    async fn send_message(
+        &self,
+        target: &abstraction::TransportTarget,
+        _message: &SecureMessage,
+    ) -> Result<abstraction::DeliveryReceipt> {
         // Simulate latency
         tokio::time::sleep(self.latency).await;
         Ok(abstraction::DeliveryReceipt {
@@ -274,7 +276,10 @@ impl Transport for MockTransport {
         Ok(vec![]) // Simple mock - no messages
     }
 
-    async fn test_connectivity(&self, _target: &abstraction::TransportTarget) -> Result<abstraction::ConnectivityResult> {
+    async fn test_connectivity(
+        &self,
+        _target: &abstraction::TransportTarget,
+    ) -> Result<abstraction::ConnectivityResult> {
         Ok(abstraction::ConnectivityResult {
             connected: self.reliability > 0.5,
             rtt: Some(self.latency),
@@ -283,19 +288,19 @@ impl Transport for MockTransport {
             details: std::collections::HashMap::new(),
         })
     }
-    
+
     async fn start(&self) -> Result<()> {
         Ok(())
     }
-    
+
     async fn stop(&self) -> Result<()> {
         Ok(())
     }
-    
+
     async fn status(&self) -> abstraction::TransportStatus {
         abstraction::TransportStatus::Running
     }
-    
+
     async fn metrics(&self) -> abstraction::TransportMetrics {
         abstraction::TransportMetrics::default()
     }
@@ -309,11 +314,11 @@ impl super::Transport for MockTransport {
         tokio::time::sleep(self.latency).await;
         Ok(format!("mock-{}-sent-to-{}", self.id, target))
     }
-    
+
     async fn receive_messages(&self) -> Result<Vec<SecureMessage>> {
         Ok(vec![]) // Simple mock - no messages
     }
-    
+
     async fn test_connectivity(&self, _target: &str) -> Result<super::TransportMetrics> {
         Ok(super::TransportMetrics {
             latency: self.latency,
@@ -324,20 +329,20 @@ impl super::Transport for MockTransport {
             last_updated: std::time::Instant::now(),
         })
     }
-    
+
     async fn can_reach(&self, target: &str) -> bool {
         // Mock implementation: can reach if target is not empty and not failing
         !target.is_empty() && self.reliability > 0.5
     }
-    
+
     fn get_capabilities(&self) -> Vec<String> {
         self.capabilities.clone()
     }
-    
+
     fn estimated_latency(&self) -> Duration {
         self.latency
     }
-    
+
     fn reliability_score(&self) -> f32 {
         self.reliability
     }

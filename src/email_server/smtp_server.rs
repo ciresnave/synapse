@@ -1,16 +1,16 @@
-//! High-performance SMTP server for EMRP
-
-use crate::error::{SynapseError, Result};
+use crate::blockchain::serialization::DateTimeWrapper;
+/// High-performance SMTP server for EMRP
+use crate::error::{Result, SynapseError};
+use crate::synapse::blockchain::serialization::UuidWrapper;
 use crate::types::SecureMessage;
-use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{info, error, debug};
-use uuid::Uuid;
 use chrono::Utc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tracing::{debug, error, info};
+use uuid::Uuid;
 
 /// High-performance SMTP server optimized for EMRP
 pub struct SynapseSmtpServer {
@@ -112,7 +112,7 @@ pub trait AuthHandler {
 impl Default for SmtpServerConfig {
     fn default() -> Self {
         Self {
-            port: 2525, // Non-privileged port for development
+            port: 2525,                         // Non-privileged port for development
             max_message_size: 25 * 1024 * 1024, // 25MB
             require_auth: true,
             tls_config: None,
@@ -128,10 +128,7 @@ impl Default for SmtpServerConfig {
 
 impl SynapseSmtpServer {
     /// Create a new SMTP server
-    pub fn new(
-        config: SmtpServerConfig,
-        auth_handler: Arc<dyn AuthHandler + Send + Sync>,
-    ) -> Self {
+    pub fn new(config: SmtpServerConfig, auth_handler: Arc<dyn AuthHandler + Send + Sync>) -> Self {
         Self {
             config,
             message_store: Arc::new(Mutex::new(HashMap::new())),
@@ -144,8 +141,9 @@ impl SynapseSmtpServer {
     /// Start the SMTP server
     pub async fn start(&self) -> Result<()> {
         let addr = format!("0.0.0.0:{}", self.config.port);
-        let listener = TcpListener::bind(&addr).await
-            .map_err(|e| SynapseError::NetworkError(format!("Failed to bind SMTP server to {}: {}", addr, e)))?;
+        let listener = TcpListener::bind(&addr).await.map_err(|e| {
+            SynapseError::NetworkError(format!("Failed to bind SMTP server to {addr}: {e}"))
+        })?;
 
         info!("EMRP SMTP Server listening on {}", addr);
 
@@ -153,7 +151,7 @@ impl SynapseSmtpServer {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     info!("New SMTP connection from {}", addr);
-                    
+
                     // Update metrics
                     {
                         let mut metrics = self.metrics.lock().unwrap();
@@ -180,9 +178,15 @@ impl SynapseSmtpServer {
         let (read_half, write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
-        
+
         let mut session = ClientSession {
-            id: format!("smtp_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()),
+            id: format!(
+                "smtp_{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis()
+            ),
             authenticated: false,
             current_message: None,
             connected_at: SystemTime::now(),
@@ -198,7 +202,7 @@ impl SynapseSmtpServer {
             debug!("SMTP command: {}", command);
 
             let response = self.process_smtp_command(command, &mut session).await?;
-            
+
             writer.write_all(response.as_bytes()).await?;
             writer.flush().await?;
 
@@ -214,19 +218,23 @@ impl SynapseSmtpServer {
     }
 
     /// Process SMTP command
-    async fn process_smtp_command(&self, command: &str, session: &mut ClientSession) -> Result<String> {
+    async fn process_smtp_command(
+        &self,
+        command: &str,
+        session: &mut ClientSession,
+    ) -> Result<String> {
         let parts: Vec<&str> = command.split_whitespace().collect();
         if parts.is_empty() {
             return Ok("500 Syntax error\r\n".to_string());
         }
 
         let cmd = parts[0].to_uppercase();
-        
+
         match cmd.as_str() {
             "HELO" | "EHLO" => {
                 let hostname = parts.get(1).unwrap_or(&"unknown");
                 if cmd == "EHLO" {
-                    let mut response = format!("250-Hello {}\r\n", hostname);
+                    let mut response = format!("250-Hello {hostname}\r\n");
                     response.push_str("250-PIPELINING\r\n");
                     response.push_str("250-8BITMIME\r\n");
                     if self.config.require_auth {
@@ -235,37 +243,40 @@ impl SynapseSmtpServer {
                     response.push_str("250 Ok\r\n");
                     Ok(response)
                 } else {
-                    Ok(format!("250 Hello {}\r\n", hostname))
+                    Ok(format!("250 Hello {hostname}\r\n"))
                 }
             }
             "AUTH" => {
                 if parts.len() < 2 {
                     return Ok("500 AUTH mechanism required\r\n".to_string());
                 }
-                
+
                 let mechanism = parts[1].to_uppercase();
                 match mechanism.as_str() {
                     "PLAIN" => {
                         if parts.len() >= 3 {
                             // Inline AUTH PLAIN
-                            if let Ok(auth_data) = base64_decode(parts[2]) {
-                                if let Ok(auth_str) = String::from_utf8(auth_data) {
-                                    let auth_parts: Vec<&str> = auth_str.split('\0').collect();
-                                    if auth_parts.len() >= 3 {
-                                        let username = auth_parts[1];
-                                        let password = auth_parts[2];
-                                        
-                                        match self.auth_handler.authenticate(username, password) {
-                                            Ok(true) => {
-                                                session.authenticated = true;
-                                                return Ok("235 Authentication successful\r\n".to_string());
-                                            }
-                                            Ok(false) => {
-                                                return Ok("535 Authentication failed\r\n".to_string());
-                                            }
-                                            Err(_) => {
-                                                return Ok("454 Temporary authentication failure\r\n".to_string());
-                                            }
+                            if let Ok(auth_data) = base64_decode(parts[2])
+                                && let Ok(auth_str) = String::from_utf8(auth_data)
+                            {
+                                let auth_parts: Vec<&str> = auth_str.split('\0').collect();
+                                if auth_parts.len() >= 3 {
+                                    let username = auth_parts[1];
+                                    let password = auth_parts[2];
+
+                                    match self.auth_handler.authenticate(username, password) {
+                                        Ok(true) => {
+                                            session.authenticated = true;
+                                            return Ok(
+                                                "235 Authentication successful\r\n".to_string()
+                                            );
+                                        }
+                                        Ok(false) => {
+                                            return Ok("535 Authentication failed\r\n".to_string());
+                                        }
+                                        Err(_) => {
+                                            return Ok("454 Temporary authentication failure\r\n"
+                                                .to_string());
                                         }
                                     }
                                 }
@@ -273,14 +284,14 @@ impl SynapseSmtpServer {
                         }
                         Ok("334 \r\n".to_string()) // Request auth data
                     }
-                    _ => Ok("504 Unrecognized authentication type\r\n".to_string())
+                    _ => Ok("504 Unrecognized authentication type\r\n".to_string()),
                 }
             }
             "MAIL" => {
                 if self.config.require_auth && !session.authenticated {
                     return Ok("530 Authentication required\r\n".to_string());
                 }
-                
+
                 if let Some(from_addr) = self.extract_email_from_mail_from(command) {
                     // Verify sender authorization
                     match self.auth_handler.is_authorized_sender(&from_addr) {
@@ -303,7 +314,7 @@ impl SynapseSmtpServer {
                 if session.current_message.is_none() {
                     return Ok("503 Need MAIL command first\r\n".to_string());
                 }
-                
+
                 if let Some(to_addr) = self.extract_email_from_rcpt_to(command) {
                     // Verify recipient authorization
                     match self.auth_handler.is_authorized_recipient(&to_addr) {
@@ -324,33 +335,28 @@ impl SynapseSmtpServer {
                 if session.current_message.is_none() {
                     return Ok("503 Need RCPT command first\r\n".to_string());
                 }
-                
-                if let Some(ref msg) = session.current_message {
-                    if msg.to.is_empty() {
-                        return Ok("503 Need RCPT command first\r\n".to_string());
-                    }
+
+                if let Some(ref msg) = session.current_message
+                    && msg.to.is_empty()
+                {
+                    return Ok("503 Need RCPT command first\r\n".to_string());
                 }
-                
+
                 Ok("354 Start mail input; end with <CRLF>.<CRLF>\r\n".to_string())
             }
-            "QUIT" => {
-                Ok("221 Bye\r\n".to_string())
-            }
-            _ => {
-                Ok("502 Command not implemented\r\n".to_string())
-            }
+            "QUIT" => Ok("221 Bye\r\n".to_string()),
+            _ => Ok("502 Command not implemented\r\n".to_string()),
         }
     }
 
     /// Extract email address from MAIL FROM command
     fn extract_email_from_mail_from(&self, command: &str) -> Option<String> {
         // Parse "MAIL FROM:<email@domain.com>"
-        if let Some(start) = command.find('<') {
-            if let Some(end) = command.find('>') {
-                if end > start {
-                    return Some(command[start + 1..end].to_string());
-                }
-            }
+        if let Some(start) = command.find('<')
+            && let Some(end) = command.find('>')
+            && end > start
+        {
+            return Some(command[start + 1..end].to_string());
         }
         None
     }
@@ -358,12 +364,11 @@ impl SynapseSmtpServer {
     /// Extract email address from RCPT TO command
     fn extract_email_from_rcpt_to(&self, command: &str) -> Option<String> {
         // Parse "RCPT TO:<email@domain.com>"
-        if let Some(start) = command.find('<') {
-            if let Some(end) = command.find('>') {
-                if end > start {
-                    return Some(command[start + 1..end].to_string());
-                }
-            }
+        if let Some(start) = command.find('<')
+            && let Some(end) = command.find('>')
+            && end > start
+        {
+            return Some(command[start + 1..end].to_string());
         }
         None
     }
@@ -372,7 +377,7 @@ impl SynapseSmtpServer {
     #[allow(dead_code)]
     async fn store_message(&self, message: SmtpMessage) -> Result<()> {
         let start_time = SystemTime::now();
-        
+
         // Convert SMTP message to EMRP SecureMessage
         let secure_message = SecureMessage {
             message_id: UuidWrapper::new(Uuid::new_v4()),
@@ -390,7 +395,7 @@ impl SynapseSmtpServer {
         {
             let mut store = self.message_store.lock().unwrap();
             for recipient in &message.to {
-                let messages = store.entry(recipient.clone()).or_insert_with(Vec::new);
+                let messages = store.entry(recipient.clone()).or_default();
                 messages.push(secure_message.clone());
             }
         }
@@ -399,15 +404,18 @@ impl SynapseSmtpServer {
         {
             let mut metrics = self.metrics.lock().unwrap();
             metrics.messages_received += 1;
-            
+
             if let Ok(elapsed) = start_time.elapsed() {
                 let processing_time = elapsed.as_millis() as f64;
-                metrics.average_processing_time_ms = 
+                metrics.average_processing_time_ms =
                     (metrics.average_processing_time_ms + processing_time) / 2.0;
             }
         }
 
-        info!("Stored message from {} to {:?}", secure_message.from_global_id, message.to);
+        info!(
+            "Stored message from {} to {:?}",
+            secure_message.from_global_id, message.to
+        );
         Ok(())
     }
 
@@ -439,28 +447,30 @@ impl Clone for SynapseSmtpServer {
 fn base64_decode(input: &str) -> Result<Vec<u8>> {
     // Simple base64 decoding - in production, use a proper base64 library
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    
+
     let input = input.trim();
     let mut result = Vec::new();
     let mut buffer = 0u32;
     let mut bits = 0;
-    
+
     for byte in input.bytes() {
         if byte == b'=' {
             break;
         }
-        
-        let value = CHARS.iter().position(|&x| x == byte)
+
+        let value = CHARS
+            .iter()
+            .position(|&x| x == byte)
             .ok_or_else(|| SynapseError::Crypto("Invalid base64 character".to_string()))?;
-        
+
         buffer = (buffer << 6) | (value as u32);
         bits += 6;
-        
+
         if bits >= 8 {
             result.push((buffer >> (bits - 8)) as u8);
             bits -= 8;
         }
     }
-    
+
     Ok(result)
 }

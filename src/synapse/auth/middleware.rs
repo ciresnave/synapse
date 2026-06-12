@@ -1,8 +1,6 @@
 // Authentication middleware for Synapse
 // Provides token validation and role-based authorization for API endpoints
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::synapse::auth::SynapseAuth;
@@ -75,7 +73,7 @@ impl AuthMiddleware {
     /// Authenticate a request using a token
     pub async fn authenticate(
         &self, 
-        token: Option<&str>
+        token: Option<&auth_framework::AuthToken>
     ) -> AuthContext {
         // Default to unauthenticated
         let mut context = AuthContext::default();
@@ -85,19 +83,20 @@ impl AuthMiddleware {
             Some(token) => token,
             None => return context,
         };
-        
         // Validate token
-        let user_id = match self.auth_service.validate_token(token).await {
-            Ok(user_id) => user_id,
+        let valid = match self.auth_service.validate_token(token).await {
+            Ok(valid) => valid,
             Err(_) => return context,
         };
-        
+        if !valid {
+            return context;
+        }
         // User is authenticated at this point
-        context.user_id = user_id.clone();
+        context.user_id = token.user_id().to_string();
         context.is_authenticated = true;
         
         // Try to get profile from registry
-        if let Ok(profile) = self.registry.get_participant(&user_id).await {
+    if let Ok(profile) = self.registry.get_participant(token.user_id()).await {
             if let Some(unwrapped_profile) = &profile {
                 // Check for admin role - using string role since ParticipantRole enum doesn't exist
                 context.is_admin = unwrapped_profile.organizational_context

@@ -1,22 +1,22 @@
 //! Demo of the unified transport manager with multiple transport types
-//! 
+//!
 //! This example shows how to:
 //! 1. Set up a transport manager with multiple transports
 //! 2. Send messages using automatic transport selection
 //! 3. Receive messages from multiple transports
 //! 4. Monitor transport metrics and status
 
+use std::{collections::HashMap, time::Duration};
 use synapse::{
+    error::Result,
     transport::{
-        TransportManagerBuilder, TransportTarget,
-        TcpTransportFactory, UdpTransportFactory, TransportType, TransportSelectionPolicy,
+        TcpTransportFactory, TransportManagerBuilder, TransportSelectionPolicy, TransportTarget,
+        TransportType, UdpTransportFactory,
     },
     types::{SecureMessage, SecurityLevel},
-    error::Result,
 };
-use std::{time::Duration, collections::HashMap};
 use tokio::time::sleep;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,8 +48,12 @@ async fn main() -> Result<()> {
         .build();
 
     // Register transport factories
-    manager.register_factory(Box::new(TcpTransportFactory)).await?;
-    manager.register_factory(Box::new(UdpTransportFactory)).await?;
+    manager
+        .register_factory(Box::new(TcpTransportFactory))
+        .await?;
+    manager
+        .register_factory(Box::new(UdpTransportFactory))
+        .await?;
 
     // Start the transport manager
     info!("Starting transport manager...");
@@ -76,7 +80,10 @@ async fn main() -> Result<()> {
         SecurityLevel::Secure,
     );
 
-    match manager.send_message(&realtime_target, &realtime_message).await {
+    match manager
+        .send_message(&realtime_target, &realtime_message)
+        .await
+    {
         Ok(receipt) => {
             info!("Real-time message sent successfully!");
             info!("  Transport used: {:?}", receipt.transport_used);
@@ -97,12 +104,17 @@ async fn main() -> Result<()> {
     let background_message = SecureMessage::new(
         "demo-recipient".to_string(),
         "demo-sender".to_string(),
-        "This is a background message with more data that requires reliability.".as_bytes().to_vec(),
+        "This is a background message with more data that requires reliability."
+            .as_bytes()
+            .to_vec(),
         vec![], // signature placeholder
         SecurityLevel::Secure,
     );
 
-    match manager.send_message(&background_target, &background_message).await {
+    match manager
+        .send_message(&background_target, &background_message)
+        .await
+    {
         Ok(receipt) => {
             info!("Background message sent successfully!");
             info!("  Transport used: {:?}", receipt.transport_used);
@@ -117,14 +129,26 @@ async fn main() -> Result<()> {
     // Demo 3: Test connectivity to various targets
     info!("\n--- Demo 3: Connectivity tests ---");
     let test_targets = vec![
-        ("TCP Local", TransportTarget::new("localhost".to_string()).with_address("127.0.0.1:8080".to_string())),
-        ("UDP Local", TransportTarget::new("localhost".to_string()).with_address("127.0.0.1:8081".to_string())),
-        ("Invalid Target", TransportTarget::new("invalid".to_string()).with_address("999.999.999.999:9999".to_string())),
+        (
+            "TCP Local",
+            TransportTarget::new("localhost".to_string())
+                .with_address("127.0.0.1:8080".to_string()),
+        ),
+        (
+            "UDP Local",
+            TransportTarget::new("localhost".to_string())
+                .with_address("127.0.0.1:8081".to_string()),
+        ),
+        (
+            "Invalid Target",
+            TransportTarget::new("invalid".to_string())
+                .with_address("999.999.999.999:9999".to_string()),
+        ),
     ];
 
-    for (name, target) in test_targets {
+    for (name, _target) in test_targets {
         info!("Testing connectivity to {}", name);
-        
+
         // Note: Direct access to transport factories is not available in public API
         // This would require using the transport manager's public methods instead
         info!("  Connectivity test would be performed via transport manager");
@@ -134,23 +158,31 @@ async fn main() -> Result<()> {
     info!("\n--- Demo 4: Monitoring metrics ---");
     for i in 0..5 {
         sleep(Duration::from_secs(2)).await;
-        
+
         let metrics = manager.get_metrics().await;
         info!("Metrics snapshot {} :", i + 1);
         info!("  Total messages sent: {}", metrics.total_messages_sent);
-        info!("  Total messages received: {}", metrics.total_messages_received);
+        info!(
+            "  Total messages received: {}",
+            metrics.total_messages_received
+        );
         info!("  Total failures: {}", metrics.total_failures);
-        info!("  Overall reliability: {:.2}%", metrics.overall_reliability * 100.0);
+        info!(
+            "  Overall reliability: {:.2}%",
+            metrics.overall_reliability * 100.0
+        );
         info!("  Average latency: {:?}", metrics.average_latency);
-        
+
         // Show per-transport metrics
         for (transport_type, transport_metrics) in &metrics.transport_metrics {
-            info!("  {:?}: sent={}, received={}, failures={}, reliability={:.2}%", 
-                  transport_type,
-                  transport_metrics.messages_sent,
-                  transport_metrics.messages_received,
-                  transport_metrics.send_failures,
-                  transport_metrics.reliability_score * 100.0);
+            info!(
+                "  {:?}: sent={}, received={}, failures={}, reliability={:.2}%",
+                transport_type,
+                transport_metrics.messages_sent,
+                transport_metrics.messages_received,
+                transport_metrics.send_failures,
+                transport_metrics.reliability_score * 100.0
+            );
         }
     }
 
@@ -164,8 +196,10 @@ async fn main() -> Result<()> {
                 info!("Received {} messages:", messages.len());
                 for msg in messages {
                     let content_str = String::from_utf8_lossy(&msg.message.encrypted_content);
-                    info!("  Message from {} via {:?}: {}", 
-                          msg.source, msg.transport_type, content_str);
+                    info!(
+                        "  Message from {} via {:?}: {}",
+                        msg.source, msg.transport_type, content_str
+                    );
                 }
             }
         }
@@ -176,7 +210,7 @@ async fn main() -> Result<()> {
 
     // Demo 6: Transport failover simulation
     info!("\n--- Demo 6: Failover simulation ---");
-    
+
     // Try to send to an unreachable target to trigger failover
     let unreachable_target = TransportTarget::new("unreachable".to_string())
         .with_address("192.0.2.1:9999".to_string()) // RFC 5737 test address
@@ -190,7 +224,10 @@ async fn main() -> Result<()> {
         SecurityLevel::Secure,
     );
 
-    match manager.send_message(&unreachable_target, &failover_message).await {
+    match manager
+        .send_message(&unreachable_target, &failover_message)
+        .await
+    {
         Ok(receipt) => {
             info!("Failover message sent (unexpected success):");
             info!("  Transport used: {:?}", receipt.transport_used);
@@ -203,18 +240,7 @@ async fn main() -> Result<()> {
     // Clean shutdown
     info!("\n--- Shutting down transport manager ---");
     manager.stop().await?;
-    
+
     info!("Unified transport manager demo completed successfully!");
     Ok(())
-}
-
-/// Helper function to create a sample message
-fn create_sample_message(id: &str, content: &str) -> SecureMessage {
-    SecureMessage::new(
-        "demo-recipient".to_string(),
-        "demo-sender".to_string(),
-        content.as_bytes().to_vec(),
-        vec![], // signature placeholder
-        SecurityLevel::Secure,
-    )
 }

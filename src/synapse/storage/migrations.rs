@@ -1,15 +1,12 @@
-#[cfg(feature = "database")]
-use sqlx::{PgPool, Row};
 use anyhow::Result;
-use tracing::{info, debug};
+use sqlx::{PgPool, Row};
+use tracing::{debug, info};
 
 /// Database migration manager for Synapse schema
-#[cfg(feature = "database")]
 pub struct MigrationManager {
     pool: PgPool,
 }
 
-#[cfg(feature = "database")]
 impl MigrationManager {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -30,9 +27,13 @@ impl MigrationManager {
         let migrations = self.get_migrations();
         for migration in migrations {
             if migration.version > current_version {
-                info!("Running migration {}: {}", migration.version, migration.name);
+                info!(
+                    "Running migration {}: {}",
+                    migration.version, migration.name
+                );
                 self.run_migration(&migration).await?;
-                self.record_migration(migration.version, &migration.name).await?;
+                self.record_migration(migration.version, &migration.name)
+                    .await?;
             }
         }
 
@@ -48,7 +49,7 @@ impl MigrationManager {
                 name TEXT NOT NULL,
                 applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
-            "#
+            "#,
         )
         .execute(&self.pool)
         .await?;
@@ -57,30 +58,25 @@ impl MigrationManager {
     }
 
     async fn get_current_version(&self) -> Result<i32> {
-        let row = sqlx::query(
-            "SELECT COALESCE(MAX(version), 0) as version FROM synapse_migrations"
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT COALESCE(MAX(version), 0) as version FROM synapse_migrations")
+                .fetch_one(&self.pool)
+                .await?;
 
         Ok(row.get("version"))
     }
 
     async fn run_migration(&self, migration: &Migration) -> Result<()> {
-        sqlx::query(&migration.sql)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(&migration.sql).execute(&self.pool).await?;
         Ok(())
     }
 
     async fn record_migration(&self, version: i32, name: &str) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO synapse_migrations (version, name) VALUES ($1, $2)"
-        )
-        .bind(version)
-        .bind(name)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO synapse_migrations (version, name) VALUES ($1, $2)")
+            .bind(version)
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }

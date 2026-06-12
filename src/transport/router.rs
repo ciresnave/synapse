@@ -1,22 +1,22 @@
 //! Multi-transport router for intelligent message routing
 
 use super::{
+    TransportRoute, TransportSelector,
     abstraction::{
-        Transport, TransportTarget, MessageUrgency, TransportType,
-        TransportCapabilities, DeliveryReceipt
+        DeliveryReceipt, MessageUrgency, Transport, TransportCapabilities, TransportTarget,
+        TransportType,
     },
-    TransportSelector, TransportRoute,
 };
-use crate::{
-    types::SecureMessage,
-    error::Result,
-    config::Config,
-};
-use std::{sync::Arc, time::{Duration, Instant}, collections::HashMap};
+use crate::{config::Config, error::Result, types::SecureMessage};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-use serde::{Serialize, Deserialize};
 
 /// Connection offer for establishing connections
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,10 +54,13 @@ pub struct ProductionTransportProvider;
 impl TransportProvider for ProductionTransportProvider {
     async fn create_tcp_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
         // Create TCP transport using enhanced implementation
-        use crate::transport::tcp::TcpTransport;
-        
-        let tcp_port = 8080; // Default TCP port
-        match TcpTransport::new(tcp_port).await {
+        use crate::transport::tcp_unified::TcpTransportImpl;
+        use std::collections::HashMap;
+
+        let mut tcp_config = HashMap::new();
+        tcp_config.insert("listen_port".to_string(), "8080".to_string());
+
+        match TcpTransportImpl::new(&tcp_config).await {
             Ok(transport) => Ok(Some(Arc::new(transport))),
             Err(e) => {
                 warn!("Failed to create TCP transport: {}", e);
@@ -67,9 +70,17 @@ impl TransportProvider for ProductionTransportProvider {
     }
 
     async fn create_mdns_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        // TODO: Re-enable mDNS transport after trait compatibility is fixed
-        warn!("mDNS transport temporarily disabled due to trait compatibility issues");
-        Ok(None)
+        use crate::transport::mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig};
+        let entity_id = "router-instance".to_string();
+        let local_port = 8080;
+        let config = Some(MdnsConfig::default());
+        match EnhancedMdnsTransport::new(entity_id, local_port, config).await {
+            Ok(transport) => Ok(Some(Arc::new(transport) as Arc<dyn Transport>)),
+            Err(e) => {
+                warn!("Failed to create mDNS transport: {}", e);
+                Ok(None)
+            }
+        }
     }
 
     async fn create_nat_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
@@ -79,17 +90,10 @@ impl TransportProvider for ProductionTransportProvider {
         Ok(None)
     }
 
-    async fn create_email_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        // Create email transport using enhanced implementation
-        use crate::transport::email_enhanced::EmailEnhancedTransport;
-        
-        match EmailEnhancedTransport::new(config.email.clone()).await {
-            Ok(transport) => Ok(Some(Arc::new(transport))),
-            Err(e) => {
-                warn!("Failed to create email transport: {}", e);
-                Ok(None)
-            }
-        }
+    async fn create_email_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
+        // Email transport not available in minimal build
+        warn!("Email transport not available in minimal build");
+        Ok(None)
     }
 
     fn create_transport_selector(&self) -> Arc<RwLock<TransportSelector>> {
@@ -106,7 +110,9 @@ pub struct MultiTransportRouter {
     transport_selector: Arc<RwLock<TransportSelector>>,
     route_cache: Arc<RwLock<HashMap<String, (TransportRoute, Instant)>>>,
     cache_duration: Duration,
+    // ...existing code...
     #[allow(dead_code)]
+    // Used for entity identification in routing decisions and future security features
     our_entity_id: String,
     performance_monitoring: bool,
 }
@@ -120,12 +126,15 @@ impl MultiTransportRouter {
 
     /// Create a new multi-transport router with dependency injection
     pub async fn new_with_provider(
-        config: Config, 
-        our_entity_id: String,
-        provider: Box<dyn TransportProvider>
+        config: Config,
+        #[allow(dead_code)] our_entity_id: String,
+        provider: Box<dyn TransportProvider>,
     ) -> Result<Self> {
-        info!("Initializing multi-transport router for entity: {}", our_entity_id);
-        
+        info!(
+            "Initializing multi-transport router for entity: {}",
+            our_entity_id
+        );
+
         // Initialize transports through dependency injection
         let tcp_transport = provider.create_tcp_transport(&config).await?;
         let mdns_transport = provider.create_mdns_transport(&config).await?;
@@ -133,8 +142,11 @@ impl MultiTransportRouter {
         let email_transport = provider.create_email_transport(&config).await?;
         let transport_selector = provider.create_transport_selector();
 
-        if tcp_transport.is_none() && mdns_transport.is_none() && 
-           nat_transport.is_none() && email_transport.is_none() {
+        if tcp_transport.is_none()
+            && mdns_transport.is_none()
+            && nat_transport.is_none()
+            && email_transport.is_none()
+        {
             warn!("No transports available - router may have limited functionality");
         }
 
@@ -150,53 +162,59 @@ impl MultiTransportRouter {
             performance_monitoring: true,
         })
     }
-    
+
     /// Send message with automatic transport selection
     pub async fn send_message(
-        &self, 
-        target: &str, 
-        message: &SecureMessage, 
-        urgency: MessageUrgency
+        &self,
+        target: &str,
+        message: &SecureMessage,
+        urgency: MessageUrgency,
     ) -> Result<DeliveryReceipt> {
         let start = Instant::now();
-        
+
         // Check cache first
-        if let Some(cached_route) = self.get_cached_route(target).await {
-            if self.is_route_suitable(&cached_route, urgency) {
-                debug!("Using cached route for {}: {:?}", target, cached_route);
-                return self.send_via_route(target, message, &cached_route).await;
-            }
+        if let Some(cached_route) = self.get_cached_route(target).await
+            && self.is_route_suitable(&cached_route, urgency)
+        {
+            debug!("Using cached route for {}: {:?}", target, cached_route);
+            return self.send_via_route(target, message, &cached_route).await;
         }
-        
+
         // Discover optimal transport
         let mut selector = self.transport_selector.write().await;
         match selector.choose_optimal_transport(target, urgency).await {
             Ok(route) => {
                 drop(selector); // Release lock early
-                
+
                 // Cache the route
                 self.cache_route(target.to_string(), route.clone()).await;
-                
+
                 // Send via selected route
                 let result = self.send_via_route(target, message, &route).await;
-                
+
                 if self.performance_monitoring {
                     let elapsed = start.elapsed();
-                    info!("Message sent to {} via {:?} in {:?}", target, route, elapsed);
+                    info!(
+                        "Message sent to {} via {:?} in {:?}",
+                        target, route, elapsed
+                    );
                 }
-                
+
                 result
             }
             Err(e) => {
                 warn!("Transport selection failed for {}: {}", target, e);
-                
+
                 // Fallback to email if all else fails
                 info!("Falling back to email transport for {}", target);
-                self.send_via_email(target, message).await
+                self.send_via_email(target, message).await.map_err(|e| {
+                    warn!("Email transport failed: {}", e);
+                    e
+                })
             }
         }
     }
-    
+
     /// Send message with explicit fallback priority
     pub async fn send_with_fallback_priority(
         &self,
@@ -216,22 +234,66 @@ impl MultiTransportRouter {
                 }
             }
         }
-        
+
         // If all preferred routes fail, try email as ultimate fallback
         warn!("All preferred routes failed, using email fallback");
         self.send_via_email(target, message).await
     }
-    
+
+    /// Send connection offer to establish new communication channel
+    pub async fn initiate_connection_offer(
+        &self,
+        target: &str,
+        transport_type: TransportType,
+    ) -> Result<String> {
+        use crate::transport::abstraction::TransportCapabilities;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let offer = ConnectionOffer {
+            from_entity: self.our_entity_id.clone(),
+            to_entity: target.to_string(),
+            transport_type,
+            capabilities: TransportCapabilities {
+                max_message_size: 1024 * 1024, // 1MB
+                reliable: true,
+                real_time: false,
+                broadcast: false,
+                bidirectional: true,
+                encrypted: true,
+                network_spanning: true,
+                supported_urgencies: vec![
+                    crate::transport::abstraction::MessageUrgency::Interactive,
+                ],
+                features: vec!["connection_offer".to_string()],
+            },
+            valid_until: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 1800, // Valid for 30 minutes
+        };
+
+        // Use the email transport method directly
+        self.send_connection_offer_via_email(target, &offer).await
+    }
+
     /// Send via specific transport route
-    async fn send_via_route(&self, target: &str, message: &SecureMessage, route: &TransportRoute) -> Result<DeliveryReceipt> {
+    async fn send_via_route(
+        &self,
+        target: &str,
+        message: &SecureMessage,
+        route: &TransportRoute,
+    ) -> Result<DeliveryReceipt> {
         let target_obj = TransportTarget::new(target.to_string());
-        
+
         match route {
             TransportRoute::DirectTcp { .. } => {
                 if let Some(ref transport) = self.tcp_transport {
                     transport.send_message(&target_obj, message).await
                 } else {
-                    Err(crate::error::SynapseError::TransportError("TCP transport not available".into()))
+                    Err(crate::error::SynapseError::TransportError(
+                        "TCP transport not available".into(),
+                    ))
                 }
             }
             TransportRoute::DirectUdp { .. } => {
@@ -239,7 +301,9 @@ impl MultiTransportRouter {
                 if let Some(ref transport) = self.tcp_transport {
                     transport.send_message(&target_obj, message).await
                 } else {
-                    Err(crate::error::SynapseError::TransportError("UDP transport not available (using TCP fallback)".into()))
+                    Err(crate::error::SynapseError::TransportError(
+                        "UDP transport not available (using TCP fallback)".into(),
+                    ))
                 }
             }
             TransportRoute::Udp { .. } => {
@@ -247,7 +311,9 @@ impl MultiTransportRouter {
                 if let Some(ref transport) = self.tcp_transport {
                     transport.send_message(&target_obj, message).await
                 } else {
-                    Err(crate::error::SynapseError::TransportError("UDP transport not available (using TCP fallback)".into()))
+                    Err(crate::error::SynapseError::TransportError(
+                        "UDP transport not available (using TCP fallback)".into(),
+                    ))
                 }
             }
             TransportRoute::WebSocket { .. } => {
@@ -255,7 +321,9 @@ impl MultiTransportRouter {
                 if let Some(ref transport) = self.tcp_transport {
                     transport.send_message(&target_obj, message).await
                 } else {
-                    Err(crate::error::SynapseError::TransportError("WebSocket transport not available (using TCP fallback)".into()))
+                    Err(crate::error::SynapseError::TransportError(
+                        "WebSocket transport not available (using TCP fallback)".into(),
+                    ))
                 }
             }
             TransportRoute::Quic { .. } => {
@@ -263,177 +331,172 @@ impl MultiTransportRouter {
                 if let Some(ref transport) = self.tcp_transport {
                     transport.send_message(&target_obj, message).await
                 } else {
-                    Err(crate::error::SynapseError::TransportError("QUIC transport not available (using TCP fallback)".into()))
+                    Err(crate::error::SynapseError::TransportError(
+                        "QUIC transport not available (using TCP fallback)".into(),
+                    ))
                 }
             }
-            TransportRoute::LocalMdns { .. } => {
-                self.send_via_mdns(target, message).await
-            }
+            TransportRoute::LocalMdns { .. } => self.send_via_mdns(target, message).await,
             TransportRoute::NatTraversal { .. } => {
                 if let Some(ref transport) = self.nat_transport {
                     transport.send_message(&target_obj, message).await
                 } else {
-                    Err(crate::error::SynapseError::TransportError("NAT traversal transport not available".into()))
+                    Err(crate::error::SynapseError::TransportError(
+                        "NAT traversal transport not available".into(),
+                    ))
                 }
             }
-            TransportRoute::FastEmailRelay { .. } | 
-            TransportRoute::StandardEmail { .. } | 
-            TransportRoute::EmailDiscovery { .. } => {
-                self.send_via_email(target, message).await
-            }
+            TransportRoute::FastEmailRelay { .. }
+            | TransportRoute::StandardEmail { .. }
+            | TransportRoute::EmailDiscovery { .. } => self.send_via_email(target, message).await,
         }
     }
-    
+
     /// Send message via email transport (if available)
-    async fn send_via_email(&self, target: &str, message: &SecureMessage) -> Result<DeliveryReceipt> {
-        #[cfg(feature = "email")]
-        {
-            let target_obj = TransportTarget::new(target.to_string());
-            if let Some(ref transport) = self.email_transport {
-                transport.send_message(&target_obj, message).await
-            } else {
-                Err(crate::error::SynapseError::TransportError("Email transport not available".into()))
-            }
-        }
-        #[cfg(not(feature = "email"))]
-        {
-            let _ = (target, message); // Suppress unused warnings
-            Err(crate::error::SynapseError::TransportError("Email transport not available".to_string()))
+    async fn send_via_email(
+        &self,
+        target: &str,
+        message: &SecureMessage,
+    ) -> Result<DeliveryReceipt> {
+        let target_obj = TransportTarget::new(target.to_string());
+        if let Some(ref transport) = self.email_transport {
+            transport.send_message(&target_obj, message).await
+        } else {
+            Err(crate::error::SynapseError::TransportError(
+                "Email transport not available".into(),
+            ))
         }
     }
 
     /// Send connection offer via email transport (if available)
-    #[allow(dead_code)]
-    async fn send_connection_offer_via_email(&self, target: &str, offer: &ConnectionOffer) -> Result<String> {
-        #[cfg(feature = "email")]
-        {
-            match &self.email_transport {
-                Some(transport) => transport.send_connection_offer(target, offer.clone()).await,
-                None => Err(crate::error::SynapseError::TransportError("Email transport not available".to_string()).into())
+    async fn send_connection_offer_via_email(
+        &self,
+        target: &str,
+        offer: &ConnectionOffer,
+    ) -> Result<String> {
+        match &self.email_transport {
+            Some(transport) => {
+                // Log the connection offer attempt
+                info!("Sending connection offer to {} via email", target);
+
+                transport
+                    .send_connection_offer(target, offer.clone())
+                    .await
+                    .map_err(|e| {
+                        warn!("Failed to send connection offer via email: {}", e);
+                        e
+                    })
             }
-        }
-        #[cfg(not(feature = "email"))]
-        {
-            let _ = (target, offer); // Suppress unused warnings
-            Err(crate::error::SynapseError::TransportError("Email transport not available".to_string()).into())
+            None => Err(crate::error::SynapseError::TransportError(
+                "Email transport not available".to_string(),
+            )),
         }
     }
 
     /// Check if mDNS transport is available
     fn has_mdns_transport(&self) -> bool {
-        #[cfg(feature = "mdns")]
-        {
-            self.mdns_transport.is_some()
-        }
-        #[cfg(not(feature = "mdns"))]
-        {
-            false
-        }
+        self.mdns_transport.is_some()
     }
 
     /// Send via mDNS transport (if available)
-    async fn send_via_mdns(&self, target: &str, message: &SecureMessage) -> Result<DeliveryReceipt> {
-        #[cfg(feature = "mdns")]
-        {
-            let target_obj = TransportTarget::new(target.to_string());
-            if let Some(ref transport) = self.mdns_transport {
-                transport.send_message(&target_obj, message).await
-            } else {
-                Err(crate::error::SynapseError::TransportError("mDNS transport not initialized".to_string()))
-            }
-        }
-        #[cfg(not(feature = "mdns"))]
-        {
-            let _ = (target, message); // Suppress unused warnings
-            Err(crate::error::SynapseError::TransportError("mDNS transport not available".to_string()))
+    async fn send_via_mdns(
+        &self,
+        target: &str,
+        message: &SecureMessage,
+    ) -> Result<DeliveryReceipt> {
+        let target_obj = TransportTarget::new(target.to_string());
+        if let Some(ref transport) = self.mdns_transport {
+            transport.send_message(&target_obj, message).await
+        } else {
+            Err(crate::error::SynapseError::TransportError(
+                "mDNS transport not initialized".to_string(),
+            ))
         }
     }
 
     /// Check if mDNS can reach target
-    async fn mdns_can_reach(&self, target: &str) -> bool {
-        #[cfg(feature = "mdns")]
-        {
-            let target_obj = TransportTarget::new(target.to_string());
-            if let Some(ref mdns) = self.mdns_transport {
-                mdns.can_reach(&target_obj).await
-            } else {
-                false
-            }
-        }
-        #[cfg(not(feature = "mdns"))]
-        {
-            let _ = target; // Suppress unused warning
+    async fn mdns_can_reach(&self, _target: &str) -> bool {
+        let target_obj = TransportTarget::new(_target.to_string());
+        if let Some(ref mdns) = self.mdns_transport {
+            mdns.can_reach(&target_obj).await
+        } else {
             false
         }
     }
-    
+
     /// Test if we can connect directly to target
     pub async fn can_connect_directly(&self, target: &str) -> bool {
         // Try TCP first
         let target_obj = TransportTarget::new(target.to_string());
-        if let Some(ref tcp) = self.tcp_transport {
-            if tcp.can_reach(&target_obj).await {
-                return true;
-            }
+        if let Some(ref tcp) = self.tcp_transport
+            && tcp.can_reach(&target_obj).await
+        {
+            return true;
         }
-        
+
         // Note: UDP transport not implemented
-        
+
         false
     }
-    
+
     /// Discover local peer via mDNS
     pub async fn discover_local_peer(&self, target: &str) -> Result<()> {
         if self.mdns_can_reach(target).await {
             Ok(())
         } else {
-            Err(crate::error::SynapseError::TransportError("mDNS peer not found".into()))
+            Err(crate::error::SynapseError::TransportError(
+                "mDNS peer not found".into(),
+            ))
         }
     }
-    
+
     /// Establish NAT traversal connection
     pub async fn establish_nat_traversal(&self, target: &str) -> Result<super::NatMethod> {
         let target_obj = TransportTarget::new(target.to_string());
         if let Some(ref nat) = self.nat_transport {
             // This is a simplified version - the real implementation would be in NAT transport
             if nat.can_reach(&target_obj).await {
-                Ok(super::NatMethod::Stun { 
-                    server: "stun.l.google.com:19302".to_string() 
+                Ok(super::NatMethod::Stun {
+                    server: "stun.l.google.com:19302".to_string(),
                 })
             } else {
-                Err(crate::error::SynapseError::TransportError("NAT traversal failed".into()))
+                Err(crate::error::SynapseError::TransportError(
+                    "NAT traversal failed".into(),
+                ))
             }
         } else {
-            Err(crate::error::SynapseError::TransportError("NAT traversal transport not available".into()))
+            Err(crate::error::SynapseError::TransportError(
+                "NAT traversal transport not available".into(),
+            ))
         }
     }
-    
+
     /// Establish hybrid connection combining multiple transports
     pub async fn establish_hybrid_connection(&self, target: &str) -> Result<HybridConnection> {
         // Try to get a mutable reference to email transport for hybrid connection
         // In a real implementation, we'd need to restructure this
         info!("Establishing hybrid connection to {}", target);
-        
+
         // For now, simulate a hybrid connection
         let discovery_start = Instant::now();
         tokio::time::sleep(Duration::from_millis(100)).await;
         let _discovery_time = discovery_start.elapsed();
-        
+
         let connection_start = Instant::now();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let connection_time = connection_start.elapsed();
-        
+
         let _primary_route = TransportRoute::DirectTcp {
             address: target.to_string(),
             port: 8080,
             latency_ms: 25,
             established_at: Instant::now(),
         };
-        
+
         let _fallback_route = TransportRoute::StandardEmail {
             estimated_latency_min: 60,
         };
-        
+
         let _metrics = super::TransportMetrics {
             latency: connection_time,
             throughput_bps: 1_000_000,
@@ -442,7 +505,7 @@ impl MultiTransportRouter {
             reliability_score: 0.90,
             last_updated: Instant::now(),
         };
-        
+
         Ok(HybridConnection {
             primary_transport: TransportType::Tcp,
             fallback_transports: vec![TransportType::Email],
@@ -450,7 +513,7 @@ impl MultiTransportRouter {
             established_at: Instant::now(),
         })
     }
-    
+
     /// Send with reliability priority (prefer email)
     pub async fn send_reliable(
         &self,
@@ -464,13 +527,13 @@ impl MultiTransportRouter {
             Err(e) => {
                 warn!("Email delivery failed, trying alternatives: {}", e);
                 // Try alternative delivery methods
-                self.send_message(target, message, urgency).await
+                self.send_message(target, message, urgency)
+                    .await
                     .map(|receipt| receipt.message_id)
             }
         }
     }
-    
-    /// Get cached route for target
+
     async fn get_cached_route(&self, target: &str) -> Option<TransportRoute> {
         let cache = self.route_cache.read().await;
         if let Some((route, cached_at)) = cache.get(target) {
@@ -483,18 +546,18 @@ impl MultiTransportRouter {
             None
         }
     }
-    
+
     /// Cache a route for future use
     async fn cache_route(&self, target: String, route: TransportRoute) {
         let mut cache = self.route_cache.write().await;
         cache.insert(target, (route, Instant::now()));
     }
-    
+
     /// Check if a route is suitable for the given urgency
     fn is_route_suitable(&self, route: &TransportRoute, urgency: MessageUrgency) -> bool {
         match urgency {
             MessageUrgency::Critical => {
-                matches!(route, 
+                matches!(route,
                     TransportRoute::DirectTcp { latency_ms, .. } |
                     TransportRoute::DirectUdp { latency_ms, .. } |
                     TransportRoute::LocalMdns { latency_ms, .. }
@@ -502,48 +565,54 @@ impl MultiTransportRouter {
                 )
             }
             MessageUrgency::RealTime => {
-                matches!(route, 
+                matches!(route,
                     TransportRoute::DirectTcp { latency_ms, .. } |
                     TransportRoute::DirectUdp { latency_ms, .. } |
                     TransportRoute::LocalMdns { latency_ms, .. }
                     if *latency_ms < 100
                 )
             }
-            MessageUrgency::Interactive => {
-                !matches!(route, TransportRoute::StandardEmail { .. })
-            }
+            MessageUrgency::Interactive => !matches!(route, TransportRoute::StandardEmail { .. }),
             MessageUrgency::Background | MessageUrgency::Batch => {
                 true // Any route is acceptable
             }
         }
     }
-    
+
     /// Get transport capabilities summary
     pub fn get_capabilities(&self) -> Vec<String> {
         let mut capabilities = Vec::new();
-        
+
         if self.tcp_transport.is_some() {
             capabilities.extend(vec!["tcp".to_string(), "direct_connection".to_string()]);
         }
         // Note: UDP transport not implemented
-        
+
         if self.has_mdns_transport() {
             capabilities.extend(vec!["mdns".to_string(), "local_discovery".to_string()]);
         }
-        
+
         if self.nat_transport.is_some() {
-            capabilities.extend(vec!["nat_traversal".to_string(), "stun".to_string(), "upnp".to_string()]);
+            capabilities.extend(vec![
+                "nat_traversal".to_string(),
+                "stun".to_string(),
+                "upnp".to_string(),
+            ]);
         }
-        
-        capabilities.extend(vec!["email".to_string(), "reliable_delivery".to_string(), "universal_reach".to_string()]);
-        
+
+        capabilities.extend(vec![
+            "email".to_string(),
+            "reliable_delivery".to_string(),
+            "universal_reach".to_string(),
+        ]);
+
         capabilities
     }
-    
+
     /// Start background services for all transports
     pub async fn start_background_services(&self) -> Result<()> {
         info!("Starting multi-transport background services");
-        
+
         // Start TCP server if available
         if let Some(ref tcp) = self.tcp_transport {
             // TCP server background service with proper Arc<Mutex<T>> pattern
@@ -555,9 +624,9 @@ impl MultiTransportRouter {
                 debug!("TCP background service started");
             });
         }
-        
+
         // Note: UDP transport not implemented
-        
+
         // Start mDNS discovery if available
         if self.has_mdns_transport() {
             tokio::spawn(async move {
@@ -565,7 +634,7 @@ impl MultiTransportRouter {
                 debug!("mDNS discovery service started");
             });
         }
-        
+
         info!("All available transport services started");
         Ok(())
     }

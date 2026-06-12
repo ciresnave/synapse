@@ -1,15 +1,15 @@
 //! Multi-Transport Synapse Demo - Simple Version
 //! Demonstrates the intelligent transport selection without async dependencies
 
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// Message urgency levels for transport selection
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageUrgency {
     Critical,    // <50ms required
     RealTime,    // <100ms required
-    Interactive, // <1s acceptable  
+    Interactive, // <1s acceptable
     Background,  // Reliability preferred
     Batch,       // Store and forward acceptable
 }
@@ -48,10 +48,10 @@ impl MultiTransportDemo {
     pub fn new() -> Self {
         Self {
             available_transports: vec![
-                TransportRoute::LocalMdns { latency_ms: 5 },     // Ultra-fast LAN
-                TransportRoute::DirectUdp { latency_ms: 15 },    // Fast direct UDP
-                TransportRoute::DirectTcp { latency_ms: 25 },    // Reliable direct TCP
-                TransportRoute::FastEmail { latency_ms: 500 },   // Fast email relay
+                TransportRoute::LocalMdns { latency_ms: 5 }, // Ultra-fast LAN
+                TransportRoute::DirectUdp { latency_ms: 15 }, // Fast direct UDP
+                TransportRoute::DirectTcp { latency_ms: 25 }, // Reliable direct TCP
+                TransportRoute::FastEmail { latency_ms: 500 }, // Fast email relay
                 TransportRoute::StandardEmail { latency_min: 1 }, // Universal email
             ],
             messages_sent: 0,
@@ -62,10 +62,29 @@ impl MultiTransportDemo {
             standard_email_count: 0,
         }
     }
-    
+
     /// Select best transport for message urgency using intelligent algorithm
     pub fn select_transport(&self, urgency: &MessageUrgency) -> TransportRoute {
         match urgency {
+            MessageUrgency::Critical => {
+                // PRIORITY: <50ms latency required - use fastest available
+                for transport in &self.available_transports {
+                    match transport {
+                        TransportRoute::LocalMdns { latency_ms } if *latency_ms < 50 => {
+                            println!("   🚨 Selected mDNS for CRITICAL ({}ms)", latency_ms);
+                            return transport.clone();
+                        }
+                        TransportRoute::DirectUdp { latency_ms } if *latency_ms < 50 => {
+                            println!("   🚨 Selected UDP for CRITICAL ({}ms)", latency_ms);
+                            return transport.clone();
+                        }
+                        _ => continue,
+                    }
+                }
+                // Critical emergency fallback - use fastest regardless of latency
+                println!("   🚨 CRITICAL: Using fastest available transport");
+                self.available_transports[0].clone()
+            }
             MessageUrgency::RealTime => {
                 // PRIORITY: <100ms latency required
                 for transport in &self.available_transports {
@@ -106,7 +125,10 @@ impl MultiTransportDemo {
                             return transport.clone();
                         }
                         TransportRoute::FastEmail { latency_ms } if *latency_ms < 1000 => {
-                            println!("   📧 Selected Fast Email for interactive ({}ms)", latency_ms);
+                            println!(
+                                "   📧 Selected Fast Email for interactive ({}ms)",
+                                latency_ms
+                            );
                             return transport.clone();
                         }
                         _ => continue,
@@ -119,11 +141,17 @@ impl MultiTransportDemo {
                 for transport in &self.available_transports {
                     match transport {
                         TransportRoute::StandardEmail { latency_min } => {
-                            println!("   📮 Selected Standard Email for reliability (~{}min)", latency_min);
+                            println!(
+                                "   📮 Selected Standard Email for reliability (~{}min)",
+                                latency_min
+                            );
                             return transport.clone();
                         }
                         TransportRoute::FastEmail { latency_ms } => {
-                            println!("   📨 Selected Fast Email for background ({}ms)", latency_ms);
+                            println!(
+                                "   📨 Selected Fast Email for background ({}ms)",
+                                latency_ms
+                            );
                             return transport.clone();
                         }
                         _ => continue,
@@ -138,28 +166,34 @@ impl MultiTransportDemo {
             }
         }
     }
-    
+
     /// Send message with automatic transport selection and performance simulation
     pub fn send_message(&mut self, message: SimpleMessage) -> Result<String, String> {
         let start_time = Instant::now();
         let selected_transport = self.select_transport(&message.urgency);
-        
+
         println!("\n📨 Sending message:");
         println!("   From: {} → To: {}", message.from, message.to);
         println!("   Content: \"{}\"", message.content);
         println!("   Urgency: {:?}", message.urgency);
-        
+
         // Simulate actual network transmission
         let result = match selected_transport.clone() {
             TransportRoute::DirectTcp { latency_ms } => {
                 thread::sleep(Duration::from_millis(latency_ms as u64));
                 self.tcp_count += 1;
-                format!("✅ Sent via TCP Direct in {}ms (reliable connection)", latency_ms)
+                format!(
+                    "✅ Sent via TCP Direct in {}ms (reliable connection)",
+                    latency_ms
+                )
             }
             TransportRoute::DirectUdp { latency_ms } => {
                 thread::sleep(Duration::from_millis(latency_ms as u64));
                 self.udp_count += 1;
-                format!("✅ Sent via UDP Direct in {}ms (fast & lightweight)", latency_ms)
+                format!(
+                    "✅ Sent via UDP Direct in {}ms (fast & lightweight)",
+                    latency_ms
+                )
             }
             TransportRoute::LocalMdns { latency_ms } => {
                 thread::sleep(Duration::from_millis(latency_ms as u64));
@@ -169,30 +203,36 @@ impl MultiTransportDemo {
             TransportRoute::FastEmail { latency_ms } => {
                 thread::sleep(Duration::from_millis(latency_ms as u64));
                 self.fast_email_count += 1;
-                format!("✅ Sent via Fast Email Relay in {}ms (global reach)", latency_ms)
+                format!(
+                    "✅ Sent via Fast Email Relay in {}ms (global reach)",
+                    latency_ms
+                )
             }
             TransportRoute::StandardEmail { latency_min } => {
                 // Simulate email delay (reduced for demo)
                 thread::sleep(Duration::from_millis(200));
                 self.standard_email_count += 1;
-                format!("✅ Sent via Standard Email in ~{}min (universal compatibility)", latency_min)
+                format!(
+                    "✅ Sent via Standard Email in ~{}min (universal compatibility)",
+                    latency_min
+                )
             }
         };
-        
+
         let actual_time = start_time.elapsed();
         self.messages_sent += 1;
-        
+
         println!("   Result: {}", result);
         println!("   Actual transmission time: {:?}", actual_time);
-        
+
         Ok(result)
     }
-    
+
     /// Demonstrate all transport selection scenarios
     pub fn demo_intelligent_routing(&mut self) {
         println!("🌟 Synapse Multi-Transport Intelligent Routing Demo");
         println!("=================================================\n");
-        
+
         let test_scenarios = vec![
             (
                 "Real-Time Collaboration",
@@ -201,7 +241,7 @@ impl MultiTransportDemo {
                     from: "Claude@anthropic.ai".to_string(),
                     content: "Live collaboration session starting now".to_string(),
                     urgency: MessageUrgency::RealTime,
-                }
+                },
             ),
             (
                 "Interactive Chat",
@@ -210,7 +250,7 @@ impl MultiTransportDemo {
                     from: "Claude@anthropic.ai".to_string(),
                     content: "Quick question about the API design".to_string(),
                     urgency: MessageUrgency::Interactive,
-                }
+                },
             ),
             (
                 "Background Task",
@@ -219,7 +259,7 @@ impl MultiTransportDemo {
                     from: "Claude@anthropic.ai".to_string(),
                     content: "Batch processing job completed successfully".to_string(),
                     urgency: MessageUrgency::Background,
-                }
+                },
             ),
             (
                 "Discovery Request",
@@ -228,14 +268,14 @@ impl MultiTransportDemo {
                     from: "Claude@anthropic.ai".to_string(),
                     content: "Hello! I'd like to establish communication".to_string(),
                     urgency: MessageUrgency::Batch,
-                }
+                },
             ),
         ];
-        
+
         for (scenario, message) in test_scenarios {
             println!("🎯 Scenario: {}", scenario);
             let scenario_start = Instant::now();
-            
+
             match self.send_message(message) {
                 Ok(_) => {
                     let total_time = scenario_start.elapsed();
@@ -248,37 +288,52 @@ impl MultiTransportDemo {
             }
         }
     }
-    
+
     /// Show detailed transport capabilities and characteristics
     pub fn show_transport_matrix(&self) {
         println!("📊 Transport Capability Matrix:");
         println!("┌─────────────────┬─────────────┬──────────────┬────────────────┐");
         println!("│ Transport       │ Latency     │ Reliability  │ Use Case       │");
         println!("├─────────────────┼─────────────┼──────────────┼────────────────┤");
-        
+
         for transport in &self.available_transports {
             match transport {
                 TransportRoute::LocalMdns { latency_ms } => {
-                    println!("│ mDNS Local      │ {:>8}ms │ Very High    │ LAN Real-time  │", latency_ms);
+                    println!(
+                        "│ mDNS Local      │ {:>8}ms │ Very High    │ LAN Real-time  │",
+                        latency_ms
+                    );
                 }
                 TransportRoute::DirectUdp { latency_ms } => {
-                    println!("│ UDP Direct      │ {:>8}ms │ Medium       │ Fast Messages  │", latency_ms);
+                    println!(
+                        "│ UDP Direct      │ {:>8}ms │ Medium       │ Fast Messages  │",
+                        latency_ms
+                    );
                 }
                 TransportRoute::DirectTcp { latency_ms } => {
-                    println!("│ TCP Direct      │ {:>8}ms │ High         │ Reliable Conn  │", latency_ms);
+                    println!(
+                        "│ TCP Direct      │ {:>8}ms │ High         │ Reliable Conn  │",
+                        latency_ms
+                    );
                 }
                 TransportRoute::FastEmail { latency_ms } => {
-                    println!("│ Fast Email      │ {:>8}ms │ High         │ Global Fast    │", latency_ms);
+                    println!(
+                        "│ Fast Email      │ {:>8}ms │ High         │ Global Fast    │",
+                        latency_ms
+                    );
                 }
                 TransportRoute::StandardEmail { latency_min } => {
-                    println!("│ Standard Email  │ {:>7}min │ Very High    │ Universal      │", latency_min);
+                    println!(
+                        "│ Standard Email  │ {:>7}min │ Very High    │ Universal      │",
+                        latency_min
+                    );
                 }
             }
         }
-        
+
         println!("└─────────────────┴─────────────┴──────────────┴────────────────┘\n");
     }
-    
+
     /// Display usage statistics
     pub fn show_statistics(&self) {
         println!("📈 Transport Usage Statistics:");
@@ -287,8 +342,18 @@ impl MultiTransportDemo {
         println!("   • UDP Direct: {} messages", self.udp_count);
         println!("   • TCP Direct: {} messages", self.tcp_count);
         println!("   • Fast Email: {} messages", self.fast_email_count);
-        println!("   • Standard Email: {} messages", self.standard_email_count);
+        println!(
+            "   • Standard Email: {} messages",
+            self.standard_email_count
+        );
         println!();
+    }
+}
+
+// Add Default implementation
+impl Default for MultiTransportDemo {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -296,18 +361,18 @@ fn main() {
     println!("🚀 Synapse Neural Communication Network");
     println!("     Advanced Multi-Transport Architecture");
     println!("=============================================\n");
-    
+
     let mut router = MultiTransportDemo::new();
-    
+
     // Show transport capabilities
     router.show_transport_matrix();
-    
+
     // Demonstrate intelligent routing
     router.demo_intelligent_routing();
-    
-    // Show usage statistics  
+
+    // Show usage statistics
     router.show_statistics();
-    
+
     // Final summary
     println!("🎉 Demo Complete!");
     println!("\n📋 Key Features Demonstrated:");
@@ -316,7 +381,7 @@ fn main() {
     println!("   ✅ Automatic fallback mechanisms for reliability");
     println!("   ✅ Performance optimization (5ms to 1min latency range)");
     println!("   ✅ Universal compatibility via email backbone");
-    
+
     println!("\n🌟 The Synapse multi-transport system is production-ready!");
     println!("    From local millisecond communication to global email delivery");
 }

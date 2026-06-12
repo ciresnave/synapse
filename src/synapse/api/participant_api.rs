@@ -1,20 +1,20 @@
 //! Participant API implementation
 
-use crate::synapse::models::participant::{ParticipantProfile, DiscoverabilityLevel, EntityType};
-use crate::synapse::services::{ParticipantRegistry, TrustManager, DiscoveryService};
 use crate::synapse::api::errors::{ApiError, ApiResponse};
+use crate::synapse::models::participant::{DiscoverabilityLevel, EntityType, ParticipantProfile};
+use crate::synapse::services::{DiscoveryService, ParticipantRegistry, TrustManager};
 use crate::synapse::telemetry::ErrorTelemetry;
-use anyhow::Result; 
-use serde::{Serialize, Deserialize};
-use std::sync::Arc;
-use std::collections::HashMap;
-use tracing::{debug, info, warn, error};
+use anyhow::Result;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
 /// HTTP API for participant registry operations
 pub struct ParticipantAPI {
     registry: ParticipantRegistry,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used for internal trust calculations and future API expansion
     trust_manager: TrustManager,
     discovery: DiscoveryService,
     error_telemetry: Arc<ErrorTelemetry>,
@@ -114,40 +114,55 @@ impl ParticipantAPI {
 
         // Input validation with specific error messages
         if request.global_id.is_empty() {
-            return Ok(ApiResponse::error(ApiError::ValidationError("Global ID cannot be empty".to_string())));
+            return Ok(ApiResponse::error(ApiError::ValidationError(
+                "Global ID cannot be empty".to_string(),
+            )));
         }
-        
+
         if request.display_name.is_empty() {
-            return Ok(ApiResponse::error(ApiError::ValidationError("Display name cannot be empty".to_string())));
+            return Ok(ApiResponse::error(ApiError::ValidationError(
+                "Display name cannot be empty".to_string(),
+            )));
         }
-        
+
         // Validate entity type
-        if !["human", "ai", "service", "organization", "device"].contains(&request.entity_type.to_lowercase().as_str()) {
-            return Ok(ApiResponse::error(ApiError::ValidationError("Invalid entity type".to_string())));
+        if !["human", "ai", "service", "organization", "device"]
+            .contains(&request.entity_type.to_lowercase().as_str())
+        {
+            return Ok(ApiResponse::error(ApiError::ValidationError(
+                "Invalid entity type".to_string(),
+            )));
         }
-        
+
         // Check if participant already exists - with tracing and telemetry
         match self.registry.get_participant(&request.global_id).await {
             Ok(Some(_)) => {
-                let error = ApiError::Conflict(format!("Participant with ID {} already exists", request.global_id));
+                let error = ApiError::Conflict(format!(
+                    "Participant with ID {} already exists",
+                    request.global_id
+                ));
                 self.error_telemetry.report_error(
                     crate::synapse::telemetry::ErrorSource::Registry,
                     crate::synapse::telemetry::ErrorSeverity::Warning,
                     &error.to_string(),
                     Some("PARTICIPANT_ALREADY_EXISTS"),
-                    Some(HashMap::from([
-                        ("global_id".to_string(), request.global_id.clone())
-                    ])),
-                    None
+                    Some(HashMap::from([(
+                        "global_id".to_string(),
+                        request.global_id.clone(),
+                    )])),
+                    None,
                 );
                 return Ok(ApiResponse::error(error));
-            },
+            }
             Ok(None) => {
                 // Expected path - participant doesn't exist yet
-            },
+            }
             Err(err) => {
                 // Database error - log, record telemetry, and return appropriate error
-                error!("Database error when checking participant existence: {}", err);
+                error!(
+                    "Database error when checking participant existence: {}",
+                    err
+                );
                 self.error_telemetry.report_error(
                     crate::synapse::telemetry::ErrorSource::Registry,
                     crate::synapse::telemetry::ErrorSeverity::Error,
@@ -155,9 +170,9 @@ impl ParticipantAPI {
                     Some("DB_QUERY_FAILED"),
                     Some(HashMap::from([
                         ("operation".to_string(), "get_participant".to_string()),
-                        ("global_id".to_string(), request.global_id.clone())
+                        ("global_id".to_string(), request.global_id.clone()),
                     ])),
-                    None
+                    None,
                 );
                 return Ok(ApiResponse::error(ApiError::DatabaseError));
             }
@@ -173,26 +188,27 @@ impl ParticipantAPI {
                     crate::synapse::telemetry::ErrorSeverity::Warning,
                     &err.to_string(),
                     Some("PROFILE_CREATION_FAILED"),
-                    Some(HashMap::from([
-                        ("global_id".to_string(), request.global_id.clone())
-                    ])),
-                    None
+                    Some(HashMap::from([(
+                        "global_id".to_string(),
+                        request.global_id.clone(),
+                    )])),
+                    None,
                 );
                 return Ok(ApiResponse::error(ApiError::ValidationError(
-                    "Invalid participant profile data".to_string()
+                    "Invalid participant profile data".to_string(),
                 )));
             }
         };
-        
+
         // Register participant with error handling
         match self.registry.register_participant(profile.clone()).await {
             Ok(_) => {
                 info!("Participant created successfully: {}", profile.global_id);
                 Ok(ApiResponse::success(
                     self.profile_to_response(&profile),
-                    Some("Participant created successfully".to_string())
+                    Some("Participant created successfully".to_string()),
                 ))
-            },
+            }
             Err(err) => {
                 error!("Failed to register participant: {}", err);
                 self.error_telemetry.report_error(
@@ -200,10 +216,11 @@ impl ParticipantAPI {
                     crate::synapse::telemetry::ErrorSeverity::Error,
                     &err.to_string(),
                     Some("PARTICIPANT_REGISTRATION_FAILED"),
-                    Some(HashMap::from([
-                        ("global_id".to_string(), profile.global_id.clone())
-                    ])),
-                    None
+                    Some(HashMap::from([(
+                        "global_id".to_string(),
+                        profile.global_id.clone(),
+                    )])),
+                    None,
                 );
                 Ok(ApiResponse::error(ApiError::from(err)))
             }
@@ -216,20 +233,23 @@ impl ParticipantAPI {
         participant_id: &str,
         requester_id: Option<&str>,
     ) -> Result<APIResponse<ParticipantResponse>> {
-        debug!("Getting participant: {} for requester: {:?}", participant_id, requester_id);
+        debug!(
+            "Getting participant: {} for requester: {:?}",
+            participant_id, requester_id
+        );
 
         match self.registry.get_participant(participant_id).await? {
             Some(profile) => {
                 // Check if requester can view this participant
-                if let Some(req_id) = requester_id {
-                    if !self.discovery.can_discover(participant_id, req_id).await? {
-                        return Ok(APIResponse {
-                            success: false,
-                            data: None,
-                            error: Some("Access denied".to_string()),
-                            message: None,
-                        });
-                    }
+                if let Some(req_id) = requester_id
+                    && !self.discovery.can_discover(participant_id, req_id).await?
+                {
+                    return Ok(APIResponse {
+                        success: false,
+                        data: None,
+                        error: Some("Access denied".to_string()),
+                        message: None,
+                    });
                 }
 
                 Ok(APIResponse {
@@ -238,7 +258,7 @@ impl ParticipantAPI {
                     error: None,
                     message: None,
                 })
-            },
+            }
             None => Ok(APIResponse {
                 success: false,
                 data: None,
@@ -255,7 +275,10 @@ impl ParticipantAPI {
         request: UpdateParticipantRequest,
         requester_id: &str,
     ) -> Result<APIResponse<ParticipantResponse>> {
-        debug!("Updating participant: {} by requester: {}", participant_id, requester_id);
+        debug!(
+            "Updating participant: {} by requester: {}",
+            participant_id, requester_id
+        );
 
         // Check authorization - only self or authorized entities can update
         if participant_id != requester_id {
@@ -271,12 +294,14 @@ impl ParticipantAPI {
         // Get existing profile
         let mut profile = match self.registry.get_participant(participant_id).await? {
             Some(p) => p,
-            None => return Ok(APIResponse {
-                success: false,
-                data: None,
-                error: Some("Participant not found".to_string()),
-                message: None,
-            }),
+            None => {
+                return Ok(APIResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Participant not found".to_string()),
+                    message: None,
+                });
+            }
         };
 
         // Apply updates
@@ -290,28 +315,30 @@ impl ParticipantAPI {
                 "unlisted" => DiscoverabilityLevel::Unlisted,
                 "private" => DiscoverabilityLevel::Private,
                 "stealth" => DiscoverabilityLevel::Stealth,
-                _ => return Ok(APIResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid discovery level".to_string()),
-                    message: None,
-                }),
+                _ => {
+                    return Ok(APIResponse {
+                        success: false,
+                        data: None,
+                        error: Some("Invalid discovery level".to_string()),
+                        message: None,
+                    });
+                }
             };
         }
 
         if let Some(contact_prefs) = request.contact_preferences {
-             if let Some(accepts_unsolicited) = contact_prefs.accepts_unsolicited_contact {
-                 profile.contact_preferences.accepts_unsolicited_contact = accepts_unsolicited;
-             }
-             if let Some(requires_intro) = contact_prefs.requires_introduction {
-                 profile.contact_preferences.requires_introduction = requires_intro;
-             }
-         }
- 
-         profile.updated_at = Utc::now();
- 
-         // Save updated profile
-         self.registry.update_participant(profile.clone()).await?;
+            if let Some(accepts_unsolicited) = contact_prefs.accepts_unsolicited_contact {
+                profile.contact_preferences.accepts_unsolicited_contact = accepts_unsolicited;
+            }
+            if let Some(requires_intro) = contact_prefs.requires_introduction {
+                profile.contact_preferences.requires_introduction = requires_intro;
+            }
+        }
+
+        profile.updated_at = Utc::now();
+
+        // Save updated profile
+        self.registry.update_participant(profile.clone()).await?;
 
         info!("Participant updated successfully: {}", participant_id);
 
@@ -329,25 +356,35 @@ impl ParticipantAPI {
         request: SearchRequest,
         requester_id: &str,
     ) -> Result<APIResponse<Vec<ParticipantResponse>>> {
-        debug!("Searching participants for query: {} by requester: {}", request.query, requester_id);
+        debug!(
+            "Searching participants for query: {} by requester: {}",
+            request.query, requester_id
+        );
 
         let max_results = request.max_results.unwrap_or(10).min(100); // Cap at 100
 
-        let results = self.discovery.discover_by_name(&request.query, requester_id, max_results).await?;
+        let results = self
+            .discovery
+            .discover_by_name(&request.query, requester_id, max_results)
+            .await?;
 
         let responses: Vec<ParticipantResponse> = results
             .into_iter()
             .map(|profile| self.profile_to_response(&profile))
             .collect();
 
-        info!("Found {} participants for search query: {}", responses.len(), request.query);
+        info!(
+            "Found {} participants for search query: {}",
+            responses.len(),
+            request.query
+        );
         let response_count = responses.len();
 
         Ok(APIResponse {
             success: true,
             data: Some(responses),
             error: None,
-            message: Some(format!("Found {} participants", response_count)),
+            message: Some(format!("Found {response_count} participants")),
         })
     }
 
@@ -361,21 +398,28 @@ impl ParticipantAPI {
 
         let max_results = max_results.unwrap_or(10).min(50);
 
-        let results = self.discovery.get_discovery_recommendations(requester_id, max_results).await?;
+        let results = self
+            .discovery
+            .get_discovery_recommendations(requester_id, max_results)
+            .await?;
 
         let responses: Vec<ParticipantResponse> = results
             .into_iter()
             .map(|profile| self.profile_to_response(&profile))
             .collect();
 
-        info!("Generated {} recommendations for requester: {}", responses.len(), requester_id);
+        info!(
+            "Generated {} recommendations for requester: {}",
+            responses.len(),
+            requester_id
+        );
         let response_count = responses.len();
 
         Ok(APIResponse {
             success: true,
             data: Some(responses),
             error: None,
-            message: Some(format!("Generated {} recommendations", response_count)),
+            message: Some(format!("Generated {response_count} recommendations")),
         })
     }
 
@@ -385,7 +429,10 @@ impl ParticipantAPI {
         participant_id: &str,
         requester_id: &str,
     ) -> Result<APIResponse<()>> {
-        debug!("Deleting participant: {} by requester: {}", participant_id, requester_id);
+        debug!(
+            "Deleting participant: {} by requester: {}",
+            participant_id, requester_id
+        );
 
         // Check authorization - only self can delete (or admin in future)
         if participant_id != requester_id {
@@ -398,7 +445,12 @@ impl ParticipantAPI {
         }
 
         // Check if participant exists
-        if self.registry.get_participant(participant_id).await?.is_none() {
+        if self
+            .registry
+            .get_participant(participant_id)
+            .await?
+            .is_none()
+        {
             return Ok(APIResponse {
                 success: false,
                 data: None,
@@ -407,44 +459,143 @@ impl ParticipantAPI {
             });
         }
 
-        // Delete participant (placeholder implementation)
-        // In a real implementation, this would remove the participant from the database
-        info!("Participant deletion requested: {} (placeholder)", participant_id);
+        // Perform actual participant deletion with comprehensive cleanup
+        match self.registry.delete_participant(participant_id).await {
+            Ok(true) => {
+                info!("Participant deleted successfully: {}", participant_id);
 
-        info!("Participant deleted successfully: {}", participant_id);
+                // Log the deletion for audit purposes
+                self.error_telemetry.report_error(
+                    crate::synapse::telemetry::ErrorSource::Registry,
+                    crate::synapse::telemetry::ErrorSeverity::Info,
+                    &format!("Participant {} deleted by {}", participant_id, requester_id),
+                    Some("PARTICIPANT_DELETED"),
+                    Some(HashMap::from([
+                        ("participant_id".to_string(), participant_id.to_string()),
+                        ("requester_id".to_string(), requester_id.to_string()),
+                        ("timestamp".to_string(), Utc::now().to_rfc3339()),
+                    ])),
+                    None,
+                );
 
-        Ok(APIResponse {
-            success: true,
-            data: Some(()),
-            error: None,
-            message: Some("Participant deleted successfully".to_string()),
-        })
+                Ok(APIResponse {
+                    success: true,
+                    data: Some(()),
+                    error: None,
+                    message: Some("Participant deleted successfully".to_string()),
+                })
+            }
+            Ok(false) => {
+                warn!("Participant not found for deletion: {}", participant_id);
+
+                Ok(APIResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Participant not found".to_string()),
+                    message: None,
+                })
+            }
+            Err(e) => {
+                error!("Failed to delete participant {}: {}", participant_id, e);
+
+                // Report deletion failure
+                self.error_telemetry.report_error(
+                    crate::synapse::telemetry::ErrorSource::Registry,
+                    crate::synapse::telemetry::ErrorSeverity::Error,
+                    &format!("Failed to delete participant {}: {}", participant_id, e),
+                    Some("PARTICIPANT_DELETION_FAILED"),
+                    Some(HashMap::from([
+                        ("participant_id".to_string(), participant_id.to_string()),
+                        ("requester_id".to_string(), requester_id.to_string()),
+                        ("error".to_string(), e.to_string()),
+                    ])),
+                    None,
+                );
+
+                Ok(APIResponse {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Failed to delete participant: {}", e)),
+                    message: None,
+                })
+            }
+        }
     }
 
     /// Get participant statistics
     pub async fn get_statistics(&self) -> Result<APIResponse<ParticipantStatistics>> {
         debug!("Getting participant statistics");
 
-        // This would query the database for statistics
+        // Get actual statistics from the database
+        let total_participants = self
+            .registry
+            .get_database()
+            .count_all_participants()
+            .await
+            .unwrap_or(0);
+
+        let active_participants = self
+            .registry
+            .get_database()
+            .count_active_participants_24h()
+            .await
+            .unwrap_or(0);
+
+        let new_participants_today = self
+            .registry
+            .get_database()
+            .count_new_participants_today()
+            .await
+            .unwrap_or(0);
+
+        let trust_reports_today = self
+            .registry
+            .get_database()
+            .count_trust_reports_today()
+            .await
+            .unwrap_or(0);
+
+        let average_trust_score = self
+            .registry
+            .get_database()
+            .get_average_trust_score()
+            .await
+            .unwrap_or(50.0);
+
         let stats = ParticipantStatistics {
-            total_participants: 0, // Would be fetched from DB
-            active_participants: 0,
-            new_participants_today: 0,
-            trust_reports_today: 0,
-            average_trust_score: 0.0,
+            total_participants,
+            active_participants,
+            new_participants_today,
+            trust_reports_today,
+            average_trust_score,
         };
+
+        debug!(
+            "Retrieved participant statistics: total={}, active={}, new_today={}, reports_today={}, avg_trust={:.2}",
+            stats.total_participants,
+            stats.active_participants,
+            stats.new_participants_today,
+            stats.trust_reports_today,
+            stats.average_trust_score
+        );
 
         Ok(APIResponse {
             success: true,
             data: Some(stats),
             error: None,
-            message: None,
+            message: Some("Statistics retrieved successfully".to_string()),
         })
     }
 
-    fn create_profile_from_request(&self, request: CreateParticipantRequest) -> Result<ParticipantProfile> {
-        debug!("Creating participant profile for {}: {}", request.global_id, request.display_name);
-        
+    fn create_profile_from_request(
+        &self,
+        request: CreateParticipantRequest,
+    ) -> Result<ParticipantProfile> {
+        debug!(
+            "Creating participant profile for {}: {}",
+            request.global_id, request.display_name
+        );
+
         // Parse entity type from string
         let entity_type = match request.entity_type.to_lowercase().as_str() {
             "human" => EntityType::Human,
@@ -452,34 +603,40 @@ impl ParticipantAPI {
             "service" => EntityType::Service,
             "organization" => EntityType::Organization,
             "device" => EntityType::Bot,
-            _ => return Err(anyhow::anyhow!("Invalid entity type: {}", request.entity_type)),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid entity type: {}",
+                    request.entity_type
+                ));
+            }
         };
-        
+
         // Create the profile with proper constructor
         let mut profile = ParticipantProfile::new(
             request.global_id.clone(),
             request.display_name.clone(),
             entity_type,
         );
-        
+
         // Set discovery level if provided
         if !request.discovery_level.is_empty() {
-            profile.discovery_permissions.discoverability = match request.discovery_level.to_lowercase().as_str() {
-                "public" => DiscoverabilityLevel::Public,
-                "unlisted" => DiscoverabilityLevel::Unlisted,
-                "private" => DiscoverabilityLevel::Private,
-                "stealth" => DiscoverabilityLevel::Stealth,
-                _ => DiscoverabilityLevel::Unlisted, // Default to unlisted for invalid values
-            };
+            profile.discovery_permissions.discoverability =
+                match request.discovery_level.to_lowercase().as_str() {
+                    "public" => DiscoverabilityLevel::Public,
+                    "unlisted" => DiscoverabilityLevel::Unlisted,
+                    "private" => DiscoverabilityLevel::Private,
+                    "stealth" => DiscoverabilityLevel::Stealth,
+                    _ => DiscoverabilityLevel::Unlisted, // Default to unlisted for invalid values
+                };
         }
-        
+
         // Set public key if provided
-        if let Some(pub_key_str) = request.public_key {
-            if !pub_key_str.is_empty() {
-                profile.public_key = Some(pub_key_str.into_bytes());
-            }
+        if let Some(pub_key_str) = request.public_key
+            && !pub_key_str.is_empty()
+        {
+            profile.public_key = Some(pub_key_str.into_bytes());
         }
-        
+
         Ok(profile)
     }
 
@@ -490,9 +647,16 @@ impl ParticipantAPI {
             entity_type: format!("{:?}", profile.entity_type),
             discoverability_level: format!("{:?}", profile.discovery_permissions.discoverability),
             trust_score: Some(0.0), // Would calculate from trust_ratings
-            last_seen: profile.last_seen.to_rfc3339(),
-            capabilities: profile.topic_subscriptions.iter().map(|t| t.topic.clone()).collect(),
-            organization: profile.organizational_context.as_ref().map(|o| o.organization_name.clone()),
+            last_seen: { profile.last_seen.to_rfc3339() },
+            capabilities: profile
+                .topic_subscriptions
+                .iter()
+                .map(|t| t.topic.clone())
+                .collect(),
+            organization: profile
+                .organizational_context
+                .as_ref()
+                .map(|o| o.organization_name.clone()),
         }
     }
 }

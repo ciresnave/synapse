@@ -1,8 +1,8 @@
-use crate::synapse::services::DiscoveryService;
 use crate::synapse::models::ParticipantProfile;
+use crate::synapse::services::DiscoveryService;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// HTTP API for participant discovery operations
 pub struct DiscoveryAPI {
@@ -102,8 +102,10 @@ impl DiscoveryAPI {
         requester_id: &str,
         request: DiscoveryRequest,
     ) -> Result<APIResponse<Vec<DiscoveryResult>>> {
-        debug!("Discovery request from {}: type={}, query={}", 
-               requester_id, request.discovery_type, request.query);
+        debug!(
+            "Discovery request from {}: type={}, query={}",
+            requester_id, request.discovery_type, request.query
+        );
 
         if request.query.is_empty() {
             return Ok(APIResponse {
@@ -118,15 +120,25 @@ impl DiscoveryAPI {
 
         let profiles = match request.discovery_type.as_str() {
             "name" => {
-                self.discovery.discover_by_name(&request.query, requester_id, max_results).await?
-            },
+                self.discovery
+                    .discover_by_name(&request.query, requester_id, max_results)
+                    .await?
+            }
             "capabilities" => {
-                let capabilities: Vec<String> = request.query.split(',').map(|s| s.trim().to_string()).collect();
-                self.discovery.discover_by_capabilities(&capabilities, requester_id, max_results).await?
-            },
+                let capabilities: Vec<String> = request
+                    .query
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                self.discovery
+                    .discover_by_capabilities(&capabilities, requester_id, max_results)
+                    .await?
+            }
             "organization" => {
-                self.discovery.discover_by_organization(&request.query, requester_id, max_results).await?
-            },
+                self.discovery
+                    .discover_by_organization(&request.query, requester_id, max_results)
+                    .await?
+            }
             _ => {
                 return Ok(APIResponse {
                     success: false,
@@ -137,19 +149,22 @@ impl DiscoveryAPI {
             }
         };
 
-        let results: Vec<DiscoveryResult> = profiles.into_iter()
+        let results: Vec<DiscoveryResult> = profiles
+            .into_iter()
             .map(|profile| self.profile_to_discovery_result(&profile, None))
             .collect();
 
         let results_count = results.len();
-        info!("Discovery found {} results for query: {}", 
-              results_count, request.query);
+        info!(
+            "Discovery found {} results for query: {}",
+            results_count, request.query
+        );
 
         Ok(APIResponse {
             success: true,
             data: Some(results),
             error: None,
-            message: Some(format!("Found {} participants", results_count)),
+            message: Some(format!("Found {results_count} participants")),
         })
     }
 
@@ -159,8 +174,10 @@ impl DiscoveryAPI {
         requester_id: &str,
         request: ProximityDiscoveryRequest,
     ) -> Result<APIResponse<Vec<DiscoveryResult>>> {
-        debug!("Proximity discovery request from {} with max distance: {}", 
-               requester_id, request.max_distance);
+        debug!(
+            "Proximity discovery request from {} with max distance: {}",
+            requester_id, request.max_distance
+        );
 
         if request.max_distance <= 0.0 || request.max_distance > 10.0 {
             return Ok(APIResponse {
@@ -173,25 +190,29 @@ impl DiscoveryAPI {
 
         let max_results = request.max_results.unwrap_or(10).min(50);
 
-        let profiles = self.discovery.discover_by_proximity(
-            requester_id, 
-            request.max_distance, 
-            max_results
-        ).await?;
+        let profiles = self
+            .discovery
+            .discover_by_proximity(requester_id, request.max_distance, max_results)
+            .await?;
 
-        let results: Vec<_> = profiles.into_iter()
+        let results: Vec<_> = profiles
+            .into_iter()
             .map(|profile| self.profile_to_discovery_result(&profile, Some(request.max_distance)))
             .collect();
 
         let results_count = results.len();
-        info!("Proximity discovery found {} results within distance: {}", 
-              results_count, request.max_distance);
+        info!(
+            "Proximity discovery found {} results within distance: {}",
+            results_count, request.max_distance
+        );
 
         Ok(APIResponse {
             success: true,
             data: Some(results),
             error: None,
-            message: Some(format!("Found {} participants within proximity", results_count)),
+            message: Some(format!(
+                "Found {results_count} participants within proximity"
+            )),
         })
     }
 
@@ -201,14 +222,20 @@ impl DiscoveryAPI {
         requester_id: &str,
         request: RecommendationRequest,
     ) -> Result<APIResponse<Vec<RecommendationResult>>> {
-        debug!("Recommendation request from {} of type: {}", 
-               requester_id, request.recommendation_type);
+        debug!(
+            "Recommendation request from {} of type: {}",
+            requester_id, request.recommendation_type
+        );
 
         let max_results = request.max_results.unwrap_or(10).min(20);
 
-        let profiles = self.discovery.get_discovery_recommendations(requester_id, max_results).await?;
+        let profiles = self
+            .discovery
+            .get_discovery_recommendations(requester_id, max_results)
+            .await?;
 
-        let results: Vec<_> = profiles.into_iter()
+        let results: Vec<_> = profiles
+            .into_iter()
             .enumerate()
             .map(|(index, profile)| {
                 let discovery_result = self.profile_to_discovery_result(&profile, None);
@@ -226,14 +253,16 @@ impl DiscoveryAPI {
             .collect();
 
         let results_count = results.len();
-        info!("Generated {} recommendations for requester: {}", 
-              results_count, requester_id);
+        info!(
+            "Generated {} recommendations for requester: {}",
+            results_count, requester_id
+        );
 
         Ok(APIResponse {
             success: true,
             data: Some(results),
             error: None,
-            message: Some(format!("Generated {} recommendations", results_count)),
+            message: Some(format!("Generated {results_count} recommendations")),
         })
     }
 
@@ -243,7 +272,10 @@ impl DiscoveryAPI {
         target_id: &str,
         requester_id: &str,
     ) -> Result<APIResponse<DiscoverabilityCheck>> {
-        debug!("Checking discoverability of {} for requester: {}", target_id, requester_id);
+        debug!(
+            "Checking discoverability of {} for requester: {}",
+            target_id, requester_id
+        );
 
         let can_discover = self.discovery.can_discover(target_id, requester_id).await?;
 
@@ -271,7 +303,10 @@ impl DiscoveryAPI {
         &self,
         requester_id: &str,
     ) -> Result<APIResponse<DiscoveryStatistics>> {
-        debug!("Getting discovery statistics for requester: {}", requester_id);
+        debug!(
+            "Getting discovery statistics for requester: {}",
+            requester_id
+        );
 
         // This would query the database for actual statistics
         let stats = DiscoveryStatistics {
@@ -300,8 +335,11 @@ impl DiscoveryAPI {
         target_ids: Vec<String>,
         requester_id: &str,
     ) -> Result<APIResponse<Vec<DiscoverabilityCheck>>> {
-        debug!("Batch checking discoverability for {} targets by requester: {}", 
-               target_ids.len(), requester_id);
+        debug!(
+            "Batch checking discoverability for {} targets by requester: {}",
+            target_ids.len(),
+            requester_id
+        );
 
         if target_ids.len() > 100 {
             return Ok(APIResponse {
@@ -314,7 +352,10 @@ impl DiscoveryAPI {
 
         let mut results = Vec::new();
         for target_id in target_ids {
-            let can_discover = self.discovery.can_discover(&target_id, requester_id).await?;
+            let can_discover = self
+                .discovery
+                .can_discover(&target_id, requester_id)
+                .await?;
             results.push(DiscoverabilityCheck {
                 target_id: target_id.clone(),
                 requester_id: requester_id.to_string(),
@@ -333,21 +374,32 @@ impl DiscoveryAPI {
             success: true,
             data: Some(results),
             error: None,
-            message: Some(format!("Checked {} participants", result_count)),
+            message: Some(format!("Checked {result_count} participants")),
         })
     }
 
-    fn profile_to_discovery_result(&self, profile: &ParticipantProfile, distance: Option<f64>) -> DiscoveryResult {
+    fn profile_to_discovery_result(
+        &self,
+        profile: &ParticipantProfile,
+        distance: Option<f64>,
+    ) -> DiscoveryResult {
         DiscoveryResult {
             participant_id: profile.global_id.clone(),
             display_name: profile.display_name.clone(),
             entity_type: format!("{:?}", profile.entity_type),
-            organization: profile.organizational_context.as_ref().map(|o| o.organization_name.clone()),
-            capabilities: profile.topic_subscriptions.iter().map(|t| t.topic.clone()).collect(),
+            organization: profile
+                .organizational_context
+                .as_ref()
+                .map(|o| o.organization_name.clone()),
+            capabilities: profile
+                .topic_subscriptions
+                .iter()
+                .map(|t| t.topic.clone())
+                .collect(),
             trust_score: Some(0.0), // Would calculate from trust_ratings
             distance,
             match_reason: None, // Could add matching explanation
-            last_seen: profile.last_seen.to_rfc3339(),
+            last_seen: { profile.last_seen.to_rfc3339() },
         }
     }
 }

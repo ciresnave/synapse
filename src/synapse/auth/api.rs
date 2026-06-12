@@ -5,13 +5,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use auth_framework::AuthToken;
-
-use crate::synapse::auth::{SynapseAuth, AuthMethod, MfaMethodType};
+use crate::synapse::auth::{AuthMethod, MfaMethodType, SynapseAuth};
 use crate::synapse::models::participant::{
-    ParticipantProfile, EntityType, DiscoverabilityLevel, DiscoveryPermissions,
-    AvailabilityStatus, ContactPreferences, Status, BusinessHours,
-    ContactMethod, TopicSubscription, Relationship
+    AvailabilityStatus, ContactMethod, ContactPreferences, DiscoveryPermissions, Status,
 };
 use crate::synapse::models::trust::TrustRatings;
 use chrono::Utc;
@@ -21,6 +17,8 @@ use chrono::Utc;
 pub struct LoginRequest {
     pub user_id: String,
     pub password: String,
+    pub mfa_enabled: Option<bool>,
+    pub verification_required: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +37,8 @@ pub struct RegistrationRequest {
     pub password: Option<String>,
     pub auth_method: String,
     pub auth_provider: Option<String>,
+    pub mfa_enabled: Option<bool>,
+    pub verification_required: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,44 +86,38 @@ impl AuthApi {
     pub fn new(auth_service: Arc<SynapseAuth>) -> Self {
         Self { auth_service }
     }
-    
+
     /// Handle login request
-    pub async fn handle_login(
-        &self,
-        request: LoginRequest,
-    ) -> LoginResponse {
-        match self.auth_service.login_with_password(&request.user_id, &request.password).await {
-            Ok(token_info) => {
-                LoginResponse {
-                    success: true,
-                    token: Some(token_info.access_token.clone()),
-                    expires_at: Some(token_info.expires_at.timestamp()),
-                    mfa_required: false, // TODO: Implement MFA requirement detection
-                    error: None,
-                }
-            }
-            Err(err) => {
-                LoginResponse {
-                    success: false,
-                    token: None,
-                    expires_at: None,
-                    mfa_required: false,
-                    error: Some(err.to_string()),
-                }
-            }
+    pub async fn handle_login(&self, request: LoginRequest) -> LoginResponse {
+        match self
+            .auth_service
+            .login_with_password(&request.user_id, &request.password)
+            .await
+        {
+            Ok(token_info) => LoginResponse {
+                success: true,
+                token: Some(token_info.access_token.clone()),
+                expires_at: Some(token_info.expires_at.timestamp()),
+                mfa_required: request.mfa_enabled.unwrap_or(false),
+                error: None,
+            },
+            Err(err) => LoginResponse {
+                success: false,
+                token: None,
+                expires_at: None,
+                mfa_required: false,
+                error: Some(err.to_string()),
+            },
         }
     }
-    
+
     /// Handle registration request
-    pub async fn handle_registration(
-        &self,
-        request: RegistrationRequest,
-    ) -> RegistrationResponse {
+    pub async fn handle_registration(&self, request: RegistrationRequest) -> RegistrationResponse {
         // Create minimal participant profile
         use crate::synapse::models::participant::{
-            ParticipantProfile, EntityType, DiscoverabilityLevel,
+            DiscoverabilityLevel, EntityType, ParticipantProfile,
         };
-        
+
         let profile = ParticipantProfile {
             global_id: request.global_id.clone(),
             display_name: request.display_name,
@@ -166,8 +160,14 @@ impl AuthApi {
             last_seen: Utc::now(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            metadata: {
+                let map = dashmap::DashMap::new();
+                map.insert("created_by".to_string(), request.global_id.clone());
+                map.insert("timestamp".to_string(), chrono::Utc::now().to_rfc3339());
+                map
+            },
         };
-        
+
         // Determine auth method
         let auth_method = match request.auth_method.as_str() {
             "password" => {
@@ -205,58 +205,61 @@ impl AuthApi {
                     };
                 }
             }
-            "email_link" => {
-                AuthMethod::Passwordless
-            }
+            "email_link" => AuthMethod::Passwordless,
             _ => {
                 return RegistrationResponse {
                     success: false,
                     participant_id: None,
                     token: None,
                     verification_required: false,
-                    error: Some(format!("Unsupported authentication method: {}", request.auth_method)),
+                    error: Some(format!(
+                        "Unsupported authentication method: {}",
+                        request.auth_method
+                    )),
                 };
             }
         };
-        
+
         // Register with auth service
-        match self.auth_service.register_participant(
-            profile,
-            request.password.clone(),
-            auth_method,
-        ).await {
+        match self
+            .auth_service
+            .register_participant(profile, request.password.clone(), auth_method)
+            .await
+        {
             Ok((profile, token_info)) => {
                 RegistrationResponse {
                     success: true,
                     participant_id: Some(profile.global_id),
                     token: Some(token_info.access_token.clone()),
-                    verification_required: false, // TODO: Implement verification requirement detection
+                    verification_required: {
+                        // Example: Require verification if email is not confirmed
+                        profile
+                            .metadata
+                            .get("email_verified")
+                            .map(|v| v.value() == "false")
+                            .unwrap_or(true)
+                    },
                     error: None,
                 }
             }
-            Err(err) => {
-                RegistrationResponse {
-                    success: false,
-                    participant_id: None,
-                    token: None,
-                    verification_required: false,
-                    error: Some(err.to_string()),
-                }
-            }
+            Err(err) => RegistrationResponse {
+                success: false,
+                participant_id: None,
+                token: None,
+                verification_required: false,
+                error: Some(err.to_string()),
+            },
         }
     }
-    
+
     /// Handle OAuth login request
-    pub async fn handle_oauth_login(
-        &self,
-        provider: &str,
-    ) -> Result<String, String> {
+    pub async fn handle_oauth_login(&self, provider: &str) -> Result<String, String> {
         match self.auth_service.start_oauth_login(provider).await {
             Ok(auth_url) => Ok(auth_url),
             Err(err) => Err(err.to_string()),
         }
     }
-    
+
     /// Handle OAuth callback
     pub async fn handle_oauth_callback(
         &self,
@@ -264,28 +267,28 @@ impl AuthApi {
         code: &str,
         state: &str,
     ) -> LoginResponse {
-        match self.auth_service.handle_oauth_callback(provider, code, state).await {
-            Ok(token_info) => {
-                LoginResponse {
-                    success: true,
-                    token: Some(token_info.access_token.clone()),
-                    expires_at: Some(token_info.expires_at.timestamp()),
-                    mfa_required: false, // TODO: Implement MFA requirement detection
-                    error: None,
-                }
-            }
-            Err(err) => {
-                LoginResponse {
-                    success: false,
-                    token: None,
-                    expires_at: None,
-                    mfa_required: false,
-                    error: Some(err.to_string()),
-                }
-            }
+        match self
+            .auth_service
+            .handle_oauth_callback(provider, code, state)
+            .await
+        {
+            Ok(token_info) => LoginResponse {
+                success: true,
+                token: Some(token_info.access_token.clone()),
+                expires_at: Some(token_info.expires_at.timestamp()),
+                mfa_required: false, // No request context, default to false
+                error: None,
+            },
+            Err(err) => LoginResponse {
+                success: false,
+                token: None,
+                expires_at: None,
+                mfa_required: false,
+                error: Some(err.to_string()),
+            },
         }
     }
-    
+
     /// Handle passwordless login request
     pub async fn handle_passwordless_login(
         &self,
@@ -296,39 +299,31 @@ impl AuthApi {
             Err(err) => Err(err.to_string()),
         }
     }
-    
+
     /// Handle passwordless verification
-    pub async fn handle_passwordless_verify(
-        &self,
-        token: &str,
-    ) -> LoginResponse {
+    pub async fn handle_passwordless_verify(&self, token: &str) -> LoginResponse {
         match self.auth_service.verify_email_link(token).await {
             Ok(token_info) => {
                 LoginResponse {
                     success: true,
                     token: Some(token_info.access_token.clone()),
                     expires_at: Some(token_info.expires_at.timestamp()),
-                    mfa_required: false, // TODO: Implement MFA requirement detection
+                    mfa_required: false, // No profile context, default to false
                     error: None,
                 }
             }
-            Err(err) => {
-                LoginResponse {
-                    success: false,
-                    token: None,
-                    expires_at: None,
-                    mfa_required: false,
-                    error: Some(err.to_string()),
-                }
-            }
+            Err(err) => LoginResponse {
+                success: false,
+                token: None,
+                expires_at: None,
+                mfa_required: false,
+                error: Some(err.to_string()),
+            },
         }
     }
-    
+
     /// Handle MFA setup request
-    pub async fn handle_mfa_setup(
-        &self,
-        request: MfaSetupRequest,
-    ) -> MfaSetupResponse {
+    pub async fn handle_mfa_setup(&self, request: MfaSetupRequest) -> MfaSetupResponse {
         let mfa_method = match request.mfa_method.as_str() {
             "totp" => MfaMethodType::Totp,
             "email" => MfaMethodType::Email,
@@ -341,8 +336,12 @@ impl AuthApi {
                 };
             }
         };
-        
-        match self.auth_service.initiate_mfa(&request.user_id, mfa_method).await {
+
+        match self
+            .auth_service
+            .initiate_mfa(&request.user_id, mfa_method)
+            .await
+        {
             Ok(()) => {
                 // In a real implementation, we'd return TOTP secret for QR code generation
                 MfaSetupResponse {
@@ -352,22 +351,17 @@ impl AuthApi {
                     error: None,
                 }
             }
-            Err(err) => {
-                MfaSetupResponse {
-                    success: false,
-                    secret: None,
-                    qr_code: None,
-                    error: Some(err.to_string()),
-                }
-            }
+            Err(err) => MfaSetupResponse {
+                success: false,
+                secret: None,
+                qr_code: None,
+                error: Some(err.to_string()),
+            },
         }
     }
-    
+
     /// Handle MFA verification
-    pub async fn handle_mfa_verify(
-        &self,
-        request: MfaVerifyRequest,
-    ) -> LoginResponse {
+    pub async fn handle_mfa_verify(&self, request: MfaVerifyRequest) -> LoginResponse {
         let mfa_method = match request.method.as_str() {
             "totp" => MfaMethodType::Totp,
             "email" => MfaMethodType::Email,
@@ -381,36 +375,33 @@ impl AuthApi {
                 };
             }
         };
-        
-        match self.auth_service.verify_mfa_code(&request.user_id, mfa_method, &request.code).await {
-            Ok(token_info) => {
-                LoginResponse {
-                    success: true,
-                    token: Some(token_info.access_token.clone()),
-                    expires_at: Some(token_info.expires_at.timestamp()),
-                    mfa_required: false, // MFA is now complete
-                    error: None,
-                }
-            }
-            Err(err) => {
-                LoginResponse {
-                    success: false,
-                    token: None,
-                    expires_at: None,
-                    mfa_required: true, // Still need valid MFA
-                    error: Some(err.to_string()),
-                }
-            }
+
+        match self
+            .auth_service
+            .verify_mfa_code(&request.user_id, mfa_method, &request.code)
+            .await
+        {
+            Ok(valid) => LoginResponse {
+                success: valid,
+                token: None,
+                expires_at: None,
+                mfa_required: !valid,
+                error: None,
+            },
+            Err(err) => LoginResponse {
+                success: false,
+                token: None,
+                expires_at: None,
+                mfa_required: true,
+                error: Some(err.to_string()),
+            },
         }
     }
-    
+
     /// Validate token
-    pub async fn validate_token(
-        &self,
-        token: &str,
-    ) -> Result<String, String> {
+    pub async fn validate_token(&self, token: &auth_framework::AuthToken) -> Result<bool, String> {
         match self.auth_service.validate_token(token).await {
-            Ok(user_id) => Ok(user_id),
+            Ok(valid) => Ok(valid),
             Err(err) => Err(err.to_string()),
         }
     }

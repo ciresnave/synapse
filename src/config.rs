@@ -91,7 +91,7 @@ impl Config {
             .map_err(|e| ConfigError::FileNotFound(e.to_string()))?;
 
         toml::from_str(&content)
-            .map_err(|e| ConfigError::InvalidFormat(e.to_string()).into())
+            .map_err(|e| ConfigError::InvalidFormat(e.to_string()))
     }
 
     /// Save configuration to a TOML file (not available on WASM)
@@ -101,7 +101,7 @@ impl Config {
             .map_err(|e| ConfigError::InvalidFormat(e.to_string()))?;
 
         std::fs::write(path.as_ref(), content)
-            .map_err(|e| ConfigError::FileNotFound(e.to_string()).into())
+            .map_err(|e| ConfigError::FileNotFound(e.to_string()))
     }
 
     /// Create a default configuration
@@ -115,7 +115,7 @@ impl Config {
                 entity_type: entity_type.clone(),
                 domain: "synapse.local".to_string(),
                 capabilities: Self::default_capabilities_for_type(&entity_type),
-                display_name: Some(format!("{} ({})", local_name, entity_type)),
+                display_name: Some(format!("{local_name} ({entity_type})")),
             },
             email: EmailConfig {
                 smtp: SmtpConfig {
@@ -192,43 +192,43 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         // Check entity configuration
         if self.entity.local_name.trim().is_empty() {
-            return Err(ConfigError::ValidationFailed("Local name cannot be empty".to_string()).into());
+            return Err(ConfigError::ValidationFailed("Local name cannot be empty".to_string()));
         }
 
         if self.entity.domain.trim().is_empty() {
-            return Err(ConfigError::ValidationFailed("Domain cannot be empty".to_string()).into());
+            return Err(ConfigError::ValidationFailed("Domain cannot be empty".to_string()));
         }
 
         // Check email configuration
         if self.email.smtp.host.trim().is_empty() {
-            return Err(ConfigError::ValidationFailed("SMTP host cannot be empty".to_string()).into());
+            return Err(ConfigError::ValidationFailed("SMTP host cannot be empty".to_string()));
         }
 
         if self.email.imap.host.trim().is_empty() {
-            return Err(ConfigError::ValidationFailed("IMAP host cannot be empty".to_string()).into());
+            return Err(ConfigError::ValidationFailed("IMAP host cannot be empty".to_string()));
         }
 
         // Check ports are valid
         if self.email.smtp.port == 0 {
-            return Err(ConfigError::ValidationFailed("Invalid SMTP port".to_string()).into());
+            return Err(ConfigError::ValidationFailed("Invalid SMTP port".to_string()));
         }
 
         if self.email.imap.port == 0 {
-            return Err(ConfigError::ValidationFailed("Invalid IMAP port".to_string()).into());
+            return Err(ConfigError::ValidationFailed("Invalid IMAP port".to_string()));
         }
 
         // Check security configuration
         if !["public", "private", "authenticated", "secure"].contains(&self.security.default_security_level.as_str()) {
-            return Err(ConfigError::ValidationFailed("Invalid default security level".to_string()).into());
+            return Err(ConfigError::ValidationFailed("Invalid default security level".to_string()));
         }
 
         // Check logging configuration
         if !["trace", "debug", "info", "warn", "error"].contains(&self.logging.level.as_str()) {
-            return Err(ConfigError::ValidationFailed("Invalid log level".to_string()).into());
+            return Err(ConfigError::ValidationFailed("Invalid log level".to_string()));
         }
 
         if !["compact", "pretty", "json"].contains(&self.logging.format.as_str()) {
-            return Err(ConfigError::ValidationFailed("Invalid log format".to_string()).into());
+            return Err(ConfigError::ValidationFailed("Invalid log format".to_string()));
         }
 
         Ok(())
@@ -331,7 +331,7 @@ impl ConfigTemplates {
                 Ok(config)
             }
             "custom" => Ok(Config::default_for_entity(local_name, entity_type)),
-            _ => Err(ConfigError::ValidationFailed(format!("Unknown provider: {}", provider)).into()),
+            _ => Err(ConfigError::ValidationFailed(format!("Unknown provider: {provider}"))),
         }
     }
 

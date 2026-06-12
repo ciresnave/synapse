@@ -35,6 +35,12 @@ pub struct SimpleTcpTransport {
     capabilities: TransportCapabilities,
 }
 
+impl Default for SimpleTcpTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleTcpTransport {
     pub fn new() -> Self {
         let config = CircuitBreakerConfig::default();
@@ -117,7 +123,7 @@ impl Transport for SimpleTcpTransport {
 
         let addr = if let Some(address) = &target.address {
             address.parse::<SocketAddr>()
-                .map_err(|e| SynapseError::TransportError(format!("Invalid address: {}", e)))?
+                .map_err(|e| SynapseError::TransportError(format!("Invalid address: {e}")))?
         } else {
             return Err(SynapseError::TransportError("No address provided for TCP transport".to_string()));
         };
@@ -125,7 +131,7 @@ impl Transport for SimpleTcpTransport {
         let stream = timeout(self.connection_timeout, TcpStream::connect(addr))
             .await
             .map_err(|_| SynapseError::TransportError("Connection timeout".to_string()))?
-            .map_err(|e| SynapseError::TransportError(format!("Connection failed: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Connection failed: {e}")))?;
 
         match self.send_to_stream(stream, message).await {
             Ok(receipt) => {
@@ -146,7 +152,7 @@ impl Transport for SimpleTcpTransport {
                     let mut metrics = self.metrics.write().unwrap();
                     metrics.send_failures += 1;
                 }
-                self.circuit_breaker.record_outcome(RequestOutcome::Failure(format!("Send failed: {}", e))).await;
+                self.circuit_breaker.record_outcome(RequestOutcome::Failure(format!("Send failed: {e}"))).await;
                 Err(e)
             }
         }
@@ -161,7 +167,7 @@ impl Transport for SimpleTcpTransport {
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
         let addr = if let Some(address) = &target.address {
             address.parse::<SocketAddr>()
-                .map_err(|e| SynapseError::TransportError(format!("Invalid address: {}", e)))?
+                .map_err(|e| SynapseError::TransportError(format!("Invalid address: {e}")))?
         } else {
             return Ok(ConnectivityResult {
                 connected: false,
@@ -188,7 +194,7 @@ impl Transport for SimpleTcpTransport {
                 Ok(ConnectivityResult {
                     connected: false,
                     rtt: None,
-                    error: Some(format!("Connection failed: {}", e)),
+                    error: Some(format!("Connection failed: {e}")),
                     quality: 0.0,
                     details: HashMap::new(),
                 })
@@ -227,17 +233,17 @@ impl Transport for SimpleTcpTransport {
 impl SimpleTcpTransport {
     async fn send_to_stream(&self, mut stream: TcpStream, message: &SecureMessage) -> Result<DeliveryReceipt> {
         let serialized = serde_json::to_vec(message)
-            .map_err(|e| SynapseError::TransportError(format!("Serialization failed: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Serialization failed: {e}")))?;
 
         let length_bytes = (serialized.len() as u32).to_be_bytes();
         stream.write_all(&length_bytes).await
-            .map_err(|e| SynapseError::TransportError(format!("Failed to send length: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Failed to send length: {e}")))?;
         
         stream.write_all(&serialized).await
-            .map_err(|e| SynapseError::TransportError(format!("Failed to send message: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Failed to send message: {e}")))?;
 
         stream.flush().await
-            .map_err(|e| SynapseError::TransportError(format!("Failed to flush stream: {}", e)))?;
+            .map_err(|e| SynapseError::TransportError(format!("Failed to flush stream: {e}")))?;
 
         Ok(DeliveryReceipt {
             message_id: message.message_id.0.to_string(),
@@ -252,6 +258,12 @@ impl SimpleTcpTransport {
 
 #[derive(Debug, Clone)]
 pub struct SimpleTcpTransportFactory;
+
+impl Default for SimpleTcpTransportFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SimpleTcpTransportFactory {
     pub fn new() -> Self {

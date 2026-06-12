@@ -1,12 +1,12 @@
 //! Simple Email Server Integration Test
-//! 
+//!
 //! A minimal test to verify the enhanced router with email server integration
 
 use synapse::{
-    router_enhanced::EnhancedSynapseRouter,
-    config::{Config, EntityConfig, RouterConfig, SecurityConfig, LoggingConfig},
-    types::{EmailConfig, SmtpConfig, ImapConfig},
+    config::{Config, EntityConfig, LoggingConfig, RouterConfig, SecurityConfig},
     error::Result,
+    router_enhanced::EnhancedSynapseRouter,
+    types::{EmailConfig, ImapConfig, SmtpConfig},
 };
 
 fn create_test_config() -> Config {
@@ -63,11 +63,11 @@ fn create_test_config() -> Config {
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("🚀 Testing Enhanced EMRP Router with Email Server Integration");
-    
+
     // Initialize router
     let config = create_test_config();
     let router = EnhancedSynapseRouter::new(config, "test@test.local".to_string()).await?;
-    
+
     // Check status
     let status = router.status().await;
     println!("✅ Router initialized successfully");
@@ -75,18 +75,18 @@ async fn main() -> Result<()> {
     println!("  - Multi-transport: {}", status.multi_transport_enabled);
     println!("  - Email server: {}", status.email_server_enabled);
     println!("  - Transports: {:?}", status.available_transports);
-    
+
     // Check email server specific features
     if router.is_running_email_server() {
         println!("📧 Email server is configured to run locally");
-        
+
         if let Some(connectivity_info) = router.email_server_connectivity() {
-            println!("🌐 Connectivity: {}", connectivity_info);
+            println!("🌐 Connectivity: {connectivity_info}");
         }
     } else {
         println!("🌐 Using external email providers");
     }
-    
+
     println!("🎉 Integration test completed successfully!");
     Ok(())
 }

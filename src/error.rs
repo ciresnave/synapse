@@ -1,8 +1,12 @@
-//! Error types for the Synapse system
-
 use std::io::Error as IoError;
 use std::net::AddrParseError;
 use thiserror::Error;
+
+impl From<String> for SynapseError {
+    fn from(s: String) -> Self {
+        SynapseError::TransportError(s)
+    }
+}
 
 #[derive(Debug, Clone, Error)]
 pub enum SynapseError {
@@ -59,70 +63,63 @@ pub enum SynapseError {
 
     #[error("Connection error: {0}")]
     ConnectionError(String),
-    
+
     #[error("Config error: {0}")]
     Config(String),
-    
+
     #[error("Crypto error: {0}")]
     Crypto(String),
-    
+
     #[error("Identity error: {0}")]
     Identity(String),
-    
+
     #[error("Email error: {0}")]
     Email(String),
-    
+
     #[error("SMTP connection error: {0}")]
     SmtpConnection(String),
-    
+
     #[error("Send failed: {0}")]
     SendFailed(String),
-    
+
     #[error("Already exists: {0}")]
     AlreadyExists(String),
-    
+
     #[error("Not found: {0}")]
     NotFound(String),
-    
+
     #[error("Invalid format: {0}")]
     InvalidFormat(String),
-    
+
     #[error("File not found: {0}")]
     FileNotFound(String),
-    
+
+    #[error("Import error: {0}")]
+    ImportError(String),
+
     #[error("Validation failed: {0}")]
     ValidationFailed(String),
-    
+
     #[error("Key generation failed: {0}")]
     KeyGeneration(String),
-    
+
     #[error("Invalid key: {0}")]
     InvalidKey(String),
-    
+
     #[error("Key not found: {0}")]
     KeyNotFound(String),
-    
+
     #[error("Encryption failed: {0}")]
     Encryption(String),
-    
+
     #[error("Decryption failed: {0}")]
     Decryption(String),
-    
+
     #[error("Signing failed: {0}")]
     Signing(String),
 }
 
-impl From<auth_framework::AuthError> for SynapseError {
-    fn from(e: auth_framework::AuthError) -> Self {
-        SynapseError::AuthenticationError(e.to_string())
-    }
-}
-
-impl From<String> for SynapseError {
-    fn from(s: String) -> Self {
-        SynapseError::TransportError(s)
-    }
-}
+// Removed From impls for auth_framework::AuthError and auto_discovery::DiscoveryError for minimal build compatibility
 
 impl From<&str> for SynapseError {
     fn from(s: &str) -> Self {
@@ -154,16 +151,12 @@ impl From<serde_json::Error> for SynapseError {
     }
 }
 
-impl From<auto_discovery::error::DiscoveryError> for SynapseError {
-    fn from(e: auto_discovery::error::DiscoveryError) -> Self {
-        SynapseError::TransportError(e.to_string())
-    }
-}
+// Removed From impl for auto_discovery::error::DiscoveryError for minimal build compatibility
 
 pub type Result<T> = std::result::Result<T, SynapseError>;
 
 // Type aliases for specific error types
 pub type ConfigError = SynapseError;
-pub type CryptoError = SynapseError;
 pub type IdentityError = SynapseError;
 pub type EmailError = SynapseError;
+pub type CryptoError = SynapseError;

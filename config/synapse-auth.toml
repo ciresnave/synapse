@@ -1,0 +1,272 @@
+# Synapse Neural Network Authentication Configuration
+# 🚀 Using latest auth-framework features with enhanced configuration management
+
+[framework]
+name = "synapse-neural-network"
+version = "1.1.0"
+environment = "production"
+
+# 🆕 Latest: JWT Configuration with Environment Variable Support
+[jwt]
+secret_key = "${SYNAPSE_JWT_SECRET:development-fallback-secret}"
+algorithm = "HS256"
+issuer = "synapse-neural-network"
+audience = "synapse-participants"
+expiry = "1h"
+refresh_expiry = "7d"
+
+# 🆕 Latest: OAuth Provider Configuration
+[oauth2.github]
+client_id = "${SYNAPSE_GITHUB_CLIENT_ID}"
+client_secret = "${SYNAPSE_GITHUB_CLIENT_SECRET}"
+redirect_uri = "https://synapse.local/auth/github/callback"
+scopes = ["user:email", "read:user"]
+enabled = true
+
+[oauth2.google]
+client_id = "${SYNAPSE_GOOGLE_CLIENT_ID}"
+client_secret = "${SYNAPSE_GOOGLE_CLIENT_SECRET}"
+redirect_uri = "https://synapse.local/auth/google/callback"
+scopes = ["openid", "profile", "email"]
+enabled = true
+
+[oauth2.microsoft]
+client_id = "${SYNAPSE_MICROSOFT_CLIENT_ID}"
+client_secret = "${SYNAPSE_MICROSOFT_CLIENT_SECRET}"
+redirect_uri = "https://synapse.local/auth/microsoft/callback"
+scopes = ["openid", "profile", "email"]
+enabled = true
+
+# 🤖 AI Agent Authentication Configuration
+[ai_agents]
+api_key_prefix = "sk_synapse_"
+default_expiry = "30d"
+max_keys_per_agent = 5
+rotation_interval = "7d"
+
+# Supported AI agent capabilities
+supported_capabilities = [
+  "text_generation",
+  "code_analysis",
+  "neural_routing",
+  "trust_validation",
+  "knowledge_synthesis",
+]
+
+# Communication patterns for AI agents
+communication_patterns = [
+  "neural_mesh",
+  "direct_transport",
+  "circuit_breaker",
+  "secure_relay",
+]
+
+# 🆕 Latest: Device Flow Configuration for AI Agents
+[device_flow]
+enabled = true
+device_code_expiry = "15m"
+user_code_length = 8
+polling_interval = "5s"
+max_polling_attempts = 180
+
+# Custom verification URIs for different providers
+[device_flow.github]
+verification_uri = "https://github.com/login/device"
+verification_uri_complete = "https://github.com/login/device/code"
+
+[device_flow.google]
+verification_uri = "https://accounts.google.com/device"
+
+# 🛡️ Enhanced Security Configuration
+[security]
+enable_rate_limiting = true
+requests_per_minute = 100
+burst_size = 20
+enable_distributed_limiting = false
+
+# Zero-trust validation settings
+zero_trust_mode = true
+require_mfa_for_admin = true
+session_timeout = "24h"
+max_concurrent_sessions = 3
+
+# 🏢 Enterprise Features
+[enterprise]
+mode = true
+saml_enabled = false
+ldap_enabled = false
+compliance_reporting = true
+
+# Trust levels for neural network participants
+[trust_levels]
+verified_min_score = 0.9
+trusted_min_score = 0.7
+authenticated_min_score = 0.5
+
+# Trust decay settings
+trust_decay_interval = "7d"
+trust_decay_rate = 0.1
+
+# 📊 Audit and Compliance Configuration
+[audit]
+enabled = true
+log_level = "info"
+retention_days = 90
+include_request_bodies = false
+include_response_bodies = false
+
+# Events to always log
+critical_events = [
+  "login_success",
+  "login_failure",
+  "privilege_escalation",
+  "data_access",
+  "configuration_change",
+  "ai_agent_auth",
+  "neural_message_sent",
+]
+
+# Compliance standards
+[compliance]
+gdpr_enabled = true
+hipaa_enabled = false
+sox_enabled = false
+pci_enabled = false
+
+# Data retention policies
+data_retention_days = 90
+anonymization_after_days = 365
+purge_after_days = 2555        # 7 years
+
+# 🔄 Session Management
+[session]
+name = "SYNAPSE_SESSION"
+secure = true
+http_only = true
+same_site = "strict"
+domain = "synapse.local"
+path = "/"
+
+# Session storage
+storage = "redis"
+redis_url = "${SYNAPSE_REDIS_URL:redis://localhost:6379}"
+key_prefix = "synapse:session:"
+
+# 🗄️ Storage Configuration
+[storage]
+# Primary storage for authentication data
+primary = "postgresql"
+postgresql_url = "${SYNAPSE_DATABASE_URL:postgresql://localhost:5432/synapse_auth}"
+max_connections = 100
+
+# Cache storage for performance
+cache = "redis"
+cache_url = "${SYNAPSE_REDIS_URL:redis://localhost:6379}"
+cache_ttl = "1h"
+
+# Encryption for sensitive data
+enable_encryption = true
+encryption_key = "${SYNAPSE_ENCRYPTION_KEY}"
+
+# 🚨 Rate Limiting Configuration
+[rate_limiting]
+# Global rate limits
+global_requests_per_minute = 1000
+global_burst_size = 100
+
+# Per-user rate limits
+user_requests_per_minute = 60
+user_burst_size = 10
+
+# Per-IP rate limits
+ip_requests_per_minute = 100
+ip_burst_size = 20
+
+# AI agent specific limits
+ai_agent_requests_per_minute = 200
+ai_agent_burst_size = 50
+
+# 🌐 Neural Network Specific Configuration
+[neural_network]
+# Network identity
+network_id = "synapse-main"
+node_id = "${SYNAPSE_NODE_ID:node-${HOSTNAME:localhost}}"
+
+# Participant discovery
+discovery_enabled = true
+discovery_protocols = ["mdns", "tcp"]
+trust_new_participants = false
+
+# Message routing
+enable_message_routing = true
+max_routing_hops = 10
+routing_timeout = "30s"
+
+# AI model integration
+ai_model_registry_enabled = true
+model_capability_checking = true
+model_trust_validation = true
+
+# 📡 Transport Integration
+[transport]
+# Authenticated transport settings
+require_authentication = true
+verify_message_signatures = true
+encrypt_all_messages = true
+
+# Transport-specific auth requirements
+[transport.tcp]
+require_tls = true
+client_cert_auth = false
+
+[transport.email]
+require_dkim = true
+verify_sender_domain = true
+
+[transport.websocket]
+require_wss = true
+heartbeat_interval = "30s"
+
+# 🔍 Monitoring and Metrics
+[monitoring]
+enabled = true
+metrics_endpoint = "/metrics"
+health_endpoint = "/health"
+
+# Metrics to collect
+collect_auth_metrics = true
+collect_performance_metrics = true
+collect_security_metrics = true
+
+# Alerting
+[alerting]
+enabled = true
+webhook_url = "${SYNAPSE_ALERT_WEBHOOK}"
+
+# Alert conditions
+failed_login_threshold = 10
+api_key_misuse_threshold = 20
+unusual_activity_threshold = 5
+
+# 🧪 Development and Testing
+[development]
+# Only active when ENVIRONMENT=development
+allow_insecure_secrets = false
+mock_oauth_providers = false
+skip_rate_limiting = false
+verbose_logging = true
+
+# Test user accounts (development only)
+[development.test_users]
+enabled = false
+auto_create = false
+default_roles = ["user"]
+
+# 🔄 Configuration Includes
+# Include additional configuration files for modularity
+include = [
+  "auth/oauth-providers.toml",
+  "auth/ai-agents.toml",
+  "auth/compliance.toml",
+  "neural-network/trust-levels.toml",
+]

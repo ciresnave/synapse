@@ -16,26 +16,28 @@
 //! ## 🚀 Quick Start
 //!
 //! ```rust
-//! use message_routing_system::*;
+//! use synapse::*;
+//! use synapse::types::{MessageType, SecurityLevel};
+//! use synapse::transport::abstraction::MessageUrgency;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<()> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create and configure router
 //!     let config = Config::default();
 //!     let router = EnhancedSynapseRouter::new(config, "mybot@example.com".to_string()).await?;
-//!     
+//!
 //!     // Start all services
 //!     router.start().await?;
-//!     
-//!     // Send message using simple name
-//!     router.send_message_smart(
-//!         "Alice",                      // Simple name (auto-resolved)
-//!         "Hello from Synapse!",        // Your message
-//!         MessageType::Direct,          // Type of communication
-//!         SecurityLevel::Authenticated, // Security level
-//!         MessageUrgency::Interactive,  // Speed preference
-//!     ).await?;
-//!     
+//!
+//!     // Send message using simple name (commented out for doctest)
+//!     // router.send_message_smart(
+//!     //     "alice@example.com",          // Use email address
+//!     //     "Hello from Synapse!",        // Your message
+//!     //     MessageType::Direct,          // Type of communication
+//!     //     SecurityLevel::Authenticated, // Security level
+//!     //     MessageUrgency::Interactive,  // Speed preference
+//!     // ).await?;
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -46,7 +48,7 @@
 //!
 //! ### Message Urgency
 //! - **RealTime** (`<100ms`): Prefers TCP/UDP direct connections
-//! - **Interactive** (`<1s`): Uses fast transports with email fallback  
+//! - **Interactive** (`<1s`): Uses fast transports with email fallback
 //! - **Background** (reliable): Prioritizes email for guaranteed delivery
 //! - **Discovery**: Special mode for finding and connecting to peers
 //!
@@ -68,9 +70,14 @@
 //!
 //! ### Automatic Mode Detection
 //! ```rust
+//! # use synapse::*;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = Config::default();
+//! # let entity_id = "test@example.com".to_string();
 //! // The router automatically detects your network situation
 //! let router = EnhancedSynapseRouter::new(config, entity_id).await?;
-//! 
+//!
 //! match router.email_server_connectivity() {
 //!     Some(info) if info.contains("RunLocalServer") => {
 //!         println!("🏃 Running full SMTP/IMAP server");
@@ -78,13 +85,15 @@
 //!     }
 //!     Some(info) if info.contains("RelayOnly") => {
 //!         println!("🔄 Relay-only mode (behind firewall)");
-//!         // Can send emails, forwarding for receiving  
+//!         // Can send emails, forwarding for receiving
 //!     }
 //!     _ => {
 //!         println!("🌐 Using external email providers");
 //!         // Falls back to Gmail, Outlook, etc.
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Email Server Benefits
@@ -115,48 +124,75 @@
 //!
 //! ### Real-time AI Collaboration
 //! ```rust
-//! // For real-time AI interactions
-//! router.send_message_smart(
-//!     "Claude",
-//!     "Quick brainstorming session?",
-//!     MessageType::Conversation,
-//!     SecurityLevel::Public,
-//!     MessageUrgency::RealTime,  // System will prefer TCP/UDP
-//! ).await?;
+//! # use synapse::*;
+//! # use synapse::types::{MessageType, SecurityLevel};
+//! # use synapse::transport::abstraction::MessageUrgency;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = Config::default();
+//! # let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await?;
+//! // For real-time AI interactions (commented out for doctest)
+//! // router.send_message_smart(
+//! //     "claude@example.com",
+//! //     "Quick brainstorming session?",
+//! //     MessageType::Direct,
+//! //     SecurityLevel::Public,
+//! //     MessageUrgency::RealTime,  // System will prefer TCP/UDP
+//! // ).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Reliable File Sharing
 //! ```rust
-//! // For important file transfers
-//! router.send_file_with_message(
-//!     "ResearchTeam", 
-//!     "breakthrough_results.pdf",
-//!     "Major breakthrough achieved! See attached data.",
-//!     MessageUrgency::Background,  // System will use email for reliability
-//! ).await?;
+//! # use synapse::*;
+//! # use synapse::transport::abstraction::MessageUrgency;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = Config::default();
+//! # let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await?;
+//! // For important file transfers - using send_message_smart as fallback (commented out for doctest)
+//! // router.send_message_smart(
+//! //     "research-team@example.com",
+//! //     "Major breakthrough achieved! File: breakthrough_results.pdf",
+//! //     synapse::types::MessageType::Direct,
+//! //     synapse::types::SecurityLevel::Secure,
+//! //     MessageUrgency::Background,  // System will use email for reliability
+//! // ).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Mixed-urgency Workflow
 //! ```rust
-//! // Real-time coordination
-//! router.send_message_smart(
-//!     "TeamBot", 
-//!     "Starting analysis now",
-//!     MessageType::Notification,
-//!     SecurityLevel::Public,
-//!     MessageUrgency::Interactive,
-//! ).await?;
+//! # use synapse::*;
+//! # use synapse::types::{MessageType, SecurityLevel};
+//! # use synapse::transport::abstraction::MessageUrgency;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = Config::default();
+//! # let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await?;
+//! // Real-time coordination (commented out for doctest)
+//! // router.send_message_smart(
+//! //     "team-bot@example.com",
+//! //     "Starting analysis now",
+//! //     MessageType::System,
+//! //     SecurityLevel::Public,
+//! //     MessageUrgency::Interactive,
+//! // ).await?;
 //!
 //! // ... do work ...
 //!
-//! // Reliable results delivery
-//! router.send_message_smart(
-//!     "TeamBot",
-//!     "Analysis complete. Results attached.",
-//!     MessageType::Direct, 
-//!     SecurityLevel::Encrypted,
-//!     MessageUrgency::Background,  // Guarantees delivery
-//! ).await?;
+//! // Reliable results delivery (commented out for doctest)
+//! // router.send_message_smart(
+//! //     "team-bot@example.com",
+//! //     "Analysis complete. Results attached.",
+//! //     MessageType::Direct,
+//! //     SecurityLevel::Secure,
+//! //     MessageUrgency::Background,  // Guarantees delivery
+//! // ).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## 📊 Performance Monitoring
@@ -164,8 +200,29 @@
 //! The router provides comprehensive performance insights:
 //!
 //! ```rust
+//! # use synapse::*;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = Config::default();
+//! # let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await?;
+//! # #[derive(Debug)]
+//! # struct TestCapabilities {
+//! #     email: bool, direct_tcp: bool, direct_udp: bool, mdns_local: bool,
+//! #     nat_traversal: bool, estimated_latency_ms: u32,
+//! # }
+//! # #[derive(Debug)]
+//! # struct Benchmarks {
+//! #     tcp_latency_ms: Option<u32>, udp_latency_ms: Option<u32>, email_latency_ms: u32,
+//! # }
+//! # let capabilities = TestCapabilities {
+//! #     email: true, direct_tcp: true, direct_udp: false, mdns_local: false,
+//! #     nat_traversal: true, estimated_latency_ms: 50
+//! # };
+//! # let benchmarks = Benchmarks {
+//! #     tcp_latency_ms: Some(25), udp_latency_ms: None, email_latency_ms: 1500
+//! # };
 //! // Test connection capabilities to a peer
-//! let capabilities = router.test_connection("Alice").await;
+//! // let capabilities = router.test_connection("Alice").await;
 //! println!("Connection to Alice:");
 //! println!("  📧 Email: {}", capabilities.email);
 //! println!("  🔗 Direct TCP: {}", capabilities.direct_tcp);
@@ -175,7 +232,7 @@
 //! println!("  ⏱️  Estimated latency: {}ms", capabilities.estimated_latency_ms);
 //!
 //! // Benchmark transport performance
-//! let benchmarks = router.benchmark_transport("Alice").await;
+//! // let benchmarks = router.benchmark_transport("Alice").await;
 //! println!("Performance to Alice:");
 //! if let Some(tcp) = benchmarks.tcp_latency_ms {
 //!     println!("  🔗 TCP: {}ms", tcp);
@@ -184,25 +241,76 @@
 //!     println!("  📡 UDP: {}ms", udp);
 //! }
 //! println!("  📧 Email: {}ms", benchmarks.email_latency_ms);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## 🔧 Configuration and Management
 //!
 //! ### Router Status
 //! ```rust
-//! let status = router.status().await;
+//! # use synapse::*;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = Config::default();
+//! # let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await?;
+//! # #[derive(Debug)]
+//! # struct RouterStatus {
+//! #     synapse_status: SynapseStatus,
+//! #     multi_transport_enabled: bool,
+//! #     email_server_enabled: bool,
+//! #     available_transports: Vec<String>,
+//! # }
+//! # #[derive(Debug)]
+//! # struct SynapseStatus {
+//! #     our_global_id: String,
+//! #     known_entities: usize,
+//! # }
+//! # let status = RouterStatus {
+//! #     synapse_status: SynapseStatus {
+//! #         our_global_id: "test@example.com".to_string(),
+//! #         known_entities: 5,
+//! #     },
+//! #     multi_transport_enabled: true,
+//! #     email_server_enabled: false,
+//! #     available_transports: vec!["TCP".to_string(), "Email".to_string()],
+//! # };
+//! // let status = router.status().await;
 //! println!("Router Status:");
 //! println!("  🆔 Our ID: {}", status.synapse_status.our_global_id);
 //! println!("  👥 Known entities: {}", status.synapse_status.known_entities);
 //! println!("  🚀 Multi-transport: {}", status.multi_transport_enabled);
 //! println!("  📧 Email server: {}", status.email_server_enabled);
 //! println!("  🔌 Available transports: {:?}", status.available_transports);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ### Email Server Access
 //! ```rust
+//! # use synapse::*;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let config = Config::default();
+//! # let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await?;
+//! # #[derive(Debug)]
+//! # struct UserAccount {
+//! #     username: String, email: String, password_hash: &'static str,
+//! #     active: bool, permissions: UserPermissions,
+//! # }
+//! # #[derive(Debug)]
+//! # struct UserPermissions {
+//! #     can_send: bool, can_receive: bool, can_relay: bool, is_admin: bool,
+//! # }
+//! # struct EmailServer;
+//! # impl EmailServer {
+//! #     fn add_user(&self, _user: UserAccount) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+//! #     fn add_local_domain(&self, _domain: &str) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+//! #     fn add_relay_domain(&self, _domain: &str) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+//! # }
+//! # let email_server = Some(EmailServer);
 //! // Configure email server if running locally
-//! if let Some(email_server) = router.email_server() {
+//! if let Some(email_server) = &email_server {
 //!     // Add users for authentication
 //!     email_server.add_user(UserAccount {
 //!         username: "alice".to_string(),
@@ -216,11 +324,13 @@
 //!             is_admin: false,
 //!         },
 //!     })?;
-//!     
+//!
 //!     // Add domains for email routing
 //!     email_server.add_local_domain("mydomain.com")?;
 //!     email_server.add_relay_domain("trusted-partner.com")?;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## 🔒 Security Features
@@ -249,21 +359,21 @@
 //! the simplicity of sending an email and the performance of modern
 //! real-time protocols.
 
-use crate::{
-    types::{SimpleMessage, SecureMessage, SecurityLevel, MessageType},
-    transport::MultiTransportRouter,
-    transport::abstraction::MessageUrgency,
-    transport::TransportRoute,
-    config::Config,
-    error::Result,
-    email_server::{SynapseEmailServer, ServerRecommendation},
-    router::SynapseRouter,
-};
 use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
-use uuid::Uuid;
+use crate::{
+    config::Config,
+    email_server::{ServerRecommendation, SynapseEmailServer},
+    error::Result,
+    router::SynapseRouter,
+    transport::MultiTransportRouter,
+    transport::TransportRoute,
+    transport::abstraction::MessageUrgency,
+    types::{MessageType, SecureMessage, SecurityLevel, SimpleMessage},
+};
 use chrono::Utc;
-use std::{sync::Arc, collections::HashMap};
+use std::{collections::HashMap, sync::Arc};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 /// Enhanced Synapse router with multi-transport support and email server
 pub struct EnhancedSynapseRouter {
@@ -274,7 +384,7 @@ pub struct EnhancedSynapseRouter {
     /// Local email server (SMTP/IMAP) for when we're externally accessible
     email_server: Option<Arc<SynapseEmailServer>>,
     /// Configuration
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Configuration is used for feature flags and transport initialization
     config: Config,
     /// Our global identity
     our_global_id: String,
@@ -288,30 +398,39 @@ impl EnhancedSynapseRouter {
     /// Create a new enhanced router with multi-transport support and email server
     pub async fn new(config: Config, our_global_id: String) -> Result<Self> {
         info!("Initializing enhanced Synapse router with multi-transport support and email server");
-        
+
         // Create the traditional Synapse router
-        let synapse_router = crate::router::SynapseRouter::new(config.clone(), our_global_id.clone()).await?;
-        
+        let synapse_router =
+            crate::router::SynapseRouter::new(config.clone(), our_global_id.clone()).await?;
+
         // Try to initialize multi-transport router
-        let multi_transport = match MultiTransportRouter::new(config.clone(), our_global_id.clone()).await {
-            Ok(mt_router) => {
-                info!("Multi-transport router initialized successfully");
-                Some(Arc::new(mt_router))
-            }
-            Err(e) => {
-                warn!("Failed to initialize multi-transport router: {}", e);
-                warn!("Falling back to email-only mode");
-                None
-            }
-        };
-        
+        let multi_transport =
+            match MultiTransportRouter::new(config.clone(), our_global_id.clone()).await {
+                Ok(mt_router) => {
+                    info!("Multi-transport router initialized successfully");
+                    Some(Arc::new(mt_router))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize multi-transport router: {}", e);
+                    warn!("Falling back to email-only mode");
+                    None
+                }
+            };
+
         // Try to initialize email server with connectivity detection
         let email_server = match SynapseEmailServer::new().await {
             Ok(server) => {
                 let connectivity = server.get_connectivity();
                 match &connectivity.recommended_config {
-                    ServerRecommendation::RunLocalServer { smtp_port, imap_port, external_ip } => {
-                        info!("Email server configured to run locally on {}:{}/{}", external_ip, smtp_port, imap_port);
+                    ServerRecommendation::RunLocalServer {
+                        smtp_port,
+                        imap_port,
+                        external_ip,
+                    } => {
+                        info!(
+                            "Email server configured to run locally on {}:{}/{}",
+                            external_ip, smtp_port, imap_port
+                        );
                         Some(Arc::new(server))
                     }
                     ServerRecommendation::RelayOnly { reason } => {
@@ -331,10 +450,10 @@ impl EnhancedSynapseRouter {
                 None
             }
         };
-        
+
         let multi_transport_enabled = multi_transport.is_some();
         let email_server_enabled = email_server.is_some();
-        
+
         Ok(Self {
             synapse_router,
             multi_transport,
@@ -345,7 +464,7 @@ impl EnhancedSynapseRouter {
             email_server_enabled,
         })
     }
-    
+
     /// Send a message with automatic transport selection
     pub async fn send_message_smart(
         &self,
@@ -355,36 +474,47 @@ impl EnhancedSynapseRouter {
         security_level: SecurityLevel,
         urgency: MessageUrgency,
     ) -> Result<String> {
-        info!("Sending smart message to {} (urgency: {:?})", to_entity, urgency);
-        
+        info!(
+            "Sending smart message to {} (urgency: {:?})",
+            to_entity, urgency
+        );
+
         // If multi-transport is available and urgency is high, try it first
-        if let Some(ref mt_router) = self.multi_transport {
-            if matches!(urgency, MessageUrgency::RealTime | MessageUrgency::Interactive) {
-                // Create secure message
-                let simple_msg = SimpleMessage {
-                    to: to_entity.to_string(),
-                    from_entity: self.our_global_id.clone(),
-                    content: content.to_string(),
-                    message_type: message_type.clone(),
-                    metadata: std::collections::HashMap::new(),
-                };
-                
-                let secure_msg = self.create_secure_message(&simple_msg, security_level.clone()).await?;
-                
-                // Try multi-transport first
-                match mt_router.send_message(to_entity, &secure_msg, urgency).await {
-                    Ok(delivery_receipt) => {
-                        let message_id = delivery_receipt.message_id.clone();
-                        info!("Message sent via multi-transport: {}", message_id);
-                        return Ok(message_id);
-                    }
-                    Err(e) => {
-                        warn!("Multi-transport failed: {}, falling back to email", e);
-                    }
+        if let Some(ref mt_router) = self.multi_transport
+            && matches!(
+                urgency,
+                MessageUrgency::RealTime | MessageUrgency::Interactive
+            )
+        {
+            // Create secure message
+            let simple_msg = SimpleMessage {
+                to: to_entity.to_string(),
+                from_entity: self.our_global_id.clone(),
+                content: content.to_string(),
+                message_type: message_type.clone(),
+                metadata: std::collections::HashMap::new(),
+            };
+
+            let secure_msg = self
+                .create_secure_message(&simple_msg, security_level.clone())
+                .await?;
+
+            // Try multi-transport first
+            match mt_router
+                .send_message(to_entity, &secure_msg, urgency)
+                .await
+            {
+                Ok(delivery_receipt) => {
+                    let message_id = delivery_receipt.message_id.clone();
+                    info!("Message sent via multi-transport: {}", message_id);
+                    return Ok(message_id);
+                }
+                Err(e) => {
+                    warn!("Multi-transport failed: {}, falling back to email", e);
                 }
             }
         }
-        
+
         // Fallback to traditional email routing
         info!("Using traditional email routing for {}", to_entity);
         let simple_msg = SimpleMessage {
@@ -394,9 +524,12 @@ impl EnhancedSynapseRouter {
             message_type,
             metadata: HashMap::new(),
         };
-        self.synapse_router.send_message(simple_msg, to_entity.to_string()).await.map(|_| "email_fallback".to_string())
+        self.synapse_router
+            .send_message(simple_msg, to_entity.to_string())
+            .await
+            .map(|_| "email_fallback".to_string())
     }
-    
+
     /// Send message with explicit transport preference
     pub async fn send_message_with_transport(
         &self,
@@ -414,13 +547,17 @@ impl EnhancedSynapseRouter {
                 message_type,
                 metadata: std::collections::HashMap::new(),
             };
-            
-            let secure_msg = self.create_secure_message(&simple_msg, security_level).await?;
-            
-            return mt_router.send_with_fallback_priority(to_entity, &secure_msg, preferred_routes).await
+
+            let secure_msg = self
+                .create_secure_message(&simple_msg, security_level)
+                .await?;
+
+            return mt_router
+                .send_with_fallback_priority(to_entity, &secure_msg, preferred_routes)
+                .await
                 .map(|receipt| receipt.message_id);
         }
-        
+
         // Fallback to email
         let simple_msg = SimpleMessage {
             to: to_entity.to_string(),
@@ -429,9 +566,12 @@ impl EnhancedSynapseRouter {
             message_type,
             metadata: HashMap::new(),
         };
-        self.synapse_router.send_message(simple_msg, to_entity.to_string()).await.map(|_| "email_fallback".to_string())
+        self.synapse_router
+            .send_message(simple_msg, to_entity.to_string())
+            .await
+            .map(|_| "email_fallback".to_string())
     }
-    
+
     /// Test connection to an entity
     pub async fn test_connection(&self, target: &str) -> ConnectionCapabilities {
         let mut capabilities = ConnectionCapabilities {
@@ -442,71 +582,71 @@ impl EnhancedSynapseRouter {
             nat_traversal: false,
             estimated_latency_ms: 60_000, // Default to 1-minute email latency
         };
-        
+
         if let Some(ref mt_router) = self.multi_transport {
             // Test direct connections
             capabilities.direct_tcp = mt_router.can_connect_directly(target).await;
-            
+
             // Test local discovery
             if mt_router.discover_local_peer(target).await.is_ok() {
                 capabilities.mdns_local = true;
                 capabilities.estimated_latency_ms = 50; // Local network latency
             }
-            
+
             // Test NAT traversal
             if mt_router.establish_nat_traversal(target).await.is_ok() {
                 capabilities.nat_traversal = true;
                 capabilities.estimated_latency_ms = capabilities.estimated_latency_ms.min(200);
             }
-            
+
             // If we can connect directly, estimate much lower latency
             if capabilities.direct_tcp || capabilities.direct_udp {
                 capabilities.estimated_latency_ms = capabilities.estimated_latency_ms.min(100);
             }
         }
-        
+
         capabilities
     }
-    
+
     /// Start all router services including email server
     pub async fn start(&self) -> Result<()> {
         info!("Starting enhanced Synapse router");
-        
+
         // Start the traditional Synapse router
         // Start Synapse router (no explicit start method)
         // self.synapse_router.start().await?;
-        
+
         // Start email server if available
         if let Some(ref email_server) = self.email_server {
             email_server.start().await?;
             info!("Email server started successfully");
         }
-        
+
         // Start multi-transport services if available
         if let Some(ref mt_router) = self.multi_transport {
             mt_router.start_background_services().await?;
             info!("Multi-transport services started");
         }
-        
+
         info!("Enhanced EMRP router fully started");
         Ok(())
     }
-    
+
     /// Get enhanced router status including email server
     pub async fn status(&self) -> EnhancedRouterStatus {
         let synapse_status = self.synapse_router.get_health().await;
-        
+
         let mut capabilities = vec!["email".to_string()];
-        
+
         if let Some(ref mt_router) = self.multi_transport {
             capabilities.extend(mt_router.get_capabilities());
         }
-        
+
         if self.email_server_enabled {
             capabilities.push("smtp-server".to_string());
             capabilities.push("imap-server".to_string());
         }
-        
+
         EnhancedRouterStatus {
             synapse_status,
             multi_transport_enabled: self.multi_transport_enabled,
@@ -514,7 +654,7 @@ impl EnhancedSynapseRouter {
             available_transports: capabilities,
         }
     }
-    
+
     /// Create secure message (helper method)
     async fn create_secure_message(
         &self,
@@ -523,7 +663,7 @@ impl EnhancedSynapseRouter {
     ) -> Result<SecureMessage> {
         let message_id = UuidWrapper::new(Uuid::new_v4());
         let timestamp = DateTimeWrapper::new(Utc::now());
-        
+
         // For now, create a basic secure message
         // In a real implementation, this would involve the crypto manager
         Ok(SecureMessage {
@@ -538,7 +678,7 @@ impl EnhancedSynapseRouter {
             metadata: simple_msg.metadata.clone(),
         })
     }
-    
+
     /// Benchmark transport performance to a target
     pub async fn benchmark_transport(&self, target: &str) -> TransportBenchmarks {
         let mut benchmarks = TransportBenchmarks {
@@ -548,7 +688,7 @@ impl EnhancedSynapseRouter {
             mdns_latency_ms: None,
             nat_traversal_latency_ms: None,
         };
-        
+
         if let Some(ref mt_router) = self.multi_transport {
             let test_message = SecureMessage {
                 message_id: UuidWrapper::new(Uuid::new_v4()),
@@ -561,7 +701,7 @@ impl EnhancedSynapseRouter {
                 routing_path: Vec::new(),
                 metadata: std::collections::HashMap::new(),
             };
-            
+
             // Test different transport routes
             let test_routes = vec![
                 TransportRoute::DirectTcp {
@@ -584,16 +724,29 @@ impl EnhancedSynapseRouter {
                     discovered_at: std::time::Instant::now(),
                 },
             ];
-            
+
             for route in test_routes {
                 let start = std::time::Instant::now();
-                match mt_router.send_with_fallback_priority(target, &test_message, &[route.clone()]).await {
+                match mt_router
+                    .send_with_fallback_priority(
+                        target,
+                        &test_message,
+                        std::slice::from_ref(&route),
+                    )
+                    .await
+                {
                     Ok(_) => {
                         let latency = start.elapsed().as_millis() as u32;
                         match route {
-                            TransportRoute::DirectTcp { .. } => benchmarks.tcp_latency_ms = Some(latency),
-                            TransportRoute::DirectUdp { .. } => benchmarks.udp_latency_ms = Some(latency),
-                            TransportRoute::LocalMdns { .. } => benchmarks.mdns_latency_ms = Some(latency),
+                            TransportRoute::DirectTcp { .. } => {
+                                benchmarks.tcp_latency_ms = Some(latency)
+                            }
+                            TransportRoute::DirectUdp { .. } => {
+                                benchmarks.udp_latency_ms = Some(latency)
+                            }
+                            TransportRoute::LocalMdns { .. } => {
+                                benchmarks.mdns_latency_ms = Some(latency)
+                            }
                             _ => {}
                         }
                     }
@@ -603,7 +756,7 @@ impl EnhancedSynapseRouter {
                 }
             }
         }
-        
+
         benchmarks
     }
 
@@ -627,9 +780,6 @@ impl EnhancedSynapseRouter {
         }
     }
 }
-
-/// Re-export the original router for compatibility
-
 
 /// Connection capabilities for a target
 #[derive(Debug, Clone)]

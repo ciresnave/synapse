@@ -37,8 +37,8 @@ async fn main() -> SynapseResult<()> {
         SecurityLevel::Secure,
         MessageUrgency::Interactive
     ).await {
-        Ok(message_id) => println!("✅ Message sent successfully. ID: {}", message_id),
-        Err(e) => println!("❌ Failed to send message: {}", e),
+        Ok(message_id) => println!("✅ Message sent successfully. ID: {message_id}"),
+        Err(e) => println!("❌ Failed to send message: {e}"),
     }
     
     // Example 2: Send a system message
@@ -50,8 +50,8 @@ async fn main() -> SynapseResult<()> {
         SecurityLevel::Authenticated,
         MessageUrgency::Background
     ).await {
-        Ok(message_id) => println!("✅ System message sent successfully. ID: {}", message_id),
-        Err(e) => println!("❌ Failed to send system message: {}", e),
+        Ok(message_id) => println!("✅ System message sent successfully. ID: {message_id}"),
+        Err(e) => println!("❌ Failed to send system message: {e}"),
     }
     
     // Example 3: Send a real-time message
@@ -63,8 +63,8 @@ async fn main() -> SynapseResult<()> {
         SecurityLevel::Secure,
         MessageUrgency::RealTime
     ).await {
-        Ok(message_id) => println!("✅ Real-time message sent successfully. ID: {}", message_id),
-        Err(e) => println!("❌ Failed to send real-time message: {}", e),
+        Ok(message_id) => println!("✅ Real-time message sent successfully. ID: {message_id}"),
+        Err(e) => println!("❌ Failed to send real-time message: {e}"),
     }
     
     // Example 4: Send a tool call message
@@ -76,8 +76,8 @@ async fn main() -> SynapseResult<()> {
         SecurityLevel::Secure,
         MessageUrgency::Interactive
     ).await {
-        Ok(message_id) => println!("✅ Tool call message sent successfully. ID: {}", message_id),
-        Err(e) => println!("❌ Failed to send tool call message: {}", e),
+        Ok(message_id) => println!("✅ Tool call message sent successfully. ID: {message_id}"),
+        Err(e) => println!("❌ Failed to send tool call message: {e}"),
     }
     
     // Example 5: Send a broadcast message
@@ -89,8 +89,8 @@ async fn main() -> SynapseResult<()> {
         SecurityLevel::Authenticated,
         MessageUrgency::Background
     ).await {
-        Ok(message_id) => println!("✅ Broadcast message sent successfully. ID: {}", message_id),
-        Err(e) => println!("❌ Failed to send broadcast message: {}", e),
+        Ok(message_id) => println!("✅ Broadcast message sent successfully. ID: {message_id}"),
+        Err(e) => println!("❌ Failed to send broadcast message: {e}"),
     }
     
     // Example 6: Test connection capabilities

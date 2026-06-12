@@ -1,12 +1,11 @@
 //! Tool Interaction Example
-//! 
 //! This example demonstrates how to create tool interactions
 //! using the synapse library for AI-tool communication.
-
-use synapse::{Config, SynapseRouter, SimpleMessage, MessageType};
 use anyhow::Result;
-use tracing::{info, debug};
 use std::collections::HashMap;
+use synapse::types::{MessageType, SimpleMessage};
+use synapse::{Config, SynapseRouter};
+use tracing::{debug, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,7 +23,7 @@ async fn main() -> Result<()> {
     // Initialize routers
     let ai_router = SynapseRouter::new(ai_config, "ai_assistant".to_string()).await?;
     let tool_router = SynapseRouter::new(tool_config, "calculator_tool".to_string()).await?;
-    
+
     info!("✅ AI assistant and calculator tool initialized");
 
     // Simulate tool interaction workflow
@@ -43,7 +42,7 @@ async fn main() -> Result<()> {
         let request = SimpleMessage {
             to: "calculator_tool".to_string(),
             from_entity: "ai_assistant".to_string(),
-            content: format!("{}:{}", operation, query),
+            content: format!("{operation}:{query}"),
             message_type: MessageType::Direct,
             metadata: create_tool_metadata(operation),
         };
@@ -63,7 +62,7 @@ async fn main() -> Result<()> {
 
         // Tool generates response
         let response_content = generate_tool_response(operation, query);
-        
+
         let response = SimpleMessage {
             to: "ai_assistant".to_string(),
             from_entity: "calculator_tool".to_string(),
@@ -89,35 +88,39 @@ async fn main() -> Result<()> {
     }
 
     info!("🎉 Tool Interaction example completed successfully!");
-    
+
     Ok(())
 }
 
 /// Create metadata for tool operations
 fn create_tool_metadata(operation: &str) -> HashMap<String, String> {
     let mut metadata = HashMap::new();
-    
+
     metadata.insert("operation".to_string(), operation.to_string());
     metadata.insert("tool_type".to_string(), "calculator".to_string());
-    metadata.insert("timestamp".to_string(), 
-                    chrono::Utc::now().to_rfc3339());
-    metadata.insert("request_id".to_string(), 
-                    format!("req-{}", uuid::Uuid::new_v4()));
-    
+    let timestamp = { chrono::Utc::now().to_rfc3339() };
+    metadata.insert("timestamp".to_string(), timestamp);
+    metadata.insert(
+        "request_id".to_string(),
+        format!("req-{}", uuid::Uuid::new_v4()),
+    );
+
     metadata
 }
 
 /// Create metadata for tool responses
 fn create_response_metadata(operation: &str) -> HashMap<String, String> {
     let mut metadata = HashMap::new();
-    
+
     metadata.insert("response_to".to_string(), operation.to_string());
     metadata.insert("tool_type".to_string(), "calculator".to_string());
-    metadata.insert("timestamp".to_string(), 
-                    chrono::Utc::now().to_rfc3339());
-    metadata.insert("response_id".to_string(), 
-                    format!("resp-{}", uuid::Uuid::new_v4()));
-    
+    let timestamp = { chrono::Utc::now().to_rfc3339() };
+    metadata.insert("timestamp".to_string(), timestamp);
+    metadata.insert(
+        "response_id".to_string(),
+        format!("resp-{}", uuid::Uuid::new_v4()),
+    );
+
     metadata
 }
 

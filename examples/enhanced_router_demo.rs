@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
                 content,
                 MessageType::Direct,
                 SecurityLevel::Authenticated,
-                urgency.clone(),
+                urgency,
             ).await {
                 Ok(message_id) => {
                     info!("    ✅ Message sent successfully: {}", message_id);

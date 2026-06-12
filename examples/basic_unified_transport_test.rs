@@ -10,7 +10,6 @@ use synapse::{
     types::{SecureMessage, SecurityLevel},
     error::Result,
 };
-use tokio;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,19 +33,19 @@ async fn main() -> Result<()> {
     match manager.start().await {
         Ok(()) => println!("✅ Transport manager started successfully"),
         Err(e) => {
-            println!("❌ Failed to start transport manager: {}", e);
+            println!("❌ Failed to start transport manager: {e}");
             return Ok(()); // Continue with test even if start fails
         }
     }
     
     // Get available transports
     let available_transports = manager.list_available_transports().await;
-    println!("📡 Available transport types: {:?}", available_transports);
+    println!("📡 Available transport types: {available_transports:?}");
     
     // Test transport capabilities
     for transport_type in &available_transports {
         if let Some(capabilities) = manager.get_transport_capabilities(*transport_type).await {
-            println!("\n🔧 {} Transport Capabilities:", transport_type);
+            println!("\n🔧 {transport_type} Transport Capabilities:");
             println!("   • Max message size: {} bytes", capabilities.max_message_size);
             println!("   • Reliable: {}", capabilities.reliable);
             println!("   • Real-time: {}", capabilities.real_time);
@@ -67,7 +66,7 @@ async fn main() -> Result<()> {
     
     match manager.select_optimal_transport(&target).await {
         Ok(selected_type) => {
-            println!("✅ Selected transport: {}", selected_type);
+            println!("✅ Selected transport: {selected_type}");
             
             // Test connectivity estimation
             if let Ok(estimate) = manager.estimate_delivery(&target, selected_type).await {
@@ -79,7 +78,7 @@ async fn main() -> Result<()> {
             }
         }
         Err(e) => {
-            println!("❌ Transport selection failed: {}", e);
+            println!("❌ Transport selection failed: {e}");
         }
     }
     
@@ -103,7 +102,7 @@ async fn main() -> Result<()> {
             println!("   • Confirmation: {:?}", receipt.confirmation);
         }
         Err(e) => {
-            println!("❌ Message sending failed: {}", e);
+            println!("❌ Message sending failed: {e}");
         }
     }
     
@@ -114,7 +113,7 @@ async fn main() -> Result<()> {
         println!("⚠️  No metrics available yet");
     } else {
         for (transport_name, transport_metrics) in metrics {
-            println!("📈 {} metrics:", transport_name);
+            println!("📈 {transport_name} metrics:");
             println!("   • Messages sent: {}", transport_metrics.messages_sent);
             println!("   • Messages received: {}", transport_metrics.messages_received);
             println!("   • Send failures: {}", transport_metrics.send_failures);
@@ -128,7 +127,7 @@ async fn main() -> Result<()> {
     println!("\n🔄 Testing graceful shutdown...");
     match manager.stop().await {
         Ok(()) => println!("✅ Transport manager stopped successfully"),
-        Err(e) => println!("⚠️  Warning during shutdown: {}", e),
+        Err(e) => println!("⚠️  Warning during shutdown: {e}"),
     }
     
     println!("\n🎉 Unified transport abstraction test complete!");

@@ -1,20 +1,20 @@
 //! Network connectivity enhancements for EMRP
-//! 
+//!
 //! This module provides solutions for entities behind NAT firewalls,
 //! IPv6-only networks, and other connectivity challenges.
 
-use crate::{
-    router::SynapseRouter, 
-    config::Config,
-    types::{MessageType, SecurityLevel, SimpleMessage},
-    error::Result,
-};
 use crate::synapse::blockchain::serialization::UuidWrapper;
-use uuid::Uuid;
+use crate::{
+    config::Config,
+    error::Result,
+    router::SynapseRouter,
+    types::{MessageType, SecurityLevel, SimpleMessage},
+};
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{info, warn, debug, error};
+use tracing::{debug, error, info, warn};
 use uuid;
+use uuid::Uuid;
 
 /// Network connectivity assistant that helps entities communicate
 /// regardless of their network constraints
@@ -68,7 +68,10 @@ impl ConnectivityManager {
 
                         // Process messages here if needed
                         for message in messages {
-                            debug!("Polled message from {}: {}", message.from_entity, message.content);
+                            debug!(
+                                "Polled message from {}: {}",
+                                message.from_entity, message.content
+                            );
                         }
 
                         // Adaptive polling: increase frequency when active
@@ -79,7 +82,8 @@ impl ConnectivityManager {
                         // No messages - adapt polling frequency
                         if self.adaptive_polling {
                             let time_since_last = last_message_time.elapsed();
-                            if time_since_last > Duration::from_secs(600) { // 10 minutes
+                            if time_since_last > Duration::from_secs(600) {
+                                // 10 minutes
                                 // Slow down polling when inactive
                                 polling_interval = Duration::from_secs(120); // 2 minutes
                             }
@@ -88,7 +92,10 @@ impl ConnectivityManager {
                 }
                 Err(e) => {
                     consecutive_failures += 1;
-                    error!("Failed to poll messages (attempt {}): {}", consecutive_failures, e);
+                    error!(
+                        "Failed to poll messages (attempt {}): {}",
+                        consecutive_failures, e
+                    );
 
                     // Try backup email providers if primary fails
                     if consecutive_failures >= 3 {
@@ -99,7 +106,8 @@ impl ConnectivityManager {
                     }
 
                     // Exponential backoff for failures
-                    let backoff_duration = Duration::from_secs(std::cmp::min(300, 30 * consecutive_failures));
+                    let backoff_duration =
+                        Duration::from_secs(std::cmp::min(300, 30 * consecutive_failures));
                     sleep(backoff_duration).await;
                 }
             }
@@ -110,16 +118,19 @@ impl ConnectivityManager {
     async fn try_backup_providers(&self) -> Result<()> {
         for provider in &self.backup_email_providers {
             info!("Attempting backup provider: {}", provider.name);
-            
+
             // In a real implementation, you would:
             // 1. Temporarily reconfigure the router with backup provider
             // 2. Test connectivity
             // 3. Switch if successful
-            
+
             // For now, just log the attempt
-            debug!("Testing connectivity to {}:{}", provider.smtp_host, provider.smtp_port);
+            debug!(
+                "Testing connectivity to {}:{}",
+                provider.smtp_host, provider.smtp_port
+            );
         }
-        
+
         Ok(())
     }
 
@@ -132,10 +143,10 @@ impl ConnectivityManager {
         security_level: SecurityLevel,
     ) -> Result<String> {
         use std::collections::HashMap;
-        
+
         // Generate a unique message ID for tracking
         let message_id = UuidWrapper::new(Uuid::new_v4()).to_string();
-        
+
         // Create the message
         let simple_msg = SimpleMessage {
             to: to_entity.to_string(),
@@ -149,9 +160,13 @@ impl ConnectivityManager {
                 meta
             },
         };
-        
+
         // Try primary provider first
-        match self.router.send_message(simple_msg.clone(), to_entity.to_string()).await {
+        match self
+            .router
+            .send_message(simple_msg.clone(), to_entity.to_string())
+            .await
+        {
             Ok(_) => {
                 info!("Message sent successfully via primary provider");
                 return Ok(message_id);
@@ -164,12 +179,19 @@ impl ConnectivityManager {
         // Try backup providers
         for provider in &self.backup_email_providers {
             info!("Attempting to send via backup provider: {}", provider.name);
-            
+
             // In a real implementation, temporarily switch providers
             // For demonstration, we'll just retry with current provider
-            match self.router.send_message(simple_msg.clone(), to_entity.to_string()).await {
+            match self
+                .router
+                .send_message(simple_msg.clone(), to_entity.to_string())
+                .await
+            {
                 Ok(_) => {
-                    info!("Message sent successfully via backup provider: {}", provider.name);
+                    info!(
+                        "Message sent successfully via backup provider: {}",
+                        provider.name
+                    );
                     return Ok(message_id.clone());
                 }
                 Err(e) => {
@@ -178,7 +200,9 @@ impl ConnectivityManager {
             }
         }
 
-        Err(crate::error::SynapseError::NetworkError("All email providers failed".to_string()))
+        Err(crate::error::SynapseError::NetworkError(
+            "All email providers failed".to_string(),
+        ))
     }
 
     /// Default backup email providers that work well with NAT/IPv6
@@ -225,22 +249,12 @@ impl ConnectivityManager {
 
     /// Detect network constraints and suggest optimal configuration
     pub async fn detect_network_constraints(&self) -> NetworkConstraints {
-        let mut constraints = NetworkConstraints::default();
-
-        // Test IPv4 connectivity
-        constraints.has_ipv4 = self.test_ipv4_connectivity().await;
-        
-        // Test IPv6 connectivity  
-        constraints.has_ipv6 = self.test_ipv6_connectivity().await;
-        
-        // Test if behind NAT
-        constraints.behind_nat = self.detect_nat().await;
-        
-        // Test firewall restrictions
-        constraints.firewall_restrictions = self.detect_firewall_restrictions().await;
-
-        info!("Network constraints detected: {:?}", constraints);
-        constraints
+        NetworkConstraints {
+            has_ipv4: self.test_ipv4_connectivity().await,
+            has_ipv6: self.test_ipv6_connectivity().await,
+            behind_nat: self.detect_nat().await,
+            firewall_restrictions: self.detect_firewall_restrictions().await,
+        }
     }
 
     /// Test IPv4 connectivity
@@ -272,17 +286,22 @@ impl ConnectivityManager {
     }
 
     /// Get recommended configuration based on network constraints
-    pub fn get_recommended_config(&self, constraints: &NetworkConstraints) -> ConnectivityRecommendations {
+    pub fn get_recommended_config(
+        &self,
+        constraints: &NetworkConstraints,
+    ) -> ConnectivityRecommendations {
         let mut recommendations = ConnectivityRecommendations::default();
 
         if constraints.behind_nat {
             recommendations.use_email_only = true;
             recommendations.polling_interval = Duration::from_secs(30);
-            recommendations.message = "Behind NAT: Using email-only mode with regular polling".to_string();
+            recommendations.message =
+                "Behind NAT: Using email-only mode with regular polling".to_string();
         }
 
         if !constraints.has_ipv4 && constraints.has_ipv6 {
-            recommendations.preferred_providers = self.backup_email_providers
+            recommendations.preferred_providers = self
+                .backup_email_providers
                 .iter()
                 .filter(|p| p.supports_ipv6)
                 .map(|p| p.name.clone())
@@ -290,9 +309,13 @@ impl ConnectivityManager {
             recommendations.message = "IPv6-only: Using IPv6-capable email providers".to_string();
         }
 
-        if constraints.firewall_restrictions.contains(&"inbound_blocked".to_string()) {
+        if constraints
+            .firewall_restrictions
+            .contains(&"inbound_blocked".to_string())
+        {
             recommendations.use_email_only = true;
-            recommendations.message = "Firewall restrictions: Email-only mode recommended".to_string();
+            recommendations.message =
+                "Firewall restrictions: Email-only mode recommended".to_string();
         }
 
         recommendations
@@ -321,10 +344,10 @@ pub struct ConnectivityRecommendations {
 pub trait ConnectivityConfigExt {
     /// Create a configuration optimized for NAT/firewall environments
     fn for_constrained_network(entity_name: &str, entity_type: &str) -> Config;
-    
+
     /// Create a configuration for IPv6-only networks
     fn for_ipv6_only(entity_name: &str, entity_type: &str) -> Config;
-    
+
     /// Create a configuration with multiple backup providers
     fn with_backup_providers(entity_name: &str, entity_type: &str) -> Config;
 }
@@ -332,34 +355,42 @@ pub trait ConnectivityConfigExt {
 impl ConnectivityConfigExt for Config {
     fn for_constrained_network(entity_name: &str, entity_type: &str) -> Config {
         // Use Gmail as it works well behind NAT
-        let mut config = Config::gmail_config(entity_name, entity_type, 
-            &format!("{}@gmail.com", entity_name.to_lowercase()), 
-            "app_password");
-        
+        let mut config = Config::gmail_config(
+            entity_name,
+            entity_type,
+            format!("{}@gmail.com", entity_name.to_lowercase()),
+            "app_password",
+        );
+
         // Optimize for polling-based operation
         config.router.idle_timeout = 30; // Shorter IDLE timeout
         config.router.max_retries = 5; // More retries for unreliable connections
         config.router.connection_timeout = 60; // Longer timeout for slow connections
-        
+
         config
     }
 
     fn for_ipv6_only(entity_name: &str, entity_type: &str) -> Config {
         // Gmail and Outlook both support IPv6 well
-        Config::gmail_config(entity_name, entity_type,
-            &format!("{}@gmail.com", entity_name.to_lowercase()),
-            "app_password")
+        Config::gmail_config(
+            entity_name,
+            entity_type,
+            format!("{}@gmail.com", entity_name.to_lowercase()),
+            "app_password",
+        )
     }
 
     fn with_backup_providers(entity_name: &str, entity_type: &str) -> Config {
         // Start with a reliable provider
-        let config = Config::gmail_config(entity_name, entity_type,
-            &format!("{}@gmail.com", entity_name.to_lowercase()),
-            "app_password");
-        
+
         // Configure for high reliability - we would modify config here in real implementation
         // For now, just return the base configuration
-        config
+        Config::gmail_config(
+            entity_name,
+            entity_type,
+            format!("{}@gmail.com", entity_name.to_lowercase()),
+            "app_password",
+        )
     }
 }
 
@@ -370,11 +401,13 @@ mod tests {
     #[tokio::test]
     async fn test_network_constraint_detection() {
         let config = Config::default_for_entity("test", "tool");
-        let router = SynapseRouter::new(config, "test@example.com".to_string()).await.unwrap();
+        let router = SynapseRouter::new(config, "test@example.com".to_string())
+            .await
+            .unwrap();
         let connectivity_manager = ConnectivityManager::new(router);
-        
+
         let constraints = connectivity_manager.detect_network_constraints().await;
-        
+
         // In the demo, we assume certain constraints
         assert!(constraints.behind_nat);
         assert!(constraints.has_ipv4);
@@ -383,7 +416,7 @@ mod tests {
     #[test]
     fn test_constrained_network_config() {
         let config = Config::for_constrained_network("test_entity", "ai_model");
-        
+
         assert_eq!(config.entity.local_name, "test_entity");
         assert_eq!(config.router.max_retries, 5);
         assert_eq!(config.router.idle_timeout, 30);
@@ -392,7 +425,7 @@ mod tests {
     #[test]
     fn test_backup_providers() {
         let backup_providers = ConnectivityManager::default_backup_providers();
-        
+
         assert!(!backup_providers.is_empty());
         assert!(backup_providers.iter().any(|p| p.name == "Gmail"));
         assert!(backup_providers.iter().any(|p| p.supports_ipv6));

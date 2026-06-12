@@ -28,7 +28,7 @@ pub struct EnhancedTcpTransport {
 
 impl EnhancedTcpTransport {
     pub async fn new(listen_port: u16) -> Result<Self> {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", listen_port)).await.ok();
+        let listener = TcpListener::bind(format!("0.0.0.0:{listen_port}")).await.ok();
         
         if listener.is_some() {
             info!("Enhanced TCP transport listening on port {} with circuit breaker", listen_port);
@@ -90,8 +90,8 @@ impl EnhancedTcpTransport {
                 buffer.truncate(bytes_read);
                 
                 // Parse and handle the message
-                if let Ok(message_str) = String::from_utf8(buffer) {
-                    if let Ok(message) = serde_json::from_str::<SecureMessage>(&message_str) {
+                if let Ok(message_str) = String::from_utf8(buffer)
+                    && let Ok(message) = serde_json::from_str::<SecureMessage>(&message_str) {
                         debug!("Received EMRP message via TCP: {}", message.message_id);
                         
                         // Queue the received message
@@ -100,7 +100,6 @@ impl EnhancedTcpTransport {
                             debug!("Queued TCP message, total messages: {}", queue.len());
                         }
                     }
-                }
             }
             Err(e) => {
                 warn!("Error reading from TCP connection: {}", e);
@@ -109,7 +108,7 @@ impl EnhancedTcpTransport {
     }
     
     async fn connect(&self, host: &str, port: u16) -> Result<TcpStream> {
-        let addr = format!("{}:{}", host, port);
+        let addr = format!("{host}:{port}");
         debug!("Attempting TCP connection to {}", addr);
         
         match tokio::time::timeout(self.connection_timeout, TcpStream::connect(&addr)).await {
@@ -119,7 +118,7 @@ impl EnhancedTcpTransport {
             }
             Ok(Err(e)) => {
                 debug!("Failed to connect to {}: {}", addr, e);
-                Err(crate::error::SynapseError::TransportError(format!("TCP connection failed: {}", e)))
+                Err(crate::error::SynapseError::TransportError(format!("TCP connection failed: {e}")))
             }
             Err(_) => {
                 debug!("Timeout connecting to {}", addr);
@@ -130,13 +129,13 @@ impl EnhancedTcpTransport {
     
     async fn send_via_stream(&self, stream: &mut TcpStream, message: &SecureMessage) -> Result<()> {
         let message_json = serde_json::to_string(message)
-            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to serialize message: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to serialize message: {e}")))?;
         
         stream.write_all(message_json.as_bytes()).await
-            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to send TCP message: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to send TCP message: {e}")))?;
         
         stream.flush().await
-            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to flush TCP stream: {}", e)))?;
+            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to flush TCP stream: {e}")))?;
         
         Ok(())
     }
@@ -144,14 +143,14 @@ impl EnhancedTcpTransport {
     /// Internal message sending implementation without circuit breaker checks
     async fn send_message_internal(&self, target: &str, message: &SecureMessage) -> Result<String> {
         // Parse target - handle both "host:port" and "host" formats
-        if let Some((host, port_str)) = target.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
+        if let Some((host, port_str)) = target.rsplit_once(':')
+            && let Ok(port) = port_str.parse::<u16>() {
                 // Direct connection to specified host:port
                 if let Ok(mut stream) = self.connect(host, port).await {
                     match self.send_via_stream(&mut stream, message).await {
                         Ok(_) => {
                             info!("Successfully sent message via TCP to {}:{}", host, port);
-                            return Ok(format!("tcp://{}:{}", host, port));
+                            return Ok(format!("tcp://{host}:{port}"));
                         }
                         Err(e) => {
                             warn!("Failed to send via TCP to {}:{}: {}", host, port, e);
@@ -159,7 +158,6 @@ impl EnhancedTcpTransport {
                     }
                 }
             }
-        }
         
         // Fallback: try common EMRP ports on the target host
         let host = if target.contains(':') {
@@ -174,7 +172,7 @@ impl EnhancedTcpTransport {
                 match self.send_via_stream(&mut stream, message).await {
                     Ok(_) => {
                         info!("Successfully sent message via TCP to {}:{}", host, port);
-                        return Ok(format!("tcp://{}:{}", host, port));
+                        return Ok(format!("tcp://{host}:{port}"));
                     }
                     Err(e) => {
                         warn!("Failed to send via TCP to {}:{}: {}", host, port, e);

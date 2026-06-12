@@ -1,277 +1,240 @@
-//! # Core Types and Message Structures for EMRP
-//!
-//! This module defines all the fundamental data types used throughout the
-//! Email-Based Message Routing Protocol. Understanding these types is essential
-//! for working with EMRP messages, identities, and configurations.
-//!
-//! ## 🏗️ Message Architecture
-//!
-//! EMRP uses a layered message architecture designed for flexibility and security:
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────┐
-//! │                SimpleMessage                        │
-//! │  Human-readable, easy to work with                  │
-//! │  • to: "Alice"                                      │
-//! │  • from_entity: "Claude"                            │
-//! │  • content: "Hello!"                                │
-//! │  • message_type: Direct                             │
-//! └─────────────────┬───────────────────────────────────┘
-//!                   │ (automatic conversion)
-//!                   ▼
-//! ┌─────────────────────────────────────────────────────┐
-//! │                SecureMessage                        │
-//! │  Network-ready with security and routing            │
-//! │  • message_id: uuid                                 │
-//! │  • to_global_id: "alice@ai-lab.example.com"        │
-//! │  • from_global_id: "claude@anthropic.com"          │
-//! │  • encrypted_content: [encrypted bytes]            │
-//! │  • signature: [digital signature]                  │
-//! │  • security_level: Authenticated                   │
-//! │  • routing_path: [hop1, hop2, ...]                 │
-//! └─────────────────────────────────────────────────────┘
-//! ```
-//!
-//! ## 🎯 Entity Types - Who's Who in EMRP
-//!
-//! EMRP supports different types of communicating entities:
-//!
-//! ### Human
-//! - **Purpose**: Represents actual human users
-//! - **Examples**: Researchers, developers, end users
-//! - **Capabilities**: Typically uses client applications, email interfaces
-//! - **Security**: Usually requires authentication, may have elevated privileges
-//!
-//! ### AiModel  
-//! - **Purpose**: AI systems, language models, intelligent agents
-//! - **Examples**: Claude, GPT-4, local AI assistants, specialized ML models
-//! - **Capabilities**: Automated responses, real-time communication, batch processing
-//! - **Security**: May have special encryption requirements, rate limiting
-//!
-//! ### Tool
-//! - **Purpose**: Utility services and specialized tools
-//! - **Examples**: Image generators, code analyzers, data processors
-//! - **Capabilities**: Function-specific, often stateless, API-driven
-//! - **Security**: Often public or semi-public access
-//!
-//! ### Service
-//! - **Purpose**: Infrastructure and platform services
-//! - **Examples**: Databases, authentication servers, load balancers
-//! - **Capabilities**: High reliability, scalability, enterprise features
-//! - **Security**: Strong authentication, audit logging, access controls
-//!
-//! ### Router
-//! - **Purpose**: EMRP routing infrastructure
-//! - **Examples**: Email servers, message relays, protocol gateways
-//! - **Capabilities**: Message forwarding, protocol translation, caching
-//! - **Security**: Trusted infrastructure, certificate-based authentication
-//!
-//! ## 📝 Message Types - Communication Patterns
-//!
-//! Different message types enable different communication patterns:
-//!
-//! ### Direct
-//! ```rust
-//! // One-to-one private communication
-//! SimpleMessage {
-//!     to: "Alice".to_string(),
-//!     from_entity: "Claude".to_string(), 
-//!     content: "Can you help me with this analysis?".to_string(),
-//!     message_type: MessageType::Direct,
-//!     metadata: HashMap::new(),
-//! }
-//! ```
-//! - **Use Case**: Private conversations, specific requests
-//! - **Routing**: Point-to-point, highest priority
-//! - **Security**: End-to-end encryption by default
-//!
-//! ### Broadcast
-//! ```rust
-//! // One-to-many public announcements
-//! SimpleMessage {
-//!     to: "AllTeamMembers".to_string(),
-//!     from_entity: "ProjectManager".to_string(),
-//!     content: "Weekly meeting at 3pm today".to_string(), 
-//!     message_type: MessageType::Broadcast,
-//!     metadata: [("priority", "high")].into(),
-//! }
-//! ```
-//! - **Use Case**: Announcements, status updates, alerts
-//! - **Routing**: Fan-out to all subscribers
-//! - **Security**: Usually public or group-encrypted
-//!
-//! ### Conversation
-//! ```rust
-//! // Multi-party ongoing discussion
-//! SimpleMessage {
-//!     to: "ResearchGroup".to_string(),
-//!     from_entity: "Alice".to_string(),
-//!     content: "I think we should try a different approach".to_string(),
-//!     message_type: MessageType::Conversation,
-//!     metadata: [("thread_id", "quantum-research-2024")].into(),
-//! }
-//! ```
-//! - **Use Case**: Group discussions, collaborative work
-//! - **Routing**: All participants receive message
-//! - **Security**: Group-encrypted, shared access
-//!
-//! ### Notification
-//! ```rust
-//! // System-generated alerts and updates
-//! SimpleMessage {
-//!     to: "DevOpsTeam".to_string(),
-//!     from_entity: "MonitoringSystem".to_string(),
-//!     content: "Server CPU usage exceeded 90% threshold".to_string(),
-//!     message_type: MessageType::Notification,
-//!     metadata: [
-//!         ("severity", "warning"),
-//!         ("server", "web-01.prod"), 
-//!         ("metric", "cpu_usage"),
-//!         ("value", "92.3")
-//!     ].into(),
-//! }
-//! ```
-//! - **Use Case**: Automated alerts, system status, monitoring
-//! - **Routing**: Priority-based, may have special handling
-//! - **Security**: Often authenticated but not necessarily encrypted
-//!
-//! ## 🔒 Security Levels - Protection Gradients
-//!
-//! EMRP provides multiple security levels to balance protection with performance:
-//!
-//! ### Public
-//! - **Protection**: Minimal - no encryption, optional signatures
-//! - **Use Case**: Public announcements, status updates, discovery messages
-//! - **Performance**: Fastest - no crypto overhead
-//! - **Example**: "Bot online and ready for requests"
-//!
-//! ### Authenticated  
-//! - **Protection**: Sender verification via digital signatures
-//! - **Use Case**: Trusted communications where identity matters
-//! - **Performance**: Fast - only signature overhead
-//! - **Example**: "Command acknowledged, processing request #1234"
-//!
-//! ### Encrypted
-//! - **Protection**: Content encrypted with recipient's public key
-//! - **Use Case**: Sensitive information, private conversations
-//! - **Performance**: Moderate - encryption overhead
-//! - **Example**: "API key for service X is: sk_abc123..."
-//!
-//! ### Confidential
-//! - **Protection**: Encryption + signature + additional metadata protection
-//! - **Use Case**: Highly sensitive data, regulatory compliance
-//! - **Performance**: Slower - maximum security overhead
-//! - **Example**: Personal data, financial information, trade secrets
-//!
-//! ## 🌐 Global Identity Structure
-//!
-//! Every entity in EMRP has a structured global identity:
-//!
-//! ```rust
-//! GlobalIdentity {
-//!     local_name: "Alice".to_string(),           // Human-friendly name
-//!     global_id: "alice@ai-lab.example.com".to_string(), // Globally unique
-//!     entity_type: EntityType::AiModel,         // What kind of entity
-//!     capabilities: vec![                       // What it can do
-//!         "real-time-messaging".to_string(),
-//!         "file-transfer".to_string(),
-//!         "voice-calls".to_string(),
-//!     ],
-//!     public_key: Some(public_key_bytes),       // For encryption
-//!     display_name: Some("Alice AI Researcher".to_string()), // Pretty name
-//!     created_at: Utc::now(),                   // When registered
-//! }
-//! ```
-//!
-//! ### Identity Resolution Chain
-//! ```text
-//! "Alice" → alice@ai-lab.example.com → 192.168.1.100:8080 → [TCP, UDP, Email]
-//!   ↑            ↑                        ↑                      ↑
-//! Local      Global ID              Network Address        Capabilities
-//! Name      (DNS-based)            (Dynamic Discovery)    (Feature Detection)
-//! ```
-//!
-//! ## 📧 Email Configuration
-//!
-//! EMRP seamlessly integrates with email infrastructure:
-//!
-//! ```rust
-//! EmailConfig {
-//!     smtp: SmtpConfig {
-//!         host: "smtp.gmail.com".to_string(),
-//!         port: 587,
-//!         username: "mybot@gmail.com".to_string(),
-//!         password: "app_password".to_string(),
-//!         use_tls: true,    // Modern security
-//!         use_ssl: false,   // Legacy security
-//!     },
-//!     imap: ImapConfig {
-//!         host: "imap.gmail.com".to_string(),
-//!         port: 993, 
-//!         username: "mybot@gmail.com".to_string(),
-//!         password: "app_password".to_string(),
-//!         use_ssl: true,    // Secure IMAP
-//!     },
-//! }
-//! ```
-//!
-//! ## 🎛️ Message Metadata - Extensible Information
-//!
-//! All messages can carry arbitrary metadata for extended functionality:
-//!
-//! ```rust
-//! // Example: AI collaboration metadata
-//! let mut metadata = HashMap::new();
-//! metadata.insert("conversation_id".to_string(), "research-session-001".to_string());
-//! metadata.insert("model_version".to_string(), "claude-3.5".to_string());
-//! metadata.insert("temperature".to_string(), "0.7".to_string());
-//! metadata.insert("context_window".to_string(), "200k".to_string());
-//!
-//! // Example: File transfer metadata
-//! metadata.insert("file_name".to_string(), "research_data.zip".to_string());
-//! metadata.insert("file_size".to_string(), "15728640".to_string()); // 15MB
-//! metadata.insert("file_hash".to_string(), "sha256:abc123...".to_string());
-//! metadata.insert("compression".to_string(), "gzip".to_string());
-//!
-//! // Example: Real-time communication metadata
-//! metadata.insert("urgency".to_string(), "real-time".to_string());
-//! metadata.insert("timeout_ms".to_string(), "5000".to_string());
-//! metadata.insert("retry_count".to_string(), "3".to_string());
-//! metadata.insert("preferred_transport".to_string(), "tcp".to_string());
-//! ```
-//!
-//! ## 🔄 Message Lifecycle
-//!
-//! Understanding how messages flow through EMRP:
-//!
-//! ```text
-//! 1. Creation
-//!    SimpleMessage → user creates with simple fields
-//!    
-//! 2. Identity Resolution  
-//!    "Alice" → alice@ai-lab.example.com (local name to global ID)
-//!    
-//! 3. Security Processing
-//!    SimpleMessage → SecureMessage (encryption, signing)
-//!    
-//! 4. Transport Selection
-//!    Network discovery → choose TCP/UDP/Email based on urgency
-//!    
-//! 5. Delivery
-//!    Send via chosen transport with automatic retry/fallback
-//!    
-//! 6. Receipt Processing
-//!    Decrypt, verify, route to application handler
-//! ```
-//!
-//! This type system provides the foundation for EMRP's flexibility while
-//! maintaining strong typing and security throughout the communication process.
+// # Core Types and Message Structures for Synapse
+//
+// This module defines all the fundamental data types used throughout Synapse. Understanding these types is essential
+// for working with Synapse messages, identities, and configurations.
+//
+// ## 🏗️ Message Architecture
+//
+// Synapse uses a layered message architecture designed for flexibility and security:
+//
+// ```text
+// ┌─────────────────────────────────────────────────────┐
+// │                SimpleMessage                        │
+// │  Human-readable, easy to work with                  │
+// │  • to: "Alice"                                      │
+// │  • from_entity: "Claude"                            │
+// │  • content: "Hello!"                                │
+// │  • message_type: Direct                             │
+// └─────────────────┬───────────────────────────────────┘
+//                   │ (automatic conversion)
+//                   ▼
+// ┌─────────────────────────────────────────────────────┐
+// │                SecureMessage                        │
+// │  Network-ready with security and routing            │
+// │  • message_id: uuid                                 │
+// │  • to_global_id: "alice@ai-lab.example.com"        │
+// │  • from_global_id: "claude@anthropic.com"          │
+// │  • encrypted_content: [encrypted bytes]             │
+// │  • signature: [digital signature]                   │
+// │  • security_level: Authenticated                    │
+// │  • routing_path: [hop1, hop2, ...]                  │
+// └─────────────────────────────────────────────────────┘
+// ```
+//
+// ## 🎯 Entity Types - Who's Who in EMRP
+//
+// EMRP supports different types of communicating entities:
+//
+// ### Human
+// - **Purpose**: Represents actual human users
+// - **Examples**: Researchers, developers, end users
+// - **Capabilities**: Typically uses client applications, email interfaces
+// - **Security**: Usually requires authentication, may have elevated privileges
+//
+// ### AiModel
+// - **Purpose**: AI systems, language models, intelligent agents
+// - **Examples**: Claude, GPT-4, local AI assistants, specialized ML models
+// - **Capabilities**: Automated responses, real-time communication, batch processing
+// - **Security**: May have special encryption requirements, rate limiting
+//
+// ### Tool
+// - **Purpose**: Utility services and specialized tools
+// - **Examples**: Image generators, code analyzers, data processors
+// - **Capabilities**: Function-specific, often stateless, API-driven
+// - **Security**: Often public or semi-public access
+//
+// ### Service
+// - **Purpose**: Infrastructure and platform services
+// - **Examples**: Databases, authentication servers, load balancers
+// - **Capabilities**: High reliability, scalability, enterprise features
+// - **Security**: Strong authentication, audit logging, access controls
+//
+// ### Router
+// - **Purpose**: EMRP routing infrastructure
+// - **Examples**: Email servers, message relays, protocol gateways
+// - **Capabilities**: Message forwarding, protocol translation, caching
+// - **Security**: Trusted infrastructure, certificate-based authentication
+//
+// ## 📝 Message Types - Communication Patterns
+//
+// Different message types enable different communication patterns:
+//
+// ### Direct
+// ```rust
+// // One-to-one private communication
+// SimpleMessage {
+//     to: "Alice".to_string(),
+//     from_entity: "Claude".to_string(),
+//     content: "Can you help me with this analysis?".to_string(),
+//     message_type: MessageType::Direct,
+//     metadata: HashMap::new(),
+// }
+// ```
+// - **Use Case**: Private conversations, specific requests
+// - **Routing**: Point-to-point, highest priority
+// - **Security**: End-to-end encryption by default
+//
+// ### Broadcast
+// ```rust
+// // One-to-many public announcements
+// SimpleMessage {
+//     to: "AllTeamMembers".to_string(),
+//     from_entity: "ProjectManager".to_string(),
+//     content: "Weekly meeting at 3pm today".to_string(),
+//     message_type: MessageType::Broadcast,
+//     metadata: [("priority", "high")].into(),
+// }
+// ```
+// - **Use Case**: Announcements, status updates, alerts
+// - **Routing**: Fan-out to all subscribers
+// - **Security**: Usually public or group-encrypted
+//
+// ### Conversation
+// ```rust
+// // Multi-party ongoing discussion
+// SimpleMessage {
+//     to: "ResearchGroup".to_string(),
+//     from_entity: "Alice".to_string(),
+//     content: "I think we should try a different approach".to_string(),
+//     message_type: MessageType::Conversation,
+//     metadata: [("thread_id", "quantum-research-2024")].into(),
+// }
+// ```
+// - **Use Case**: Group discussions, collaborative work
+// - **Routing**: All participants receive message
+// - **Security**: Group-encrypted, shared access
+//
+// ### Notification
+// ```rust
+// // System-generated alerts and updates
+// SimpleMessage {
+//     to: "DevOpsTeam".to_string(),
+//     from_entity: "MonitoringSystem".to_string(),
+//     content: "Server CPU usage exceeded 90% threshold".to_string(),
+//     message_type: MessageType::Notification,
+//     metadata: [
+//         ("severity", "warning"),
+//         ("server", "web-01.prod"),
+//         ("metric", "cpu_usage"),
+//         ("value", "92.3")
+//     ].into(),
+// }
+// ```
+// - **Use Case**: Automated alerts, system status, monitoring
+// - **Routing**: Priority-based, may have special handling
+// - **Security**: Often authenticated but not necessarily encrypted
+//
+// ## 🔒 Security Levels - Protection Gradients
+//
+// EMRP provides multiple security levels to balance protection with performance:
+//
+// ### Public
+// - **Protection**: Minimal - no encryption, optional signatures
+// - **Use Case**: Public announcements, status updates, discovery messages
+// - **Performance**: Fastest - no crypto overhead
+// - **Example**: "Bot online and ready for requests"
+//
+// ### Authenticated
+// - **Protection**: Sender verification via digital signatures
+// - **Use Case**: Trusted communications where identity matters
+// - **Performance**: Fast - only signature overhead
+// - **Example**: "Command acknowledged, processing request #1234"
+//
+// ### Encrypted
+// - **Protection**: Content encrypted with recipient's public key
+// - **Use Case**: Sensitive information, private conversations
+// - **Performance**: Moderate - encryption overhead
+// - **Example**: "API key for service X is: sk_abc123..."
+//
+// ```rust
 
+// EmailConfig {
+//     smtp: SmtpConfig {
+//         host: "smtp.gmail.com".to_string(),
+//         port: 587,
+//         username: "mybot@gmail.com".to_string(),
+//         password: "app_password".to_string(),
+//         use_tls: true,    // Modern security
+//         use_ssl: false,   // Legacy security
+//     },
+//     imap: ImapConfig {
+//         host: "imap.gmail.com".to_string(),
+//         port: 993,
+//         username: "mybot@gmail.com".to_string(),
+//         password: "app_password".to_string(),
+//         use_ssl: true,    // Secure IMAP
+//     },
+// }
+// ```
+//
+// ## 🎛️ Message Metadata - Extensible Information
+//
+// All messages can carry arbitrary metadata for extended functionality:
+//
+// ```rust
+// // Example: AI collaboration metadata
+// let mut metadata = HashMap::new();
+// metadata.insert("conversation_id".to_string(), "research-session-001".to_string());
+// metadata.insert("model_version".to_string(), "claude-3.5".to_string());
+// metadata.insert("temperature".to_string(), "0.7".to_string());
+// metadata.insert("context_window".to_string(), "200k".to_string());
+//
+// // Example: File transfer metadata
+// metadata.insert("file_name".to_string(), "research_data.zip".to_string());
+// metadata.insert("file_size".to_string(), "15728640".to_string()); // 15MB
+// metadata.insert("file_hash".to_string(), "sha256:abc123...".to_string());
+// metadata.insert("compression".to_string(), "gzip".to_string());
+//
+// // Example: Real-time communication metadata
+// metadata.insert("urgency".to_string(), "real-time".to_string());
+// metadata.insert("timeout_ms".to_string(), "5000".to_string());
+// metadata.insert("retry_count".to_string(), "3".to_string());
+// metadata.insert("preferred_transport".to_string(), "tcp".to_string());
+// ```
+//
+// ## 🔄 Message Lifecycle
+//
+// Understanding how messages flow through EMRP:
+//
+// ```text
+// 1. Creation
+//    SimpleMessage → user creates with simple fields
+//
+// 2. Identity Resolution
+//    "Alice" → alice@ai-lab.example.com (local name to global ID)
+//
+// 3. Security Processing
+//    SimpleMessage → SecureMessage (encryption, signing)
+//
+// 4. Transport Selection
+//    Network discovery → choose TCP/UDP/Email based on urgency
+//
+// 5. Delivery
+//    Send via chosen transport with automatic retry/fallback
+//
+// 6. Receipt Processing
+//    Decrypt, verify, route to application handler
+// ```
+//
+// This type system provides the foundation for EMRP's flexibility while
+// maintaining strong typing and security throughout the communication process.
+
+pub use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
+use bincode::{Decode, Encode};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use chrono::Utc;
 use uuid::Uuid;
-use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 
 /// Types of entities in the global network
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,7 +265,7 @@ impl std::fmt::Display for EntityType {
 }
 
 /// Types of messages in the protocol
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageType {
     /// Direct communication between entities
@@ -333,10 +296,11 @@ impl std::fmt::Display for MessageType {
 }
 
 /// Security levels for different message types
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityLevel {
     /// No encryption needed
+    #[default]
     Public,
     /// End-to-end encrypted
     Private,
@@ -358,7 +322,8 @@ impl std::fmt::Display for SecurityLevel {
 }
 
 /// The simple message format that users interact with
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+// Always derive bincode traits for monolithic build
 pub struct SimpleMessage {
     /// Recipient's local name (e.g., "Eric", "Claude", "FileSystem")
     pub to: String,
@@ -423,6 +388,13 @@ impl SimpleMessage {
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
     }
 }
 
@@ -500,26 +472,17 @@ impl GlobalIdentity {
 }
 
 /// Secure message for network transport
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode, Default)]
 pub struct SecureMessage {
-    /// Unique message identifier
     pub message_id: UuidWrapper,
-    /// Recipient's global ID
     pub to_global_id: String,
-    /// Sender's global ID
     pub from_global_id: String,
-    /// Encrypted message content
     pub encrypted_content: Vec<u8>,
-    /// Digital signature
     pub signature: Vec<u8>,
-    /// Message timestamp
     pub timestamp: DateTimeWrapper,
-    /// Security level applied
     pub security_level: SecurityLevel,
-    /// Routing path taken
     #[serde(default)]
     pub routing_path: Vec<String>,
-    /// Additional metadata
     #[serde(default)]
     pub metadata: HashMap<String, String>,
 }
@@ -539,7 +502,7 @@ impl SecureMessage {
             from_global_id: from_global_id.into(),
             encrypted_content,
             signature,
-            timestamp: DateTimeWrapper::new(Utc::now()),
+            timestamp: DateTimeWrapper::new(chrono::Utc::now()),
             security_level,
             routing_path: Vec::new(),
             metadata: HashMap::new(),
@@ -565,6 +528,13 @@ impl SecureMessage {
     pub fn content_is_empty(&self) -> bool {
         self.encrypted_content.is_empty()
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
+    }
 }
 
 /// Configuration for email providers
@@ -575,6 +545,8 @@ pub struct EmailConfig {
     /// IMAP configuration
     pub imap: ImapConfig,
 }
+
+// EmailTransportConfig removed; EmailConfig is now the unified type for all email transport configuration
 
 /// SMTP server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -609,7 +581,7 @@ pub struct ImapConfig {
 }
 
 /// Stream priority levels
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamPriority {
     /// < 100ms latency required
@@ -623,7 +595,7 @@ pub enum StreamPriority {
 }
 
 /// Types of streaming scenarios
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     /// Tool streaming results back
@@ -642,11 +614,10 @@ pub enum StreamType {
     Interactive,
 }
 
-/// A chunk of streaming data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct StreamChunk {
     /// Stream identifier
-    pub stream_id: Uuid,
+    pub stream_id: UuidWrapper,
     /// Sequence number in stream
     pub sequence_number: u64,
     /// Type of chunk (data, metadata, control, end)
@@ -666,7 +637,7 @@ pub struct StreamChunk {
 impl StreamChunk {
     /// Create a new data chunk
     pub fn new_data(
-        stream_id: Uuid,
+        stream_id: UuidWrapper,
         sequence_number: u64,
         data: impl Into<String>,
         priority: StreamPriority,
@@ -676,7 +647,7 @@ impl StreamChunk {
             sequence_number,
             chunk_type: "data".to_string(),
             data: data.into(),
-            timestamp: DateTimeWrapper::new(Utc::now()),
+            timestamp: DateTimeWrapper::new(chrono::Utc::now()),
             priority,
             is_final: false,
             compression: "none".to_string(),
@@ -684,25 +655,31 @@ impl StreamChunk {
     }
 
     /// Create a final chunk to end the stream
-    pub fn new_final(stream_id: Uuid, sequence_number: u64) -> Self {
+    pub fn new_final(stream_id: UuidWrapper, sequence_number: u64) -> Self {
         Self {
             stream_id,
             sequence_number,
             chunk_type: "end".to_string(),
             data: String::new(),
-            timestamp: DateTimeWrapper::new(Utc::now()),
+            timestamp: DateTimeWrapper::new(chrono::Utc::now()),
             priority: StreamPriority::Background,
             is_final: true,
             compression: "none".to_string(),
         }
     }
-}
 
-/// Metadata for a streaming session
-#[derive(Debug, Clone, Serialize, Deserialize)]
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct StreamMetadata {
     /// Stream identifier
-    pub stream_id: Uuid,
+    pub stream_id: UuidWrapper,
     /// Type of stream
     pub stream_type: StreamType,
     /// Source email address
@@ -731,16 +708,24 @@ impl StreamMetadata {
         destination: impl Into<String>,
     ) -> Self {
         Self {
-            stream_id: Uuid::new_v4(),
+            stream_id: UuidWrapper::new(Uuid::new_v4()),
             stream_type,
             source: source.into(),
             destination: destination.into(),
-            started_at: DateTimeWrapper::new(Utc::now()),
+            started_at: DateTimeWrapper::new(chrono::Utc::now()),
             expected_duration: None,
             total_size_estimate: None,
             chunk_size: 32 * 1024, // 32KB default
             compression: "gzip".to_string(),
             encryption: "none".to_string(),
         }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
+        bincode::encode_to_vec(self, bincode::config::standard())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
+        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
     }
 }

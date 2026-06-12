@@ -1,63 +1,65 @@
 //! Unified Transport Abstraction Layer for Synapse
-//! 
+//!
 //! This module provides a unified interface that sits above all transport mechanisms,
 //! making applications transport-agnostic while providing intelligent transport selection,
 //! failover, and optimization capabilities.
 
-use crate::{
-    types::SecureMessage,
-    error::Result,
-};
-use async_trait::async_trait;
-use std::{
-    time::{Duration, Instant},
-    collections::HashMap,
-};
-use dashmap::DashMap;
-use serde::{Serialize, Deserialize};
 use super::router::ConnectionOffer;
-
+use crate::{error::Result, types::SecureMessage};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 /// Unified transport interface that all transport mechanisms must implement
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Get the transport type identifier
     fn transport_type(&self) -> TransportType;
-    
+
     /// Get transport capabilities
     fn capabilities(&self) -> TransportCapabilities;
-    
+
     /// Check if this transport can reach a specific target
     async fn can_reach(&self, target: &TransportTarget) -> bool;
-    
+
     /// Get estimated metrics for reaching a target
     async fn estimate_metrics(&self, target: &TransportTarget) -> Result<TransportEstimate>;
-    
+
     /// Send a message via this transport
-    async fn send_message(&self, target: &TransportTarget, message: &SecureMessage) -> Result<DeliveryReceipt>;
-    
+    async fn send_message(
+        &self,
+        target: &TransportTarget,
+        message: &SecureMessage,
+    ) -> Result<DeliveryReceipt>;
+
     /// Receive messages from this transport
     async fn receive_messages(&self) -> Result<Vec<IncomingMessage>>;
-    
+
     /// Test connectivity to a target
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult>;
-    
+
     /// Start the transport (if needed)
     async fn start(&self) -> Result<()>;
-    
+
     /// Stop the transport gracefully
     async fn stop(&self) -> Result<()>;
-    
+
     /// Get current transport status
     async fn status(&self) -> TransportStatus;
-    
+
     /// Get transport metrics
     async fn metrics(&self) -> TransportMetrics;
 
     /// Send a connection offer to a target
     async fn send_connection_offer(&self, target: &str, offer: ConnectionOffer) -> Result<String> {
         let _ = (target, offer);
-        Err(crate::error::SynapseError::TransportError("Connection offers not supported by this transport".to_string()))
+        Err(crate::error::SynapseError::TransportError(
+            "Connection offers not supported by this transport".to_string(),
+        ))
     }
 }
 
@@ -84,7 +86,7 @@ impl std::fmt::Display for TransportType {
             TransportType::Email => write!(f, "Email"),
             TransportType::AutoDiscovery => write!(f, "Auto-Discovery"),
             TransportType::Quic => write!(f, "QUIC"),
-            TransportType::Custom(id) => write!(f, "Custom({})", id),
+            TransportType::Custom(id) => write!(f, "Custom({id})"),
         }
     }
 }
@@ -152,22 +154,22 @@ impl TransportTarget {
             urgency: MessageUrgency::Interactive,
         }
     }
-    
+
     pub fn with_address(mut self, address: String) -> Self {
         self.address = Some(address);
         self
     }
-    
+
     pub fn with_urgency(mut self, urgency: MessageUrgency) -> Self {
         self.urgency = urgency;
         self
     }
-    
+
     pub fn prefer_transport(mut self, transport: TransportType) -> Self {
         self.preferred_transports.push(transport);
         self
     }
-    
+
     pub fn require_capability(mut self, capability: String) -> Self {
         self.required_capabilities.push(capability);
         self
@@ -250,7 +252,7 @@ impl IncomingMessage {
             metadata: HashMap::new(),
         }
     }
-    
+
     /// Get received time as Duration since epoch
     pub fn received_at(&self) -> Duration {
         Duration::from_secs(self.received_timestamp)
@@ -345,18 +347,18 @@ impl TransportMetrics {
     pub fn average_latency(&self) -> Duration {
         Duration::from_millis(self.average_latency_ms)
     }
-    
+
     /// Set average latency from Duration
     pub fn set_average_latency(&mut self, latency: Duration) {
         self.average_latency_ms = latency.as_millis() as u64;
     }
-    
+
     /// Get last updated time as Instant (approximate)
     pub fn last_updated(&self) -> Instant {
         // This is approximate since we can't perfectly convert back to Instant
         Instant::now() // For now, just return current time
     }
-    
+
     /// Update the last updated timestamp to now
     pub fn touch(&mut self) {
         self.last_updated_timestamp = std::time::SystemTime::now()
@@ -371,7 +373,7 @@ impl TransportMetrics {
 pub struct DeliveryEstimate {
     /// Estimated latency
     pub latency: Duration,
-    /// Estimated reliability (0.0-1.0)  
+    /// Estimated reliability (0.0-1.0)
     pub reliability: f64,
     /// Estimated throughput in bytes per second
     pub throughput_estimate: u64,
@@ -403,7 +405,7 @@ impl TransportCapabilities {
             ],
         }
     }
-    
+
     /// UDP transport capabilities
     pub fn udp() -> Self {
         Self {
@@ -427,7 +429,7 @@ impl TransportCapabilities {
             ],
         }
     }
-    
+
     /// Email transport capabilities
     pub fn email() -> Self {
         Self {
@@ -438,10 +440,7 @@ impl TransportCapabilities {
             bidirectional: true,
             encrypted: true, // Usually TLS
             network_spanning: true,
-            supported_urgencies: vec![
-                MessageUrgency::Background,
-                MessageUrgency::Batch,
-            ],
+            supported_urgencies: vec![MessageUrgency::Background, MessageUrgency::Batch],
             features: vec![
                 "store_and_forward".to_string(),
                 "federation".to_string(),
@@ -450,7 +449,7 @@ impl TransportCapabilities {
             ],
         }
     }
-    
+
     /// Auto-Discovery transport capabilities
     pub fn auto_discovery() -> Self {
         Self {
@@ -461,10 +460,7 @@ impl TransportCapabilities {
             bidirectional: true,
             encrypted: false,
             network_spanning: false, // Local network only
-            supported_urgencies: vec![
-                MessageUrgency::Critical,
-                MessageUrgency::RealTime,
-            ],
+            supported_urgencies: vec![MessageUrgency::Critical, MessageUrgency::RealTime],
             features: vec![
                 "service_discovery".to_string(),
                 "zero_configuration".to_string(),
@@ -473,7 +469,7 @@ impl TransportCapabilities {
             ],
         }
     }
-    
+
     /// WebSocket transport capabilities
     pub fn websocket() -> Self {
         Self {
@@ -497,7 +493,7 @@ impl TransportCapabilities {
             ],
         }
     }
-    
+
     /// QUIC transport capabilities
     pub fn quic() -> Self {
         Self {
@@ -523,7 +519,7 @@ impl TransportCapabilities {
             ],
         }
     }
-    
+
     /// HTTP transport capabilities
     pub fn http() -> Self {
         Self {
@@ -547,7 +543,7 @@ impl TransportCapabilities {
             ],
         }
     }
-    
+
     /// HTTPS transport capabilities
     pub fn https() -> Self {
         let mut caps = Self::http();
@@ -562,14 +558,17 @@ impl TransportCapabilities {
 #[async_trait]
 pub trait TransportFactory: Send + Sync {
     /// Create a new transport instance
-    async fn create_transport(&self, config: &HashMap<String, String>) -> Result<Box<dyn Transport>>;
-    
+    async fn create_transport(
+        &self,
+        config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>>;
+
     /// Get the transport type this factory creates
     fn transport_type(&self) -> TransportType;
-    
+
     /// Get default configuration for this transport
     fn default_config(&self) -> HashMap<String, String>;
-    
+
     /// Validate configuration for this transport
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()>;
 }
@@ -581,15 +580,18 @@ pub struct TcpTransportFactory;
 
 #[async_trait]
 impl TransportFactory for TcpTransportFactory {
-    async fn create_transport(&self, _config: &HashMap<String, String>) -> Result<Box<dyn Transport>> {
+    async fn create_transport(
+        &self,
+        _config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>> {
         let transport = crate::transport::tcp_simple::SimpleTcpTransport::new();
         Ok(Box::new(transport))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::Tcp
     }
-    
+
     fn default_config(&self) -> HashMap<String, String> {
         let mut config = HashMap::new();
         config.insert("listen_port".to_string(), "0".to_string());
@@ -597,59 +599,77 @@ impl TransportFactory for TcpTransportFactory {
         config.insert("max_message_size".to_string(), "1048576".to_string()); // 1MB
         config
     }
-    
+
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(port_str) = config.get("listen_port") {
-            if port_str.parse::<u16>().is_err() {
-                return Err(crate::error::SynapseError::Config(
-                    "Invalid port number".to_string()
-                ));
-            }
+        if let Some(port_str) = config.get("listen_port")
+            && port_str.parse::<u16>().is_err()
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Invalid port number".to_string(),
+            ));
         }
         Ok(())
     }
 }
 
 /// UDP Transport Factory (temporarily disabled)
-// pub struct UdpTransportFactory;
-// 
-// #[async_trait]
-// impl TransportFactory for UdpTransportFactory {
-//     async fn create_transport(&self, config: &HashMap<String, String>) -> Result<Box<dyn Transport>> {
-//         // TODO: Implement simple UDP transport
-//         Err(crate::error::SynapseError::TransportError("UDP transport not yet implemented".to_string()))
-//     }
-//     
-//     fn transport_type(&self) -> TransportType {
-//         TransportType::Udp
-//     }
-//     
-//     fn default_config(&self) -> HashMap<String, String> {
-//         HashMap::new()
-//     }
-//
-//     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-//         Ok(())
-//     }
-// }
+pub struct UdpTransportFactory;
+
+#[async_trait]
+impl TransportFactory for UdpTransportFactory {
+    async fn create_transport(
+        &self,
+        config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>> {
+        // Remove SocketAddr creation, pass config directly
+        let transport = crate::transport::udp_unified::UdpTransportImpl::new(config).await?;
+        Ok(Box::new(transport) as Box<dyn Transport>)
+    }
+
+    fn transport_type(&self) -> TransportType {
+        TransportType::Udp
+    }
+
+    fn default_config(&self) -> HashMap<String, String> {
+        let mut cfg = HashMap::new();
+        cfg.insert("listen_port".to_string(), "9000".to_string());
+        cfg
+    }
+
+    fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
+        if let Some(port_str) = config.get("listen_port")
+            && port_str.parse::<u16>().is_err()
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Invalid port number".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Email Transport Factory (temporarily disabled)
 pub struct EmailTransportFactory;
 
 #[async_trait]
 impl TransportFactory for EmailTransportFactory {
-    async fn create_transport(&self, _config: &HashMap<String, String>) -> Result<Box<dyn Transport>> {
-        Err(crate::error::SynapseError::TransportError("Email transport not yet implemented".to_string()))
+    async fn create_transport(
+        &self,
+        _config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>> {
+        Err(crate::error::SynapseError::TransportError(
+            "Email transport not yet implemented".to_string(),
+        ))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::Email
     }
-    
+
     fn default_config(&self) -> HashMap<String, String> {
         HashMap::new()
     }
-    
+
     fn validate_config(&self, _config: &HashMap<String, String>) -> Result<()> {
         Ok(())
     }
@@ -661,51 +681,69 @@ pub struct MdnsTransportFactory;
 
 #[async_trait]
 impl TransportFactory for MdnsTransportFactory {
-    async fn create_transport(&self, _config: &HashMap<String, String>) -> Result<Box<dyn Transport>> {
-        // TODO: Re-enable mDNS transport after trait compatibility is fixed
-        Err(crate::error::SynapseError::TransportError("mDNS transport temporarily disabled".to_string()))
+    async fn create_transport(
+        &self,
+        _config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>> {
+        use crate::transport::mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig};
+        let entity_id = "mdns-factory-instance".to_string();
+        let local_port = 5353;
+        let config = Some(MdnsConfig::default());
+        match EnhancedMdnsTransport::new(entity_id, local_port, config).await {
+            Ok(transport) => Ok(Box::new(transport) as Box<dyn Transport>),
+            Err(e) => Err(crate::error::SynapseError::TransportError(format!(
+                "Failed to create mDNS transport: {e}"
+            ))),
+        }
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::AutoDiscovery
     }
-    
+
     fn default_config(&self) -> HashMap<String, String> {
         let mut config = HashMap::new();
-        config.insert("service_name".to_string(), "_synapse._tcp.local".to_string());
+        config.insert(
+            "service_name".to_string(),
+            "_synapse._tcp.local".to_string(),
+        );
         config.insert("local_port".to_string(), "0".to_string());
         config.insert("discovery_timeout_ms".to_string(), "5000".to_string());
         config.insert("max_message_size".to_string(), "65507".to_string()); // Max UDP
         config
     }
-    
+
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(service_name) = config.get("service_name") {
-            if !service_name.contains("._tcp.") && !service_name.contains("._udp.") {
-                return Err(crate::error::SynapseError::Config(
-                    "Service name must include protocol (_tcp. or _udp.)".to_string()
-                ));
-            }
+        if let Some(service_name) = config.get("service_name")
+            && !service_name.contains("._tcp.")
+            && !service_name.contains("._udp.")
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Service name must include protocol (_tcp. or _udp.)".to_string(),
+            ));
         }
         Ok(())
     }
 }
 
-// WebSocket Transport Factory (COMMENTED OUT - TO BE FIXED)
-/*
+// WebSocket Transport Factory (RE-ENABLED)
 pub struct WebSocketTransportFactory;
 
 #[async_trait]
 impl TransportFactory for WebSocketTransportFactory {
-    async fn create_transport(&self, config: &HashMap<String, String>) -> Result<Box<dyn Transport>> {
-        let transport = crate::transport::websocket_unified::WebSocketTransportImpl::new(config).await?;
+    async fn create_transport(
+        &self,
+        config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>> {
+        let transport =
+            crate::transport::websocket_unified::WebSocketTransportImpl::new(config).await?;
         Ok(Box::new(transport))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::WebSocket
     }
-    
+
     fn default_config(&self) -> HashMap<String, String> {
         let mut config = HashMap::new();
         config.insert("local_port".to_string(), "0".to_string());
@@ -713,35 +751,36 @@ impl TransportFactory for WebSocketTransportFactory {
         config.insert("max_message_size".to_string(), "16777216".to_string()); // 16MB
         config
     }
-    
+
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(port_str) = config.get("local_port") {
-            if port_str.parse::<u16>().is_err() {
-                return Err(crate::error::SynapseError::Config(
-                    "Invalid port number".to_string()
-                )));
-            }
+        if let Some(port_str) = config.get("local_port")
+            && port_str.parse::<u16>().is_err()
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Invalid port number".to_string(),
+            ));
         }
         Ok(())
     }
 }
-*/
 
-// QUIC Transport Factory (COMMENTED OUT - TO BE FIXED)
-/*
+// QUIC Transport Factory (RE-ENABLED)
 pub struct QuicTransportFactory;
 
 #[async_trait]
 impl TransportFactory for QuicTransportFactory {
-    async fn create_transport(&self, config: &HashMap<String, String>) -> Result<Box<dyn Transport>> {
+    async fn create_transport(
+        &self,
+        config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>> {
         let transport = crate::transport::quic_unified::QuicTransportImpl::new(config).await?;
         Ok(Box::new(transport))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::Quic
     }
-    
+
     fn default_config(&self) -> HashMap<String, String> {
         let mut config = HashMap::new();
         config.insert("bind_address".to_string(), "0.0.0.0:0".to_string());
@@ -750,36 +789,38 @@ impl TransportFactory for QuicTransportFactory {
         config.insert("max_message_size".to_string(), "10485760".to_string()); // 10MB
         config
     }
-    
+
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(addr_str) = config.get("bind_address") {
-            if addr_str.parse::<SocketAddr>().is_err() {
-                return Err(crate::error::SynapseError::Config(
-                    "Invalid socket address".to_string()
-                )));
-            }
+        if let Some(addr_str) = config.get("bind_address")
+            && addr_str.parse::<SocketAddr>().is_err()
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Invalid socket address".to_string(),
+            ));
         }
         Ok(())
     }
 }
-*/
 
 /// HTTP Transport Factory
-#[cfg(feature = "http")]
+// Removed unexpected cfg condition
 pub struct HttpTransportFactory;
 
-#[cfg(feature = "http")]
+// Removed unexpected cfg condition
 #[async_trait]
 impl TransportFactory for HttpTransportFactory {
-    async fn create_transport(&self, config: &HashMap<String, String>) -> Result<Box<dyn Transport>> {
+    async fn create_transport(
+        &self,
+        config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>> {
         let transport = crate::transport::http_unified::HttpTransportImpl::new(config).await?;
         Ok(Box::new(transport))
     }
-    
+
     fn transport_type(&self) -> TransportType {
         TransportType::Http
     }
-    
+
     fn default_config(&self) -> HashMap<String, String> {
         let mut config = HashMap::new();
         config.insert("use_https".to_string(), "true".to_string());
@@ -787,38 +828,41 @@ impl TransportFactory for HttpTransportFactory {
         config.insert("server_address".to_string(), "127.0.0.1".to_string());
         config.insert("timeout_ms".to_string(), "30000".to_string());
         config.insert("max_message_size".to_string(), "10485760".to_string()); // 10MB
-        config.insert("user_agent".to_string(), "Synapse-HTTP-Transport/1.0".to_string());
+        config.insert(
+            "user_agent".to_string(),
+            "Synapse-HTTP-Transport/1.0".to_string(),
+        );
         config
     }
-    
+
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
         // Validate server port
-        if let Some(port_str) = config.get("server_port") {
-            if port_str.parse::<u16>().is_err() {
-                return Err(crate::error::SynapseError::Config(
-                    "Invalid server port number".to_string()
-                ));
-            }
+        if let Some(port_str) = config.get("server_port")
+            && port_str.parse::<u16>().is_err()
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Invalid server port number".to_string(),
+            ));
         }
-        
+
         // Validate timeout
-        if let Some(timeout_str) = config.get("timeout_ms") {
-            if timeout_str.parse::<u64>().is_err() {
-                return Err(crate::error::SynapseError::Config(
-                    "Invalid timeout value".to_string()
-                ));
-            }
+        if let Some(timeout_str) = config.get("timeout_ms")
+            && timeout_str.parse::<u64>().is_err()
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Invalid timeout value".to_string(),
+            ));
         }
-        
+
         // Validate max message size
-        if let Some(size_str) = config.get("max_message_size") {
-            if size_str.parse::<usize>().is_err() {
-                return Err(crate::error::SynapseError::Config(
-                    "Invalid max message size".to_string()
-                ));
-            }
+        if let Some(size_str) = config.get("max_message_size")
+            && size_str.parse::<usize>().is_err()
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Invalid max message size".to_string(),
+            ));
         }
-        
+
         Ok(())
     }
 }
@@ -828,7 +872,6 @@ impl TransportFactory for HttpTransportFactory {
 pub struct UnifiedTransportManager {
     transports: HashMap<TransportType, Box<dyn Transport>>,
     target_preferences: HashMap<String, TransportType>, // Target ID -> preferred transport
-    metrics_cache: DashMap<String, HashMap<TransportType, TransportEstimate>>, // Performance metrics cache
     failover_policies: HashMap<TransportType, Vec<TransportType>>, // Failover order
     config: UnifiedTransportConfig,
 }
@@ -861,40 +904,46 @@ impl UnifiedTransportManager {
         let mut manager = Self {
             transports: HashMap::new(),
             target_preferences: HashMap::new(),
-            metrics_cache: DashMap::new(),
             failover_policies: HashMap::new(),
             config,
         };
-        
+
         // Set up default failover policies
         manager.setup_default_failover_policies();
-        
+
         Ok(manager)
     }
-    
+
     /// Register a transport implementation
     pub fn register_transport(&mut self, transport: Box<dyn Transport>) -> Result<()> {
         let transport_type = transport.transport_type();
-        
+
         if self.transports.contains_key(&transport_type) {
-            return Err(crate::error::SynapseError::TransportError(format!("Transport already registered: {}", transport_type)));
+            return Err(crate::error::SynapseError::TransportError(format!(
+                "Transport already registered: {transport_type}"
+            )));
         }
-        
+
         self.transports.insert(transport_type, transport);
-        
+
         Ok(())
     }
-    
+
     /// Send a message using the best available transport
-    pub async fn send_message(&self, target: &TransportTarget, message: &SecureMessage) -> Result<DeliveryReceipt> {
+    pub async fn send_message(
+        &self,
+        target: &TransportTarget,
+        message: &SecureMessage,
+    ) -> Result<DeliveryReceipt> {
         // Check if we have a preferred transport for this target
-        let transport_type = if let Some(preferred) = self.target_preferences.get(&target.identifier) {
-            *preferred
-        } else {
-            // No preference, try to determine best transport
-            self.determine_best_transport(target, message).await?
-        };
-        
+        let transport_type =
+            if let Some(preferred) = self.target_preferences.get(&target.identifier) {
+                *preferred
+            } else {
+                // No preference, try to determine best transport
+                self.determine_best_transport(target, message).await?
+            };
+
         // Try to send with selected transport
         if let Some(transport) = self.transports.get(&transport_type) {
             match transport.send_message(target, message).await {
@@ -904,42 +953,54 @@ impl UnifiedTransportManager {
                 Err(err) => {
                     // Transport failed, try failover if enabled
                     if self.config.enable_automatic_failover {
-                        return self.try_failover_transports(target, message, transport_type).await;
+                        return self
+                            .try_failover_transports(target, message, transport_type)
+                            .await;
                     }
                     return Err(err);
                 }
             }
         }
-        
+
         // No suitable transport found
-        Err(crate::error::SynapseError::TransportError(format!("No suitable transport found for target: {}", target.identifier)))
+        Err(crate::error::SynapseError::TransportError(format!(
+            "No suitable transport found for target: {}",
+            target.identifier
+        )))
     }
-    
+
     /// Try to send using failover transports
     async fn try_failover_transports(
-        &self, 
-        target: &TransportTarget, 
+        &self,
+        target: &TransportTarget,
         message: &SecureMessage,
         failed_transport: TransportType,
     ) -> Result<DeliveryReceipt> {
         if let Some(failover_list) = self.failover_policies.get(&failed_transport) {
             for transport_type in failover_list {
-                if let Some(transport) = self.transports.get(transport_type) {
-                    if transport.can_reach(target).await {
-                        match transport.send_message(target, message).await {
-                            Ok(receipt) => return Ok(receipt),
-                            Err(_) => continue, // Try next failover transport
-                        }
+                if let Some(transport) = self.transports.get(transport_type)
+                    && transport.can_reach(target).await
+                {
+                    match transport.send_message(target, message).await {
+                        Ok(receipt) => return Ok(receipt),
+                        Err(_) => continue, // Try next failover transport
                     }
                 }
             }
         }
-        
-        Err(crate::error::SynapseError::TransportError(format!("All transports failed for target: {}", target.identifier)))
+
+        Err(crate::error::SynapseError::TransportError(format!(
+            "All transports failed for target: {}",
+            target.identifier
+        )))
     }
-    
+
     /// Determine best transport for a target and message
-    async fn determine_best_transport(&self, target: &TransportTarget, _message: &SecureMessage) -> Result<TransportType> {
+    async fn determine_best_transport(
+        &self,
+        target: &TransportTarget,
+        _message: &SecureMessage,
+    ) -> Result<TransportType> {
         // If target specifies preferred transports and we have one, use the first available
         if !target.preferred_transports.is_empty() {
             for preferred in &target.preferred_transports {
@@ -948,119 +1009,144 @@ impl UnifiedTransportManager {
                 }
             }
         }
-        
+
         // Collect metrics for all transports that can reach this target
         let mut available_transports = Vec::new();
-        
+
         for (transport_type, transport) in &self.transports {
             if transport.can_reach(target).await {
                 let metrics = transport.estimate_metrics(target).await?;
                 available_transports.push((*transport_type, metrics));
             }
         }
-        
+
         if available_transports.is_empty() {
-            return Err(crate::error::SynapseError::TransportError(format!("No transports can reach target: {}", target.identifier)));
+            return Err(crate::error::SynapseError::TransportError(format!(
+                "No transports can reach target: {}",
+                target.identifier
+            )));
         }
-        
+
         // Sort by best metrics based on configuration and message
         available_transports.sort_by(|(_, a), (_, b)| {
             // For now, we'll use latency as the primary sorting criterion
             // since we don't have synchronous response field on SecureMessage
             // and real_time_capability field on TransportEstimate
-            
+
             // First compare by availability
             match (a.available, b.available) {
                 (true, false) => return std::cmp::Ordering::Less,
                 (false, true) => return std::cmp::Ordering::Greater,
                 _ => {} // Both same availability, continue with other metrics
             }
-            
+
             // Then by reliability
-            let reliability_cmp = b.reliability.partial_cmp(&a.reliability).unwrap_or(std::cmp::Ordering::Equal);
+            let reliability_cmp = b
+                .reliability
+                .partial_cmp(&a.reliability)
+                .unwrap_or(std::cmp::Ordering::Equal);
             if reliability_cmp != std::cmp::Ordering::Equal {
                 return reliability_cmp;
             }
-            
+
             // Finally by latency (lower is better)
-            a.latency.partial_cmp(&b.latency).unwrap_or(std::cmp::Ordering::Equal)
+            a.latency
+                .partial_cmp(&b.latency)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-        
+
         // Return the best transport
         Ok(available_transports[0].0)
     }
-    
+
     /// Set up default failover policies
     fn setup_default_failover_policies(&mut self) {
         // WebSocket failover
         self.failover_policies.insert(
             TransportType::WebSocket,
-            vec![TransportType::Http, TransportType::Email]
+            vec![TransportType::Http, TransportType::Email],
         );
-        
+
         // HTTP failover
         self.failover_policies.insert(
             TransportType::Http,
-            vec![TransportType::WebSocket, TransportType::Email]
+            vec![TransportType::WebSocket, TransportType::Email],
         );
-        
+
         // Email failover (last resort)
         self.failover_policies.insert(
             TransportType::Email,
-            vec![TransportType::Http, TransportType::WebSocket]
+            vec![TransportType::Http, TransportType::WebSocket],
         );
-        
+
         // QUIC failover
         self.failover_policies.insert(
             TransportType::Quic,
-            vec![TransportType::WebSocket, TransportType::Http, TransportType::Email]
+            vec![
+                TransportType::WebSocket,
+                TransportType::Http,
+                TransportType::Email,
+            ],
         );
     }
-    
+
     /// Receive messages from all transports
     pub async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
         let mut all_messages = Vec::new();
-        
+
         for transport in self.transports.values() {
             match transport.receive_messages().await {
                 Ok(mut messages) => all_messages.append(&mut messages),
                 Err(_) => continue, // Skip transports with errors
             }
         }
-        
+
         Ok(all_messages)
     }
-    
+
     /// Receive messages from a specific transport
-    pub async fn receive_from_transport(&self, transport_type: TransportType) -> Result<Vec<IncomingMessage>> {
+    pub async fn receive_from_transport(
+        &self,
+        transport_type: TransportType,
+    ) -> Result<Vec<IncomingMessage>> {
         if let Some(transport) = self.transports.get(&transport_type) {
             return transport.receive_messages().await;
         }
-        
-        Err(crate::error::SynapseError::TransportError(format!("Transport not found: {}", transport_type)))
+
+        Err(crate::error::SynapseError::TransportError(format!(
+            "Transport not found: {transport_type}"
+        )))
     }
-    
+
     /// Start all transports
     pub async fn start_all_transports(&self) -> Result<()> {
         for transport in self.transports.values() {
             if let Err(e) = transport.start().await {
                 // Log the error but continue with other transports
-                tracing::error!("Failed to start transport {}: {}", transport.transport_type(), e);
+                tracing::error!(
+                    "Failed to start transport {}: {}",
+                    transport.transport_type(),
+                    e
+                );
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Stop all transports
     pub async fn stop_all_transports(&self) -> Result<()> {
         for transport in self.transports.values() {
             if let Err(e) = transport.stop().await {
                 // Log the error but continue stopping other transports
-                tracing::error!("Failed to stop transport {}: {}", transport.transport_type(), e);
+                tracing::error!(
+                    "Failed to stop transport {}: {}",
+                    transport.transport_type(),
+                    e
+                );
             }
         }
-        
+
         Ok(())
     }
 }
@@ -1070,22 +1156,9 @@ pub fn create_standard_factories() -> Vec<Box<dyn TransportFactory>> {
     let factories: Vec<Box<dyn TransportFactory>> = vec![
         Box::new(TcpTransportFactory),
         Box::new(super::udp_unified::UdpTransportFactory),
-        // Enhanced transports now available
         Box::new(EmailTransportFactory),
         Box::new(MdnsTransportFactory),
-        // WebSocket and QUIC transports available for future enablement
-        // Box::new(WebSocketTransportFactory),
-        // Box::new(QuicTransportFactory),
+        Box::new(HttpTransportFactory),
     ];
-    
-    #[cfg(feature = "http")]
-    {
-        let mut factories = factories;
-        factories.push(Box::new(HttpTransportFactory));
-        factories
-    }
-    #[cfg(not(feature = "http"))]
-    {
-        factories
-    }
+    factories
 }

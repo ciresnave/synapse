@@ -103,11 +103,11 @@ impl CircuitBreaker {
         let state = self.state.lock().unwrap();
         match *state {
             CircuitBreakerState::Closed { failures } => 
-                format!("Closed (failures: {})", failures),
+                format!("Closed (failures: {failures})"),
             CircuitBreakerState::Open { opened_at } => 
                 format!("Open (for {:?})", opened_at.elapsed()),
             CircuitBreakerState::HalfOpen { successful_calls } => 
-                format!("Half-Open (successful calls: {})", successful_calls),
+                format!("Half-Open (successful calls: {successful_calls})"),
         }
     }
     
@@ -197,6 +197,12 @@ pub struct ConnectionHealthMonitor {
     last_success: Mutex<Option<Instant>>,
     last_failure: Mutex<Option<Instant>>,
     failure_count: Mutex<u32>,
+}
+
+impl Default for ConnectionHealthMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConnectionHealthMonitor {

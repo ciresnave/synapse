@@ -1,23 +1,23 @@
 //! Transport Manager - Unified abstraction layer for all transport mechanisms
-//! 
+//!
 //! The TransportManager provides a single interface for applications to send/receive
 //! messages across all available transport types, with intelligent transport selection,
 //! automatic failover, and unified metrics.
 
-use crate::{
-    types::SecureMessage,
-    error::Result,
-    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
-};
 use super::abstraction::*;
-use std::{
-    time::{Duration, Instant},
-    sync::{Arc, RwLock},
-    collections::HashMap,
+use crate::{
+    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
+    error::Result,
+    types::SecureMessage,
 };
-use serde::{Serialize, Deserialize};
-use tracing::{info, debug, warn};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 use tokio::sync::{Mutex, RwLock as TokioRwLock};
+use tracing::{debug, info, warn};
 
 /// Configuration for the TransportManager
 #[derive(Debug, Clone)]
@@ -106,7 +106,7 @@ impl Default for FailoverConfig {
             max_retries: 3,
             retry_delay: Duration::from_millis(500),
             max_retry_delay: Duration::from_secs(30),
-            failure_threshold: 0.5, // 50% failure rate
+            failure_threshold: 0.5,                     // 50% failure rate
             recovery_timeout: Duration::from_secs(300), // 5 minutes
         }
     }
@@ -141,7 +141,7 @@ pub struct TransportManager {
     /// Available transport instances
     transports: TokioRwLock<HashMap<TransportType, Box<dyn Transport>>>,
     /// Transport factories for creating new instances
-    factories: RwLock<HashMap<TransportType, Box<dyn TransportFactory>>>,
+    factories: RwLock<HashMap<TransportType, Arc<Box<dyn TransportFactory>>>>,
     /// Circuit breakers per transport
     circuit_breakers: RwLock<HashMap<TransportType, Arc<CircuitBreaker>>>,
     /// Unified metrics
@@ -186,6 +186,46 @@ impl UnifiedMetrics {
 }
 
 impl TransportManager {
+    /// Public API: Select optimal transport for a target
+    pub async fn select_optimal_transport(
+        &self,
+        target: &TransportTarget,
+    ) -> Result<TransportType> {
+        let available_transports: Vec<_> = {
+            let transports = self.transports.read().await;
+            transports.keys().cloned().collect()
+        };
+
+        if available_transports.is_empty() {
+            return Err(crate::error::SynapseError::TransportError(
+                "No transports available".to_string(),
+            ));
+        }
+
+        // Check target preferences first
+        for &preferred in &target.preferred_transports {
+            if available_transports.contains(&preferred) {
+                let transports = self.transports.read().await;
+                if let Some(transport) = transports.get(&preferred)
+                    && transport.can_reach(target).await {
+                        return Ok(preferred);
+                    }
+            }
+        }
+
+        // Fall back to the first available transport that can reach the target
+        let transports = self.transports.read().await;
+        for &transport_type in &available_transports {
+            if let Some(transport) = transports.get(&transport_type)
+                && transport.can_reach(target).await {
+                    return Ok(transport_type);
+                }
+        }
+
+        Err(crate::error::SynapseError::TransportError(
+            "No suitable transport found".to_string(),
+        ))
+    }
     /// Create a new TransportManager
     pub fn new(config: TransportManagerConfig) -> Self {
         Self {
@@ -205,43 +245,47 @@ impl TransportManager {
     pub async fn register_factory(&self, factory: Box<dyn TransportFactory>) -> Result<()> {
         let transport_type = factory.transport_type();
         info!("Registering transport factory for {:?}", transport_type);
-        
+
         // Create circuit breaker for this transport
-        let circuit_breaker = Arc::new(CircuitBreaker::new(self.config.circuit_breaker_config.clone()));
-        
+        let circuit_breaker = Arc::new(CircuitBreaker::new(
+            self.config.circuit_breaker_config.clone(),
+        ));
+
         {
             let mut factories = self.factories.write().unwrap();
-            factories.insert(transport_type, factory);
+            factories.insert(transport_type, Arc::new(factory));
         }
-        
+
         {
             let mut breakers = self.circuit_breakers.write().unwrap();
             breakers.insert(transport_type, circuit_breaker);
         }
-        
+
         {
             let mut status = self.transport_status.write().await;
             status.insert(transport_type, TransportStatus::Stopped);
         }
-        
+
         Ok(())
     }
 
     /// Initialize and start all enabled transports
     pub async fn start(&self) -> Result<()> {
-        info!("Starting TransportManager with {} enabled transports", 
-               self.config.enabled_transports.len());
-        
+        info!(
+            "Starting TransportManager with {} enabled transports",
+            self.config.enabled_transports.len()
+        );
+
         for &transport_type in &self.config.enabled_transports {
             if let Err(e) = self.start_transport(transport_type).await {
                 warn!("Failed to start transport {:?}: {}", transport_type, e);
                 // Continue with other transports
             }
         }
-        
+
         // Start metrics update task
         self.start_metrics_task().await;
-        
+
         info!("TransportManager started successfully");
         Ok(())
     }
@@ -249,44 +293,54 @@ impl TransportManager {
     /// Start a specific transport
     async fn start_transport(&self, transport_type: TransportType) -> Result<()> {
         debug!("Starting transport {:?}", transport_type);
-        
+
         // Update status to starting
-        {
-            let mut status = self.transport_status.write().await;
-            status.insert(transport_type, TransportStatus::Starting);
-        }
-        
-        // Get factory and create transport instance
-        let transport = {
+        let mut status = self.transport_status.write().await;
+        status.insert(transport_type, TransportStatus::Starting);
+
+        // Hold the lock, call factory methods, and only store owned values after
+        let (factory, config) = {
             let factories = self.factories.read().unwrap();
             if let Some(factory) = factories.get(&transport_type) {
-                let config = self.config.transport_configs
+                let config = self
+                    .config
+                    .transport_configs
                     .get(&transport_type)
                     .cloned()
                     .unwrap_or_else(|| factory.default_config());
-                factory.create_transport(&config).await?
+                (Arc::clone(factory), config)
             } else {
-                return Err(crate::error::SynapseError::TransportError(
-                    format!("No factory registered for transport {:?}", transport_type)
-                ));
+                return Err(crate::error::SynapseError::TransportError(format!(
+                    "Transport {transport_type:?} not registered"
+                )));
             }
         };
-        
+        // factories guard dropped here
+
+        let transport = match factory.create_transport(&config).await {
+            Ok(transport) => transport,
+            Err(e) => {
+                return Err(crate::error::SynapseError::TransportError(format!(
+                    "Failed to create transport {transport_type:?}: {e}"
+                )));
+            }
+        };
+
         // Start the transport
         transport.start().await?;
-        
+
         // Store the transport instance
         {
             let mut transports = self.transports.write().await;
             transports.insert(transport_type, transport);
         }
-        
+
         // Update status to running
         {
             let mut status = self.transport_status.write().await;
             status.insert(transport_type, TransportStatus::Running);
         }
-        
+
         info!("Transport {:?} started successfully", transport_type);
         Ok(())
     }
@@ -294,18 +348,18 @@ impl TransportManager {
     /// Stop all transports gracefully
     pub async fn stop(&self) -> Result<()> {
         info!("Stopping TransportManager");
-        
+
         let transport_types: Vec<TransportType> = {
             let transports = self.transports.read().await;
             transports.keys().cloned().collect()
         };
-        
+
         for transport_type in transport_types {
             if let Err(e) = self.stop_transport(transport_type).await {
                 warn!("Failed to stop transport {:?}: {}", transport_type, e);
             }
         }
-        
+
         info!("TransportManager stopped");
         Ok(())
     }
@@ -313,13 +367,13 @@ impl TransportManager {
     /// Stop a specific transport
     async fn stop_transport(&self, transport_type: TransportType) -> Result<()> {
         debug!("Stopping transport {:?}", transport_type);
-        
+
         // Update status to stopping
         {
             let mut status = self.transport_status.write().await;
             status.insert(transport_type, TransportStatus::Stopping);
         }
-        
+
         // Stop the transport
         {
             let mut transports = self.transports.write().await;
@@ -327,41 +381,50 @@ impl TransportManager {
                 transport.stop().await?;
             }
         }
-        
+
         // Update status to stopped
         {
             let mut status = self.transport_status.write().await;
             status.insert(transport_type, TransportStatus::Stopped);
         }
-        
+
         info!("Transport {:?} stopped", transport_type);
         Ok(())
     }
 
     /// Send a message using the best available transport
-    pub async fn send_message(&self, target: &TransportTarget, message: &SecureMessage) -> Result<DeliveryReceipt> {
+    pub async fn send_message(
+        &self,
+        target: &TransportTarget,
+        message: &SecureMessage,
+    ) -> Result<DeliveryReceipt> {
         debug!("Sending message to target: {}", target.identifier);
-        
+
         let selected_transports = self.select_transports(target).await?;
-        
+
         for transport_type in selected_transports {
             // Check if transport is failed and in recovery
             if self.is_transport_in_recovery(transport_type).await {
                 debug!("Transport {:?} is in recovery, skipping", transport_type);
                 continue;
             }
-            
-            match self.try_send_with_transport(transport_type, target, message).await {
+
+            match self
+                .try_send_with_transport(transport_type, target, message)
+                .await
+            {
                 Ok(receipt) => {
                     self.record_success(transport_type).await;
-                    self.update_transport_metrics(transport_type, true, receipt.delivery_time).await;
+                    self.update_transport_metrics(transport_type, true, receipt.delivery_time)
+                        .await;
                     return Ok(receipt);
                 }
                 Err(e) => {
                     warn!("Failed to send via {:?}: {}", transport_type, e);
                     self.record_failure(transport_type).await;
-                    self.update_transport_metrics(transport_type, false, Duration::from_secs(0)).await;
-                    
+                    self.update_transport_metrics(transport_type, false, Duration::from_secs(0))
+                        .await;
+
                     // Check if we should mark this transport as failed
                     if self.should_mark_transport_failed(transport_type).await {
                         self.mark_transport_failed(transport_type).await;
@@ -369,24 +432,30 @@ impl TransportManager {
                 }
             }
         }
-        
-        Err(crate::error::SynapseError::TransportError("All transports failed".to_string()))
+
+        Err(crate::error::SynapseError::TransportError(
+            "All transports failed".to_string(),
+        ))
     }
 
     /// Receive messages from all active transports
     pub async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
         let mut all_messages = Vec::new();
-        
+
         let transports = self.transports.read().await;
         for (transport_type, transport) in transports.iter() {
             // Skip failed transports
             if self.is_transport_in_recovery(*transport_type).await {
                 continue;
             }
-            
+
             match transport.receive_messages().await {
                 Ok(mut messages) => {
-                    debug!("Received {} messages from {:?}", messages.len(), transport_type);
+                    debug!(
+                        "Received {} messages from {:?}",
+                        messages.len(),
+                        transport_type
+                    );
                     all_messages.append(&mut messages);
                 }
                 Err(e) => {
@@ -394,7 +463,7 @@ impl TransportManager {
                 }
             }
         }
-        
+
         Ok(all_messages)
     }
 
@@ -415,53 +484,22 @@ impl TransportManager {
     }
 
     /// Get capabilities for a specific transport type
-    pub async fn get_transport_capabilities(&self, transport_type: TransportType) -> Option<TransportCapabilities> {
+    pub async fn get_transport_capabilities(
+        &self,
+        transport_type: TransportType,
+    ) -> Option<TransportCapabilities> {
         let transports = self.transports.read().await;
-        if let Some(transport) = transports.get(&transport_type) {
-            Some(transport.capabilities())
-        } else {
-            None
-        }
-    }
-
-    /// Select optimal transport for a target
-    pub async fn select_optimal_transport(&self, target: &TransportTarget) -> Result<TransportType> {
-        let available_transports: Vec<_> = {
-            let transports = self.transports.read().await;
-            transports.keys().cloned().collect()
-        };
-
-        if available_transports.is_empty() {
-            return Err(crate::error::SynapseError::TransportError("No transports available".to_string()));
-        }
-
-        // Check target preferences first
-        for &preferred in &target.preferred_transports {
-            if available_transports.contains(&preferred) {
-                let transports = self.transports.read().await;
-                if let Some(transport) = transports.get(&preferred) {
-                    if transport.can_reach(target).await {
-                        return Ok(preferred);
-                    }
-                }
-            }
-        }
-
-        // Fall back to the first available transport that can reach the target
-        let transports = self.transports.read().await;
-        for &transport_type in &available_transports {
-            if let Some(transport) = transports.get(&transport_type) {
-                if transport.can_reach(target).await {
-                    return Ok(transport_type);
-                }
-            }
-        }
-
-        Err(crate::error::SynapseError::TransportError("No suitable transport found".to_string()))
+        transports
+            .get(&transport_type)
+            .map(|transport| transport.capabilities())
     }
 
     /// Estimate delivery for a specific transport and target
-    pub async fn estimate_delivery(&self, target: &TransportTarget, transport_type: TransportType) -> Result<DeliveryEstimate> {
+    pub async fn estimate_delivery(
+        &self,
+        target: &TransportTarget,
+        transport_type: TransportType,
+    ) -> Result<DeliveryEstimate> {
         let transports = self.transports.read().await;
         if let Some(transport) = transports.get(&transport_type) {
             let estimate = transport.estimate_metrics(target).await?;
@@ -472,9 +510,9 @@ impl TransportManager {
                 cost_score: estimate.cost,
             })
         } else {
-            Err(crate::error::SynapseError::TransportError(
-                format!("Transport {:?} not available", transport_type)
-            ))
+            Err(crate::error::SynapseError::TransportError(format!(
+                "Transport {transport_type:?} not available"
+            )))
         }
     }
 
@@ -482,55 +520,46 @@ impl TransportManager {
     pub async fn get_metrics_summary(&self) -> std::collections::HashMap<String, TransportMetrics> {
         let metrics = self.metrics.read().unwrap();
         let mut summary = std::collections::HashMap::new();
-        
+
         for (transport_type, transport_metrics) in &metrics.transport_metrics {
             summary.insert(transport_type.to_string(), transport_metrics.clone());
         }
-        
+
         summary
     }
 
     /// Select optimal transports for a target (ordered by preference)
     async fn select_transports(&self, target: &TransportTarget) -> Result<Vec<TransportType>> {
         match self.config.selection_policy {
-            TransportSelectionPolicy::FirstAvailable => {
-                self.select_first_available().await
-            }
-            TransportSelectionPolicy::UrgencyBased => {
-                self.select_by_urgency(target.urgency).await
-            }
-            TransportSelectionPolicy::PerformanceBased => {
-                self.select_by_performance(target).await
-            }
-            TransportSelectionPolicy::Adaptive => {
-                self.select_adaptive(target).await
-            }
-            TransportSelectionPolicy::RoundRobin => {
-                self.select_round_robin().await
-            }
-            TransportSelectionPolicy::PreferenceOrder => {
-                self.select_by_preference(target).await
-            }
+            TransportSelectionPolicy::FirstAvailable => self.select_first_available().await,
+            TransportSelectionPolicy::UrgencyBased => self.select_by_urgency(target.urgency).await,
+            TransportSelectionPolicy::PerformanceBased => self.select_by_performance(target).await,
+            TransportSelectionPolicy::Adaptive => self.select_adaptive(target).await,
+            TransportSelectionPolicy::RoundRobin => self.select_round_robin().await,
+            TransportSelectionPolicy::PreferenceOrder => self.select_by_preference(target).await,
         }
     }
 
     async fn select_first_available(&self) -> Result<Vec<TransportType>> {
         let status = self.transport_status.read().await;
-        let available: Vec<TransportType> = status.iter()
+        let available: Vec<TransportType> = status
+            .iter()
             .filter(|(_, status)| **status == TransportStatus::Running)
             .map(|(&transport_type, _)| transport_type)
             .collect();
-        
+
         if available.is_empty() {
-            return Err(crate::error::SynapseError::TransportError("No transports available".to_string()));
+            return Err(crate::error::SynapseError::TransportError(
+                "No transports available".to_string(),
+            ));
         }
-        
+
         Ok(available)
     }
 
     async fn select_by_urgency(&self, urgency: MessageUrgency) -> Result<Vec<TransportType>> {
         let mut suitable_transports = Vec::new();
-        
+
         let transports = self.transports.read().await;
         for (&transport_type, transport) in transports.iter() {
             let capabilities = transport.capabilities();
@@ -538,7 +567,7 @@ impl TransportManager {
                 suitable_transports.push(transport_type);
             }
         }
-        
+
         // Sort by urgency preference
         match urgency {
             MessageUrgency::Critical | MessageUrgency::RealTime => {
@@ -572,53 +601,56 @@ impl TransportManager {
                 });
             }
         }
-        
+
         Ok(suitable_transports)
     }
 
     async fn select_by_performance(&self, target: &TransportTarget) -> Result<Vec<TransportType>> {
         let mut candidates = Vec::new();
-        
+
         let transports = self.transports.read().await;
         for (&transport_type, transport) in transports.iter() {
-            if transport.can_reach(target).await {
-                if let Ok(estimate) = transport.estimate_metrics(target).await {
+            if transport.can_reach(target).await
+                && let Ok(estimate) = transport.estimate_metrics(target).await {
                     candidates.push((transport_type, estimate));
                 }
-            }
         }
-        
+
         // Sort by performance score
         let weights = self.selection_weights.read().unwrap().clone();
         candidates.sort_by(|(_, a), (_, b)| {
             let score_a = self.calculate_performance_score(a, &weights);
             let score_b = self.calculate_performance_score(b, &weights);
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-        
+
         Ok(candidates.into_iter().map(|(t, _)| t).collect())
     }
 
     async fn select_adaptive(&self, target: &TransportTarget) -> Result<Vec<TransportType>> {
         // Start with performance-based selection
         let mut selection = self.select_by_performance(target).await?;
-        
-        // Adjust based on recent failures and circuit breaker state
-        let breakers = self.circuit_breakers.read().unwrap();
+
+        let mut breaker: Option<Arc<CircuitBreaker>> = None;
         selection.retain(|&transport_type| {
-            if let Some(breaker) = breakers.get(&transport_type) {
-                breaker.get_state() != crate::circuit_breaker::CircuitState::Open
-            } else {
-                true
-            }
+            let breakers = self.circuit_breakers.read().unwrap();
+            breaker = breakers.get(&transport_type).cloned();
+            breaker
+                .as_ref()
+                .map(|b| b.get_state() != crate::circuit_breaker::CircuitState::Open)
+                .unwrap_or(false)
         });
-        
+
         // If no transports pass circuit breaker test, fall back to urgency-based
         if selection.is_empty() {
-            warn!("All transports have open circuit breakers, falling back to urgency-based selection");
+            warn!(
+                "All transports have open circuit breakers, falling back to urgency-based selection"
+            );
             selection = self.select_by_urgency(target.urgency).await?;
         }
-        
+
         Ok(selection)
     }
 
@@ -627,11 +659,11 @@ impl TransportManager {
         if available.is_empty() {
             return Ok(available);
         }
-        
+
         let mut index = self.round_robin_index.lock().await;
         let selected_index = *index % available.len();
         *index = (*index + 1) % available.len();
-        
+
         // Return selected transport first, then others as fallback
         let mut result = vec![available[selected_index]];
         for (i, &transport) in available.iter().enumerate() {
@@ -639,50 +671,55 @@ impl TransportManager {
                 result.push(transport);
             }
         }
-        
+
         Ok(result)
     }
 
     async fn select_by_preference(&self, target: &TransportTarget) -> Result<Vec<TransportType>> {
         let mut result = Vec::new();
         let available = self.select_first_available().await?;
-        
+
         // Add preferred transports first
         for &preferred in &target.preferred_transports {
             if available.contains(&preferred) {
                 result.push(preferred);
             }
         }
-        
+
         // Add remaining available transports
         for &transport in &available {
             if !result.contains(&transport) {
                 result.push(transport);
             }
         }
-        
+
         Ok(result)
     }
 
-    fn calculate_performance_score(&self, estimate: &TransportEstimate, weights: &SelectionWeights) -> f64 {
+    fn calculate_performance_score(
+        &self,
+        estimate: &TransportEstimate,
+        weights: &SelectionWeights,
+    ) -> f64 {
         let latency_score = 1.0 / (1.0 + estimate.latency.as_secs_f64());
         let reliability_score = estimate.reliability;
         let bandwidth_score = (estimate.bandwidth as f64).log10() / 10.0; // Normalize bandwidth
         let cost_score = 1.0 / (1.0 + estimate.cost);
         let availability_score = if estimate.available { 1.0 } else { 0.0 };
-        
-        (latency_score * weights.latency +
-         reliability_score * weights.reliability +
-         bandwidth_score * weights.bandwidth +
-         cost_score * weights.cost +
-         availability_score * weights.capability_match) * estimate.confidence
+
+        (latency_score * weights.latency
+            + reliability_score * weights.reliability
+            + bandwidth_score * weights.bandwidth
+            + cost_score * weights.cost
+            + availability_score * weights.capability_match)
+            * estimate.confidence
     }
 
     async fn try_send_with_transport(
-        &self, 
-        transport_type: TransportType, 
-        target: &TransportTarget, 
-        message: &SecureMessage
+        &self,
+        transport_type: TransportType,
+        target: &TransportTarget,
+        message: &SecureMessage,
     ) -> Result<DeliveryReceipt> {
         let transports = self.transports.read().await;
         if let Some(transport) = transports.get(&transport_type) {
@@ -691,15 +728,15 @@ impl TransportManager {
                 let breakers = self.circuit_breakers.read().unwrap();
                 breakers.get(&transport_type).cloned()
             };
-            
+
             if let Some(breaker) = circuit_breaker {
                 // Check if circuit breaker allows the request
                 if breaker.get_state() == crate::circuit_breaker::CircuitState::Open {
-                    return Err(crate::error::SynapseError::TransportError(
-                        format!("Circuit breaker is open for transport {:?}", transport_type)
-                    ));
+                    return Err(crate::error::SynapseError::TransportError(format!(
+                        "Circuit breaker is open for transport {transport_type:?}"
+                    )));
                 }
-                
+
                 // Attempt the operation
                 match transport.send_message(target, message).await {
                     Ok(receipt) => {
@@ -707,7 +744,9 @@ impl TransportManager {
                         Ok(receipt)
                     }
                     Err(e) => {
-                        breaker.record_outcome(RequestOutcome::Failure(e.to_string())).await;
+                        breaker
+                            .record_outcome(RequestOutcome::Failure(e.to_string()))
+                            .await;
                         Err(e)
                     }
                 }
@@ -715,31 +754,49 @@ impl TransportManager {
                 transport.send_message(target, message).await
             }
         } else {
-            Err(crate::error::SynapseError::TransportError(
-                format!("Transport {:?} not available", transport_type)
-            ))
+            Err(crate::error::SynapseError::TransportError(format!(
+                "Transport {transport_type:?} not available"
+            )))
         }
     }
 
     async fn record_success(&self, transport_type: TransportType) {
-        if let Ok(breakers) = self.circuit_breakers.read() {
-            if let Some(breaker) = breakers.get(&transport_type) {
-                breaker.record_outcome(RequestOutcome::Success).await;
+        let breaker = {
+            if let Ok(breakers) = self.circuit_breakers.read() {
+                breakers.get(&transport_type).cloned()
+            } else {
+                None
             }
+        };
+        // The lock is now released here
+
+        if let Some(breaker) = breaker {
+            breaker.record_outcome(RequestOutcome::Success).await;
         }
     }
 
     async fn record_failure(&self, transport_type: TransportType) {
-        if let Ok(breakers) = self.circuit_breakers.read() {
-            if let Some(breaker) = breakers.get(&transport_type) {
-                breaker.record_outcome(RequestOutcome::Failure("Transport operation failed".to_string())).await;
+        let breaker = {
+            if let Ok(breakers) = self.circuit_breakers.read() {
+                breakers.get(&transport_type).cloned()
+            } else {
+                None
             }
+        };
+        // The lock is now released here
+
+        if let Some(breaker) = breaker {
+            breaker
+                .record_outcome(RequestOutcome::Failure(
+                    "Transport operation failed".to_string(),
+                ))
+                .await;
         }
     }
 
     async fn should_mark_transport_failed(&self, transport_type: TransportType) -> bool {
-        if let Ok(breakers) = self.circuit_breakers.read() {
-            if let Some(breaker) = breakers.get(&transport_type) {
+        if let Ok(breakers) = self.circuit_breakers.read()
+            && let Some(breaker) = breakers.get(&transport_type) {
                 let stats = breaker.get_stats();
                 let total_requests = stats.total_requests;
                 if total_requests > 0 {
@@ -747,19 +804,18 @@ impl TransportManager {
                     return failure_rate > self.config.failover_config.failure_threshold;
                 }
             }
-        }
         false
     }
 
     async fn mark_transport_failed(&self, transport_type: TransportType) {
         warn!("Marking transport {:?} as failed", transport_type);
         let recovery_time = Instant::now() + self.config.failover_config.recovery_timeout;
-        
+
         {
             let mut failed = self.failed_transports.write().await;
             failed.insert(transport_type, recovery_time);
         }
-        
+
         {
             let mut status = self.transport_status.write().await;
             status.insert(transport_type, TransportStatus::Failed);
@@ -775,42 +831,49 @@ impl TransportManager {
         }
     }
 
-    async fn update_transport_metrics(&self, transport_type: TransportType, success: bool, latency: Duration) {
+    async fn update_transport_metrics(
+        &self,
+        transport_type: TransportType,
+        success: bool,
+        latency: Duration,
+    ) {
         let mut metrics = self.metrics.write().unwrap();
-        
+
         if success {
             metrics.total_messages_sent += 1;
         } else {
             metrics.total_failures += 1;
         }
-        
+
         // Update per-transport metrics
-        let transport_metrics = metrics.transport_metrics
+        let transport_metrics = metrics
+            .transport_metrics
             .entry(transport_type)
-            .or_insert_with(|| {
-                let mut tm = TransportMetrics::default();
-                tm.transport_type = transport_type;
-                tm
+            .or_insert_with(|| TransportMetrics {
+                transport_type,
+                ..Default::default()
             });
-        
+
         if success {
             transport_metrics.messages_sent += 1;
             // Update running average latency
             let total_messages = transport_metrics.messages_sent;
             let old_avg_ms = transport_metrics.average_latency_ms as f64;
             let new_latency_ms = latency.as_millis() as f64;
-            let new_avg_ms = (old_avg_ms * (total_messages - 1) as f64 + new_latency_ms) / total_messages as f64;
+            let new_avg_ms =
+                (old_avg_ms * (total_messages - 1) as f64 + new_latency_ms) / total_messages as f64;
             transport_metrics.average_latency_ms = new_avg_ms as u64;
         } else {
             transport_metrics.send_failures += 1;
         }
-        
+
         // Update reliability score
         let total_attempts = transport_metrics.messages_sent + transport_metrics.send_failures;
         if total_attempts > 0 {
-            transport_metrics.reliability_score = transport_metrics.messages_sent as f64 / total_attempts as f64;
+            transport_metrics.reliability_score =
+                transport_metrics.messages_sent as f64 / total_attempts as f64;
         }
-        
+
         transport_metrics.touch();
         metrics.touch();
     }
@@ -818,40 +881,41 @@ impl TransportManager {
     async fn start_metrics_task(&self) {
         let metrics = Arc::clone(&self.metrics);
         let interval = self.config.metrics_update_interval;
-        
+
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
-            
+
             loop {
                 interval_timer.tick().await;
-                
+
                 // Update unified metrics
                 let mut metrics_guard = metrics.write().unwrap();
-                
+
                 // Calculate overall reliability
                 let total_sent = metrics_guard.total_messages_sent;
                 let total_failed = metrics_guard.total_failures;
                 let total_attempts = total_sent + total_failed;
-                
+
                 if total_attempts > 0 {
                     metrics_guard.overall_reliability = total_sent as f64 / total_attempts as f64;
                 }
-                
+
                 // Calculate average latency across all transports
                 let mut total_latency_ms = 0u64;
                 let mut transport_count = 0;
-                
+
                 for transport_metrics in metrics_guard.transport_metrics.values() {
                     if transport_metrics.messages_sent > 0 {
                         total_latency_ms += transport_metrics.average_latency_ms;
                         transport_count += 1;
                     }
                 }
-                
+
                 if transport_count > 0 {
-                    metrics_guard.average_latency = Duration::from_millis(total_latency_ms / transport_count);
+                    metrics_guard.average_latency =
+                        Duration::from_millis(total_latency_ms / transport_count);
                 }
-                
+
                 metrics_guard.touch();
             }
         });
@@ -872,39 +936,45 @@ impl TransportManagerBuilder {
             config: TransportManagerConfig::default(),
         }
     }
-    
+
     pub fn enable_transport(mut self, transport_type: TransportType) -> Self {
         if !self.config.enabled_transports.contains(&transport_type) {
             self.config.enabled_transports.push(transport_type);
         }
         self
     }
-    
+
     pub fn disable_transport(mut self, transport_type: TransportType) -> Self {
-        self.config.enabled_transports.retain(|&t| t != transport_type);
+        self.config
+            .enabled_transports
+            .retain(|&t| t != transport_type);
         self
     }
-    
+
     pub fn selection_policy(mut self, policy: TransportSelectionPolicy) -> Self {
         self.config.selection_policy = policy;
         self
     }
-    
+
     pub fn failover_config(mut self, config: FailoverConfig) -> Self {
         self.config.failover_config = config;
         self
     }
-    
+
     pub fn operation_timeout(mut self, timeout: Duration) -> Self {
         self.config.operation_timeout = timeout;
         self
     }
-    
-    pub fn transport_config(mut self, transport_type: TransportType, config: HashMap<String, String>) -> Self {
+
+    pub fn transport_config(
+        mut self,
+        transport_type: TransportType,
+        config: HashMap<String, String>,
+    ) -> Self {
         self.config.transport_configs.insert(transport_type, config);
         self
     }
-    
+
     pub fn build(self) -> TransportManager {
         TransportManager::new(self.config)
     }

@@ -1,21 +1,19 @@
 //! HTTP Transport Demo
-//! 
+//!
 //! This example demonstrates how the HTTP transport can be used to communicate
 //! through firewalls that only allow HTTP/HTTPS traffic.
-
+use chrono::Utc;
+use std::{collections::HashMap, time::Duration};
 use synapse::{
+    error::Result,
     transport::{
-        TransportManagerBuilder, TransportTarget, 
-        HttpTransportFactory, TransportType, TransportSelectionPolicy,
-        abstraction::MessageUrgency,
+        HttpTransportFactory, TransportManagerBuilder, TransportSelectionPolicy, TransportTarget,
+        TransportType, abstraction::MessageUrgency,
     },
     types::{SecureMessage, SecurityLevel},
-    error::Result,
 };
-use std::{time::Duration, collections::HashMap};
 use tracing::{info, warn};
 use uuid::Uuid;
-use chrono::Utc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,7 +43,9 @@ async fn main() -> Result<()> {
         .build();
 
     // Register HTTP transport factory
-    manager.register_factory(Box::new(HttpTransportFactory)).await?;
+    manager
+        .register_factory(Box::new(HttpTransportFactory))
+        .await?;
 
     // Start the transport manager
     info!("📡 Starting HTTP transport manager...");
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
 
     // Demo 1: Send message to public web service
     info!("\n--- Demo 1: Public Web Service Communication ---");
-    
+
     let web_target = TransportTarget::new("httpbin.org".to_string())
         .with_address("https://httpbin.org/post".to_string())
         .with_urgency(MessageUrgency::Interactive);
@@ -105,17 +105,20 @@ async fn main() -> Result<()> {
     ];
 
     for endpoint in test_endpoints {
-        let target = TransportTarget::new(endpoint.to_string())
-            .with_address(endpoint.to_string());
+        let target = TransportTarget::new(endpoint.to_string()).with_address(endpoint.to_string());
 
         info!("🔍 Testing connectivity to {}...", endpoint);
-        
+
         // Test connectivity by sending a small test message
         let test_message = create_sample_message("connectivity-test", "ping");
-        
+
         match manager.send_message(&target, &test_message).await {
             Ok(receipt) => {
-                info!("✅ {} is reachable ({}ms)", endpoint, receipt.delivery_time.as_millis());
+                info!(
+                    "✅ {} is reachable ({}ms)",
+                    endpoint,
+                    receipt.delivery_time.as_millis()
+                );
             }
             Err(e) => {
                 info!("❌ {} is unreachable: {}", endpoint, e);
@@ -125,16 +128,28 @@ async fn main() -> Result<()> {
 
     // Demo 4: Show transport capabilities
     info!("\n--- Demo 4: Transport Capabilities ---");
-    if let Some(capabilities) = manager.get_transport_capabilities(TransportType::Http).await {
+    if let Some(capabilities) = manager
+        .get_transport_capabilities(TransportType::Http)
+        .await
+    {
         info!("🔧 HTTP Transport Capabilities:");
         info!("   • Supports encryption: {}", capabilities.encrypted);
-        info!("   • Supports bidirectional: {}", capabilities.bidirectional);
+        info!(
+            "   • Supports bidirectional: {}",
+            capabilities.bidirectional
+        );
         info!("   • Supports real-time: {}", capabilities.real_time);
         info!("   • Supports reliable delivery: {}", capabilities.reliable);
         info!("   • Supports broadcast: {}", capabilities.broadcast);
         info!("   • Network spanning: {}", capabilities.network_spanning);
-        info!("   • Max message size: {} bytes", capabilities.max_message_size);
-        info!("   • Supported urgencies: {:?}", capabilities.supported_urgencies);
+        info!(
+            "   • Max message size: {} bytes",
+            capabilities.max_message_size
+        );
+        info!(
+            "   • Supported urgencies: {:?}",
+            capabilities.supported_urgencies
+        );
     }
 
     // Demo 5: Performance metrics
@@ -146,17 +161,32 @@ async fn main() -> Result<()> {
         info!("   • Messages received: {}", http_metrics.messages_received);
         info!("   • Bytes sent: {}", http_metrics.bytes_sent);
         info!("   • Bytes received: {}", http_metrics.bytes_received);
-        info!("   • Average latency: {}ms", http_metrics.average_latency_ms);
-        info!("   • Reliability: {:.2}%", http_metrics.reliability_score * 100.0);
-        info!("   • Active connections: {}", http_metrics.active_connections);
+        info!(
+            "   • Average latency: {}ms",
+            http_metrics.average_latency_ms
+        );
+        info!(
+            "   • Reliability: {:.2}%",
+            http_metrics.reliability_score * 100.0
+        );
+        info!(
+            "   • Active connections: {}",
+            http_metrics.active_connections
+        );
     } else {
         info!("   • No HTTP metrics available yet");
     }
-    
+
     info!("📊 Overall Metrics:");
     info!("   • Total messages sent: {}", metrics.total_messages_sent);
-    info!("   • Total messages received: {}", metrics.total_messages_received);
-    info!("   • Overall reliability: {:.2}%", metrics.overall_reliability * 100.0);
+    info!(
+        "   • Total messages received: {}",
+        metrics.total_messages_received
+    );
+    info!(
+        "   • Overall reliability: {:.2}%",
+        metrics.overall_reliability * 100.0
+    );
     info!("   • Average latency: {:?}", metrics.average_latency);
 
     // Demonstrate firewall-friendly characteristics
@@ -168,13 +198,13 @@ async fn main() -> Result<()> {
     info!("   • Can use existing web infrastructure");
     info!("   • Compatible with load balancers and CDNs");
     info!("   • Standard protocol with wide tooling support");
-    
+
     info!("\n⚠️  HTTP Transport Considerations:");
     info!("   • Higher latency than direct TCP/UDP");
     info!("   • Request/response pattern (not true streaming)");
     info!("   • May have connection limits per host");
     info!("   • Requires HTTP server for receiving messages");
-    
+
     // Clean shutdown
     info!("\n--- Cleanup ---");
     manager.stop().await?;

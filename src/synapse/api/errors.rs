@@ -109,7 +109,7 @@ impl<T> ApiResponse<T> {
             data: None,
             error: Some(ApiErrorResponse {
                 code: err.status_code(),
-                error_type: format!("{:?}", err).split('(').next().unwrap_or("Unknown").to_string(),
+                error_type: format!("{err:?}").split('(').next().unwrap_or("Unknown").to_string(),
                 message: err.to_string(),
                 details: None,
                 request_id: Some(request_id),
@@ -130,7 +130,7 @@ impl<T> ApiResponse<T> {
             data: None,
             error: Some(ApiErrorResponse {
                 code: err.status_code(),
-                error_type: format!("{:?}", err).split('(').next().unwrap_or("Unknown").to_string(),
+                error_type: format!("{err:?}").split('(').next().unwrap_or("Unknown").to_string(),
                 message: err.to_string(),
                 details: Some(details),
                 request_id: Some(request_id),
@@ -163,5 +163,5 @@ pub fn validation_error(message: &str) -> ApiError {
 
 /// Helper for handling not found errors
 pub fn not_found(resource_type: &str, id: &str) -> ApiError {
-    ApiError::NotFound(format!("{} with id {} not found", resource_type, id))
+    ApiError::NotFound(format!("{resource_type} with id {id} not found"))
 }

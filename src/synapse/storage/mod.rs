@@ -1,11 +1,9 @@
 // Synapse storage layer
 
-pub mod database;
 pub mod cache;
+pub mod database;
 pub mod migrations;
 
-// Re-export storage interfaces with feature guards
-#[cfg(feature = "database")]
-pub use database::Database;
-#[cfg(feature = "cache")]
+// Always re-export storage interfaces for monolithic build
 pub use cache::Cache;
+pub use database::Database;

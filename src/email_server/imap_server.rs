@@ -97,7 +97,7 @@ impl SynapseImapServer {
     pub async fn start(&self) -> Result<()> {
         let addr = format!("0.0.0.0:{}", self.config.port);
         let listener = TcpListener::bind(&addr).await
-            .map_err(|e| SynapseError::NetworkError(format!("Failed to bind IMAP server to {}: {}", addr, e)))?;
+            .map_err(|e| SynapseError::NetworkError(format!("Failed to bind IMAP server to {addr}: {e}")))?;
 
         info!("EMRP IMAP Server listening on {}", addr);
 
@@ -178,7 +178,7 @@ impl SynapseImapServer {
                 let mut responses = vec![
                     "* CAPABILITY IMAP4rev1 IDLE AUTH=PLAIN AUTH=LOGIN UIDPLUS\r\n".to_string(),
                 ];
-                responses.push(format!("{} OK CAPABILITY completed\r\n", tag));
+                responses.push(format!("{tag} OK CAPABILITY completed\r\n"));
                 Ok(responses)
             }
             "LOGIN" => {
@@ -211,7 +211,7 @@ impl SynapseImapServer {
                 let mut responses = vec![
                     "* LIST () \"/\" \"INBOX\"\r\n".to_string(),
                 ];
-                responses.push(format!("{} OK LIST completed\r\n", tag));
+                responses.push(format!("{tag} OK LIST completed\r\n"));
                 Ok(responses)
             }
             "SELECT" => {
@@ -246,7 +246,7 @@ impl SynapseImapServer {
                     "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n".to_string(),
                     "* OK [PERMANENTFLAGS (\\Deleted \\Seen \\*)] Limited\r\n".to_string(),
                 ];
-                responses.push(format!("{} OK [READ-WRITE] SELECT completed\r\n", tag));
+                responses.push(format!("{tag} OK [READ-WRITE] SELECT completed\r\n"));
                 Ok(responses)
             }
             "FETCH" => {
@@ -291,15 +291,15 @@ impl SynapseImapServer {
                         if items.contains("RFC822") || items.contains("BODY[]") {
                             let email_content = self.format_as_email(message);
                             responses.push(format!("* {} FETCH (RFC822 {{{}}}\r\n", seq_num, email_content.len()));
-                            responses.push(format!("{}\r\n", email_content));
+                            responses.push(format!("{email_content}\r\n"));
                             responses.push(")\r\n".to_string());
                         } else if items.contains("FLAGS") {
-                            responses.push(format!("* {} FETCH (FLAGS ())\r\n", seq_num));
+                            responses.push(format!("* {seq_num} FETCH (FLAGS ())\r\n"));
                         }
                     }
                 }
                 
-                responses.push(format!("{} OK FETCH completed\r\n", tag));
+                responses.push(format!("{tag} OK FETCH completed\r\n"));
                 Ok(responses)
             }
             "IDLE" => {
@@ -327,7 +327,7 @@ impl SynapseImapServer {
                 let mut responses = vec![
                     "* BYE EMRP IMAP Server logging out\r\n".to_string(),
                 ];
-                responses.push(format!("{} OK LOGOUT completed\r\n", tag));
+                responses.push(format!("{tag} OK LOGOUT completed\r\n"));
                 Ok(responses)
             }
             _ => {

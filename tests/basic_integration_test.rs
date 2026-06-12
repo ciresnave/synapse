@@ -1,7 +1,7 @@
 //! Simple integration test to verify basic functionality
 
-use synapse::{Config, SynapseRouter, SimpleMessage, MessageType};
-use tokio;
+use synapse::types::{MessageType, SimpleMessage};
+use synapse::{Config, SynapseRouter};
 
 #[cfg(test)]
 mod basic_integration_tests {
@@ -12,9 +12,12 @@ mod basic_integration_tests {
         // Test that we can create basic configurations
         let config = Config::for_testing();
         assert!(config.validate().is_ok(), "Test config should be valid");
-        
+
         let gmail_config = Config::gmail_config("test", "ai_model", "test@gmail.com", "password");
-        assert!(gmail_config.validate().is_ok(), "Gmail config should be valid");
+        assert!(
+            gmail_config.validate().is_ok(),
+            "Gmail config should be valid"
+        );
     }
 
     #[tokio::test]
@@ -35,7 +38,7 @@ mod basic_integration_tests {
             message_type: MessageType::Direct,
             metadata: std::collections::HashMap::new(),
         };
-        
+
         assert_eq!(message.to, "bob");
         assert_eq!(message.from_entity, "alice");
         assert_eq!(message.content, "Hello, Bob!");
@@ -45,9 +48,10 @@ mod basic_integration_tests {
     async fn test_message_conversion() {
         // Test converting SimpleMessage to SecureMessage
         let config = Config::for_testing();
-        let router = SynapseRouter::new(config, "test-entity".to_string()).await
+        let router = SynapseRouter::new(config, "test-entity".to_string())
+            .await
             .expect("Router creation should succeed");
-        
+
         let simple_message = SimpleMessage {
             to: "bob".to_string(),
             from_entity: "alice".to_string(),
@@ -55,7 +59,7 @@ mod basic_integration_tests {
             message_type: MessageType::Direct,
             metadata: std::collections::HashMap::new(),
         };
-        
+
         let secure_message = router.convert_to_secure_message(&simple_message).await;
         assert!(secure_message.is_ok(), "Message conversion should succeed");
     }

@@ -1,0 +1,234 @@
+# OAuth Provider Configuration for Synapse Neural Network
+# 🆕 Latest: Modular configuration with enhanced provider support
+
+# GitHub OAuth Configuration
+[github]
+enabled = true
+client_id = "${SYNAPSE_GITHUB_CLIENT_ID}"
+client_secret = "${SYNAPSE_GITHUB_CLIENT_SECRET}"
+redirect_uri = "https://synapse.local/auth/github/callback"
+scopes = ["user:email", "read:user", "read:org"]
+supports_device_flow = true
+device_scopes = ["user:email", "read:user"]
+
+# GitHub-specific settings for AI agents
+[github.ai_agent]
+# Special scopes for AI agents accessing GitHub
+scopes = ["repo", "read:user", "read:org", "workflow"]
+# Rate limiting for GitHub API access
+rate_limit_per_hour = 5000
+# Allow AI agents to access private repositories
+access_private_repos = false
+
+# Google OAuth Configuration
+[google]
+enabled = true
+client_id = "${SYNAPSE_GOOGLE_CLIENT_ID}"
+client_secret = "${SYNAPSE_GOOGLE_CLIENT_SECRET}"
+redirect_uri = "https://synapse.local/auth/google/callback"
+scopes = [
+  "openid",
+  "profile",
+  "email",
+  "https://www.googleapis.com/auth/userinfo.profile",
+]
+supports_device_flow = true
+device_scopes = ["openid", "profile", "email"]
+
+# Google-specific settings
+[google.workspace]
+# Google Workspace domain restriction
+allowed_domains = ["mycompany.com", "ai-lab.mycompany.com"]
+require_domain_verification = true
+
+# Microsoft OAuth Configuration
+[microsoft]
+enabled = true
+client_id = "${SYNAPSE_MICROSOFT_CLIENT_ID}"
+client_secret = "${SYNAPSE_MICROSOFT_CLIENT_SECRET}"
+redirect_uri = "https://synapse.local/auth/microsoft/callback"
+scopes = ["openid", "profile", "email", "User.Read", "User.Read.All"]
+supports_device_flow = true
+device_scopes = ["openid", "profile", "email", "User.Read"]
+
+# Microsoft Azure AD specific settings
+[microsoft.azure_ad]
+tenant_id = "${SYNAPSE_AZURE_TENANT_ID}"
+authority = "https://login.microsoftonline.com/${SYNAPSE_AZURE_TENANT_ID}"
+# Enterprise application permissions
+app_permissions = ["User.Read.All", "Group.Read.All"]
+
+# Discord OAuth Configuration (for AI communities)
+[discord]
+enabled = false                                                 # Enable for AI community integration
+client_id = "${SYNAPSE_DISCORD_CLIENT_ID}"
+client_secret = "${SYNAPSE_DISCORD_CLIENT_SECRET}"
+redirect_uri = "https://synapse.local/auth/discord/callback"
+scopes = ["identify", "email", "guilds", "guilds.members.read"]
+supports_device_flow = false
+
+# Discord-specific AI agent integration
+[discord.ai_bot]
+bot_token = "${SYNAPSE_DISCORD_BOT_TOKEN}"
+allowed_guilds = ["${SYNAPSE_DISCORD_GUILD_ID}"]
+ai_agent_role = "AI Agent"
+
+# Custom Enterprise Provider Template
+[custom_enterprise]
+enabled = false
+name = "Enterprise SSO"
+authorization_url = "${SYNAPSE_ENTERPRISE_AUTH_URL}/oauth/authorize"
+token_url = "${SYNAPSE_ENTERPRISE_AUTH_URL}/oauth/token"
+userinfo_url = "${SYNAPSE_ENTERPRISE_AUTH_URL}/api/user"
+client_id = "${SYNAPSE_ENTERPRISE_CLIENT_ID}"
+client_secret = "${SYNAPSE_ENTERPRISE_CLIENT_SECRET}"
+redirect_uri = "https://synapse.local/auth/enterprise/callback"
+scopes = ["openid", "profile", "email", "synapse:participant"]
+
+# 🆕 Latest: Enhanced Device Flow Settings
+[device_flow]
+# Global device flow settings
+global_enabled = true
+default_expiry = "15m"
+default_polling_interval = "5s"
+max_polling_attempts = 180
+
+# Provider-specific device flow customization
+[device_flow.github]
+verification_uri = "https://github.com/login/device"
+verification_uri_complete = "https://github.com/login/device/code"
+user_code_format = "XXXX-XXXX"
+device_code_length = 40
+custom_prompt = "Visit github.com/login/device and enter code:"
+
+[device_flow.google]
+verification_uri = "https://accounts.google.com/device"
+user_code_format = "XXXXXXXX"
+device_code_length = 64
+custom_prompt = "Visit accounts.google.com/device and enter code:"
+
+[device_flow.microsoft]
+verification_uri = "https://microsoft.com/devicelogin"
+user_code_format = "XXXXXXXXX"
+device_code_length = 48
+custom_prompt = "Visit microsoft.com/devicelogin and enter code:"
+
+# 🤖 AI Agent Provider Configuration
+[ai_agent_providers]
+# Special OAuth flows for AI agents
+enable_ai_agent_flows = true
+require_agent_verification = true
+agent_verification_endpoint = "/api/agents/verify"
+
+# AI agent scopes mapping
+[ai_agent_providers.scopes]
+text_generation = ["ai:generate", "content:create"]
+code_analysis = ["code:read", "repo:analyze"]
+neural_routing = ["network:route", "participant:discover"]
+trust_validation = ["trust:validate", "security:audit"]
+knowledge_synthesis = ["knowledge:read", "ai:synthesize"]
+
+# Provider-specific AI agent settings
+[ai_agent_providers.github]
+# AI agents accessing GitHub for code analysis
+enable_for_ai = true
+ai_scopes = ["repo", "contents", "metadata"]
+rate_limit_multiplier = 2.0                  # Higher limits for AI agents
+
+[ai_agent_providers.google]
+# AI agents accessing Google services
+enable_for_ai = true
+ai_scopes = ["https://www.googleapis.com/auth/cloud-platform.read-only"]
+service_account_mode = true
+
+# 🔒 Security and Validation Settings
+[security]
+# Provider validation
+validate_provider_certificates = true
+require_https_redirect_uris = true
+check_redirect_uri_security = true
+
+# Token validation
+validate_token_audience = true
+require_token_expiry = true
+max_token_lifetime = "24h"
+
+# PKCE (Proof Key for Code Exchange) settings
+require_pkce = true
+pkce_code_challenge_method = "S256"
+pkce_code_verifier_length = 128
+
+# 🚨 Rate Limiting per Provider
+[rate_limiting]
+# Default limits for OAuth flows
+oauth_requests_per_minute = 60
+oauth_burst_size = 10
+
+# Provider-specific rate limits
+[rate_limiting.github]
+requests_per_minute = 100
+burst_size = 20
+api_calls_per_hour = 5000
+
+[rate_limiting.google]
+requests_per_minute = 120
+burst_size = 25
+api_calls_per_hour = 10000
+
+[rate_limiting.microsoft]
+requests_per_minute = 150
+burst_size = 30
+api_calls_per_hour = 8000
+
+# 📊 Provider-Specific Metrics
+[metrics]
+# Track OAuth provider performance
+track_provider_latency = true
+track_provider_success_rate = true
+track_token_refresh_rate = true
+
+# Provider health monitoring
+[metrics.health_checks]
+enabled = true
+check_interval = "5m"
+timeout = "10s"
+
+# Health check endpoints for each provider
+github_health = "https://www.githubstatus.com/api/v2/status.json"
+google_health = "https://status.cloud.google.com/"
+microsoft_health = "https://status.azure.com/"
+
+# 🔄 Token Refresh and Management
+[token_management]
+# Automatic token refresh settings
+auto_refresh_enabled = true
+refresh_threshold = "5m"    # Refresh tokens 5 minutes before expiry
+max_refresh_attempts = 3
+refresh_retry_delay = "30s"
+
+# Token storage and caching
+cache_tokens = true
+token_cache_ttl = "1h"
+encrypt_cached_tokens = true
+
+# 🌍 Multi-Environment Configuration
+[environments]
+# Environment-specific provider settings
+[environments.development]
+github.enabled = true
+google.enabled = true
+microsoft.enabled = false
+discord.enabled = true
+
+[environments.staging]
+github.enabled = true
+google.enabled = true
+microsoft.enabled = true
+discord.enabled = false
+
+[environments.production]
+github.enabled = true
+google.enabled = true
+microsoft.enabled = true
+discord.enabled = false
+custom_enterprise.enabled = true

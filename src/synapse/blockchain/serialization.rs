@@ -1,19 +1,19 @@
-use bincode::{Encode, Decode, BorrowDecode};
+use bincode::{BorrowDecode, Decode, Encode};
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
-use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 use std::fmt;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DateTimeWrapper(pub DateTime<Utc>);
+pub struct DateTimeWrapper(pub chrono::DateTime<chrono::Utc>);
 
 impl Default for DateTimeWrapper {
     fn default() -> Self {
-        DateTimeWrapper(Utc::now())
+        DateTimeWrapper(chrono::Utc::now())
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UuidWrapper(pub Uuid);
 
 impl fmt::Display for UuidWrapper {
@@ -23,11 +23,11 @@ impl fmt::Display for UuidWrapper {
 }
 
 impl DateTimeWrapper {
-    pub fn new(dt: DateTime<Utc>) -> Self {
+    pub fn new(dt: chrono::DateTime<chrono::Utc>) -> Self {
         DateTimeWrapper(dt)
     }
 
-    pub fn into_inner(self) -> DateTime<Utc> {
+    pub fn into_inner(self) -> chrono::DateTime<chrono::Utc> {
         self.0
     }
 
@@ -39,11 +39,11 @@ impl DateTimeWrapper {
     }
 
     pub fn from_bincode(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        let (timestamp, nanos): (i64, u32) = bincode::decode_from_slice(bytes, bincode::config::standard())?.0;
-        let dt = DateTime::<Utc>::from_timestamp(timestamp, nanos)
-            .ok_or_else(|| bincode::error::DecodeError::OtherString(
-                "Invalid DateTime values".to_string()
-            ))?;
+        let (timestamp, nanos): (i64, u32) =
+            bincode::decode_from_slice(bytes, bincode::config::standard())?.0;
+        let dt = DateTime::<Utc>::from_timestamp(timestamp, nanos).ok_or_else(|| {
+            bincode::error::DecodeError::OtherString("Invalid DateTime values".to_string())
+        })?;
         Ok(DateTimeWrapper(dt))
     }
 }
@@ -67,12 +67,11 @@ impl<Context> Decode<Context> for DateTimeWrapper {
     ) -> Result<Self, bincode::error::DecodeError> {
         let timestamp = i64::decode(decoder)?;
         let nanos = u32::decode(decoder)?;
-        
-        let dt = DateTime::<Utc>::from_timestamp(timestamp, nanos)
-            .ok_or_else(|| bincode::error::DecodeError::OtherString(
-                "Invalid DateTime values".to_string()
-            ))?;
-            
+
+        let dt = DateTime::<Utc>::from_timestamp(timestamp, nanos).ok_or_else(|| {
+            bincode::error::DecodeError::OtherString("Invalid DateTime values".to_string())
+        })?;
+
         Ok(DateTimeWrapper(dt))
     }
 }
@@ -83,12 +82,11 @@ impl<'de, Context> BorrowDecode<'de, Context> for DateTimeWrapper {
     ) -> Result<Self, bincode::error::DecodeError> {
         let timestamp = i64::borrow_decode(decoder)?;
         let nanos = u32::borrow_decode(decoder)?;
-        
-        let dt = DateTime::<Utc>::from_timestamp(timestamp, nanos)
-            .ok_or_else(|| bincode::error::DecodeError::OtherString(
-                "Invalid DateTime values".to_string()
-            ))?;
-            
+
+        let dt = DateTime::<Utc>::from_timestamp(timestamp, nanos).ok_or_else(|| {
+            bincode::error::DecodeError::OtherString("Invalid DateTime values".to_string())
+        })?;
+
         Ok(DateTimeWrapper(dt))
     }
 }

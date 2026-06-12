@@ -1,29 +1,20 @@
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
 use crate::synapse::models::DiscoverabilityLevel;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use tracing::{info, debug, warn};
-use uuid::Uuid;
-use crate::blockchain::serialization::UuidWrapper;
+use std::sync::Arc;
 
-// Feature-gated storage imports
-#[cfg(feature = "database")]
-use crate::synapse::storage::Database;
-#[cfg(feature = "cache")]
-use crate::synapse::storage::Cache;
+use crate::synapse::services::trust_manager::TrustManager;
+use crate::synapse::storage::{Cache, Database};
 
 /// Privacy management service for the Synapse network
-#[cfg(all(feature = "database", feature = "cache"))]
 pub struct PrivacyManager {
     database: Database,
     cache: Cache,
-    /// Privacy policies cached by participant ID
-    privacy_cache: HashMap<String, PrivacyPolicy>,
-}
-
-/// Simplified privacy manager when storage features are not available
-#[cfg(not(all(feature = "database", feature = "cache")))]
-pub struct PrivacyManager {
+    trust_manager: Option<Arc<TrustManager>>,
     /// Privacy policies cached by participant ID
     privacy_cache: HashMap<String, PrivacyPolicy>,
 }
@@ -80,54 +71,70 @@ pub enum ContactApproval {
     RateLimited,
 }
 
-#[cfg(all(feature = "database", feature = "cache"))]
+// Removed feature gating
 impl PrivacyManager {
-    pub fn new(database: Database, cache: Cache) -> Self {
-        Self {
-            database,
-            cache,
-            privacy_cache: HashMap::new(),
-        }
-    }
-
     /// Check if a contact request should be allowed
     pub async fn evaluate_contact_request(
         &self,
         request: &ContactRequest,
     ) -> Result<ContactApproval> {
-        debug!("Evaluating contact request from {} to {}", request.from_id, request.to_id);
+        debug!(
+            "Evaluating contact request from {} to {}",
+            request.from_id, request.to_id
+        );
 
         // Get target participant's privacy policy
         let target_policy = self.get_privacy_policy(&request.to_id).await?;
 
         // Check discoverability first
-        if !self.can_initiate_contact(&request.from_id, &request.to_id, &target_policy).await? {
-            return Ok(ContactApproval::Rejected("Target not discoverable".to_string()));
+        if !self
+            .can_initiate_contact(&request.from_id, &request.to_id, &target_policy)
+            .await?
+        {
+            return Ok(ContactApproval::Rejected(
+                "Target not discoverable".to_string(),
+            ));
         }
 
         // Check rate limits
-        if self.check_rate_limits(&request.from_id, &request.to_id, &target_policy).await? {
+        if self
+            .check_rate_limits(&request.from_id, &request.to_id, &target_policy)
+            .await?
+        {
             return Ok(ContactApproval::RateLimited);
         }
 
         // Check domain restrictions
-        if !self.check_domain_restrictions(&request.from_id, &target_policy).await? {
+        if !self
+            .check_domain_restrictions(&request.from_id, &target_policy)
+            .await?
+        {
             return Ok(ContactApproval::Rejected("Domain restrictions".to_string()));
         }
 
         // Check trust requirements
-        if !self.check_trust_requirements(&request.from_id, &request.to_id, &target_policy).await? {
-            return Ok(ContactApproval::Rejected("Insufficient trust score".to_string()));
+        if !self
+            .check_trust_requirements(&request.from_id, &request.to_id, &target_policy)
+            .await?
+        {
+            return Ok(ContactApproval::Rejected(
+                "Insufficient trust score".to_string(),
+            ));
         }
 
         // Check if introduction is required
-        if target_policy.contact_filtering.require_introduction {
-            if !self.has_introduction(&request.from_id, &request.to_id).await? {
-                return Ok(ContactApproval::RequiresManualReview);
-            }
+        if target_policy.contact_filtering.require_introduction
+            && !self
+                .has_introduction(&request.from_id, &request.to_id)
+                .await?
+        {
+            return Ok(ContactApproval::RequiresManualReview);
         }
 
-        info!("Contact request approved from {} to {}", request.from_id, request.to_id);
+        info!(
+            "Contact request approved from {} to {}",
+            request.from_id, request.to_id
+        );
         Ok(ContactApproval::Approved)
     }
 
@@ -139,7 +146,10 @@ impl PrivacyManager {
         }
 
         // Load from database
-        let profile = self.database.get_participant(participant_id).await?
+        let profile = self
+            .database
+            .get_participant(participant_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Participant not found"))?;
 
         let policy = PrivacyPolicy {
@@ -150,15 +160,23 @@ impl PrivacyManager {
                 require_introduction: profile.contact_preferences.requires_introduction,
                 trust_threshold: profile.discovery_permissions.min_trust_score.unwrap_or(0.0),
                 rate_limits: RateLimits {
-                    max_contacts_per_hour: profile.contact_preferences.rate_limits.max_contacts_per_hour.unwrap_or(10),
-                    max_contacts_per_day: profile.contact_preferences.rate_limits.max_contacts_per_day.unwrap_or(50),
+                    max_contacts_per_hour: profile
+                        .contact_preferences
+                        .rate_limits
+                        .max_contacts_per_hour
+                        .unwrap_or(10),
+                    max_contacts_per_day: profile
+                        .contact_preferences
+                        .rate_limits
+                        .max_contacts_per_day
+                        .unwrap_or(50),
                     cooldown_period_seconds: 300, // 5 minutes default
                 },
                 blocked_domains: profile.discovery_permissions.blocked_domains.clone(),
                 allowed_domains: profile.discovery_permissions.allowed_domains.clone(),
             },
             data_sharing: DataSharingPolicy {
-                share_activity_status: true,  // Default policies
+                share_activity_status: true, // Default policies
                 share_capabilities: true,
                 share_organization: true,
                 share_location: false,
@@ -181,15 +199,15 @@ impl PrivacyManager {
             DiscoverabilityLevel::Unlisted => {
                 // Check if they have some connection or context
                 self.has_connection_context(from_id, to_id).await
-            },
+            }
             DiscoverabilityLevel::Private => {
                 // Check if explicitly allowed
                 self.is_explicitly_allowed(from_id, to_id).await
-            },
+            }
             DiscoverabilityLevel::Stealth => {
                 // Only pre-authorized contacts
                 self.is_pre_authorized(from_id, to_id).await
-            },
+            }
         }
     }
 
@@ -199,22 +217,32 @@ impl PrivacyManager {
         to_id: &str,
         target_policy: &PrivacyPolicy,
     ) -> Result<bool> {
-        let cache_key = format!("rate_limit:{}:{}", from_id, to_id);
-        
+        let cache_key = format!("rate_limit:{from_id}:{to_id}");
+
         // Check hourly limit
-        let hourly_key = format!("{}:hourly", cache_key);
+        let hourly_key = format!("{cache_key}:hourly");
         let hourly_count = self.cache.increment_rate_limit(&hourly_key, 3600).await?;
-        
-        if hourly_count > target_policy.contact_filtering.rate_limits.max_contacts_per_hour as u64 {
+
+        if hourly_count
+            > target_policy
+                .contact_filtering
+                .rate_limits
+                .max_contacts_per_hour as u64
+        {
             warn!("Hourly rate limit exceeded for {} -> {}", from_id, to_id);
             return Ok(true); // Rate limited
         }
 
         // Check daily limit
-        let daily_key = format!("{}:daily", cache_key);
+        let daily_key = format!("{cache_key}:daily");
         let daily_count = self.cache.increment_rate_limit(&daily_key, 86400).await?;
-        
-        if daily_count > target_policy.contact_filtering.rate_limits.max_contacts_per_day as u64 {
+
+        if daily_count
+            > target_policy
+                .contact_filtering
+                .rate_limits
+                .max_contacts_per_day as u64
+        {
             warn!("Daily rate limit exceeded for {} -> {}", from_id, to_id);
             return Ok(true); // Rate limited
         }
@@ -231,13 +259,20 @@ impl PrivacyManager {
         let from_domain = from_id.split('@').nth(1).unwrap_or("");
 
         // Check blocked domains first
-        if target_policy.contact_filtering.blocked_domains.contains(&from_domain.to_string()) {
+        if target_policy
+            .contact_filtering
+            .blocked_domains
+            .contains(&from_domain.to_string())
+        {
             return Ok(false);
         }
 
         // If allowed domains is not empty, check if domain is in allowed list
         if !target_policy.contact_filtering.allowed_domains.is_empty() {
-            return Ok(target_policy.contact_filtering.allowed_domains.contains(&from_domain.to_string()));
+            return Ok(target_policy
+                .contact_filtering
+                .allowed_domains
+                .contains(&from_domain.to_string()));
         }
 
         Ok(true) // No restrictions or domain is allowed
@@ -245,38 +280,44 @@ impl PrivacyManager {
 
     async fn check_trust_requirements(
         &self,
-        _from_id: &str,
-        _to_id: &str,
+        from_id: &str,
+        to_id: &str,
         target_policy: &PrivacyPolicy,
     ) -> Result<bool> {
         if target_policy.contact_filtering.trust_threshold <= 0.0 {
             return Ok(true); // No trust requirement
         }
 
-        // This would integrate with the trust manager to get actual trust score
-        // For now, return true as a placeholder
-        Ok(true)
-    }
-
-    async fn has_introduction(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
-        // Check if there's a mutual connection who can provide introduction
-        // This would query the trust network for common connections
-        Ok(false) // Placeholder
-    }
-
-    async fn has_connection_context(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
-        // Check for shared organizational membership, previous interactions, etc.
-        Ok(false) // Placeholder
-    }
-
-    async fn is_explicitly_allowed(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
-        // Check explicit allow lists
-        Ok(false) // Placeholder
-    }
-
-    async fn is_pre_authorized(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
-        // Check pre-authorization records
-        Ok(false) // Placeholder
+        // If trust manager is available, get actual trust score
+        if let Some(trust_manager) = &self.trust_manager {
+            match trust_manager.get_trust_score(from_id, to_id).await {
+                Ok(trust_score) => {
+                    let meets_threshold =
+                        trust_score >= target_policy.contact_filtering.trust_threshold;
+                    debug!(
+                        "Trust check: {} -> {} = {:.2} (threshold: {:.2}) - {}",
+                        from_id,
+                        to_id,
+                        trust_score,
+                        target_policy.contact_filtering.trust_threshold,
+                        if meets_threshold { "PASS" } else { "FAIL" }
+                    );
+                    Ok(meets_threshold)
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to get trust score for {} -> {}: {}",
+                        from_id, to_id, e
+                    );
+                    // Default to allowing contact if trust score calculation fails
+                    Ok(true)
+                }
+            }
+        } else {
+            // No trust manager available - log warning and allow
+            warn!("Trust manager not available for privacy check, allowing contact");
+            Ok(true)
+        }
     }
 
     /// Update privacy settings for a participant
@@ -285,13 +326,19 @@ impl PrivacyManager {
         participant_id: &str,
         _settings: PrivacyPolicy,
     ) -> Result<()> {
-        debug!("Updating privacy settings for participant: {}", participant_id);
+        debug!(
+            "Updating privacy settings for participant: {}",
+            participant_id
+        );
 
         // Save to database (this would update the participant profile)
         // For now, just update the cache
         // self.privacy_cache.insert(participant_id.to_string(), settings);
 
-        info!("Privacy settings updated for participant: {}", participant_id);
+        info!(
+            "Privacy settings updated for participant: {}",
+            participant_id
+        );
         Ok(())
     }
 
@@ -313,22 +360,62 @@ impl PrivacyManager {
         violation_type: PrivacyViolationType,
         _description: String,
     ) -> Result<String> {
-        let report_id = UuidWrapper::new(Uuid::new_v4()).to_string();
-        
-        warn!("Privacy violation reported: {} by {} against {}", 
-              violation_type, reporter_id, violator_id);
+        let report_id = Uuid::new_v4().to_string();
+
+        warn!(
+            "Privacy violation reported: {} by {} against {}",
+            violation_type, reporter_id, violator_id
+        );
 
         // This would create a privacy violation report in the database
         // and potentially trigger automated responses
 
         Ok(report_id)
     }
+
+    /// Checks if there is an introduction between two participants.
+    async fn has_introduction(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
+        // Implement actual introduction logic.
+        // Example: check if there is a relationship of type Introduction between participants
+        let from_profile = self.database.get_participant_profile(_from_id).await?;
+        // Relationships may need to be loaded separately; fallback to false if not available
+        let introduced = if !from_profile.relationships.is_empty() {
+            from_profile.relationships.iter().any(|rel| {
+                rel.with_participant == _to_id
+                    && matches!(
+                        rel.relationship_type,
+                        crate::synapse::models::participant::RelationshipType::Collaborator
+                            | crate::synapse::models::participant::RelationshipType::Acquaintance
+                    )
+            })
+        } else {
+            false
+        };
+        Ok(introduced)
+    }
 }
 
-#[cfg(not(all(feature = "database", feature = "cache")))]
+// Removed feature gating for monolithic build
 impl PrivacyManager {
-    pub fn new() -> Self {
+    pub fn new(database: Database, cache: Cache) -> Self {
         Self {
+            database,
+            cache,
+            trust_manager: None,
+            privacy_cache: HashMap::new(),
+        }
+    }
+
+    /// Create a new PrivacyManager with trust integration
+    pub fn new_with_trust(
+        database: Database,
+        cache: Cache,
+        trust_manager: Arc<TrustManager>,
+    ) -> Self {
+        Self {
+            database,
+            cache,
+            trust_manager: Some(trust_manager),
             privacy_cache: HashMap::new(),
         }
     }
@@ -342,42 +429,6 @@ impl PrivacyManager {
     ) -> Result<ContactApproval> {
         // Default policy: allow all contacts when storage is not available
         Ok(ContactApproval::Approved)
-    }
-
-    /// Get effective privacy policy for a participant (simplified version)
-    pub async fn get_privacy_policy(&self, participant_id: &str) -> Result<PrivacyPolicy> {
-        // Check cache first
-        if let Some(cached) = self.privacy_cache.get(participant_id) {
-            return Ok(cached.clone());
-        }
-
-        // Return default policy when storage is not available
-        let policy = PrivacyPolicy {
-            participant_id: participant_id.to_string(),
-            discoverability: DiscoverabilityLevel::Public,
-            contact_filtering: ContactFiltering {
-                allow_anonymous: true,
-                require_introduction: false,
-                trust_threshold: 0.0,
-                rate_limits: RateLimits {
-                    max_contacts_per_hour: 10,
-                    max_contacts_per_day: 50,
-                    cooldown_period_seconds: 300,
-                },
-                blocked_domains: vec![],
-                allowed_domains: vec![],
-            },
-            data_sharing: DataSharingPolicy {
-                share_activity_status: true,
-                share_capabilities: true,
-                share_organization: true,
-                share_location: false,
-                share_trust_metrics: false,
-            },
-            updated_at: DateTimeWrapper::new(Utc::now()),
-        };
-
-        Ok(policy)
     }
 
     async fn has_connection_context(&self, _from_id: &str, _to_id: &str) -> Result<bool> {
@@ -417,7 +468,7 @@ impl std::fmt::Display for PrivacyViolationType {
             PrivacyViolationType::DataMisuse => write!(f, "Data Misuse"),
             PrivacyViolationType::RateLimitViolation => write!(f, "Rate Limit Violation"),
             PrivacyViolationType::SpoofingAttempt => write!(f, "Spoofing Attempt"),
-            PrivacyViolationType::Other(desc) => write!(f, "Other: {}", desc),
+            PrivacyViolationType::Other(desc) => write!(f, "Other: {desc}"),
         }
     }
 }

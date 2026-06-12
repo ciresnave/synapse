@@ -8,7 +8,6 @@ use synapse::{
     types::{SimpleMessage, SecureMessage, SecurityLevel},
     error::Result,
 };
-use tokio;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,12 +23,12 @@ async fn main() -> Result<()> {
     
     // Get available transports
     let available_transports = manager.list_available_transports().await;
-    println!("📡 Available transport types: {:?}", available_transports);
+    println!("📡 Available transport types: {available_transports:?}");
     
     // Test transport capabilities
     for transport_type in available_transports {
         if let Some(capabilities) = manager.get_transport_capabilities(transport_type).await {
-            println!("\n🔧 {} Transport Capabilities:", transport_type);
+            println!("\n🔧 {transport_type} Transport Capabilities:");
             println!("   • Max message size: {} bytes", capabilities.max_message_size);
             println!("   • Reliable: {}", capabilities.reliable);
             println!("   • Real-time: {}", capabilities.real_time);
@@ -49,7 +48,7 @@ async fn main() -> Result<()> {
     
     match manager.select_optimal_transport(&target).await {
         Ok(selected_type) => {
-            println!("✅ Selected transport: {}", selected_type);
+            println!("✅ Selected transport: {selected_type}");
             
             if let Ok(estimate) = manager.estimate_delivery(&target, selected_type).await {
                 println!("📊 Delivery estimate:");
@@ -60,7 +59,7 @@ async fn main() -> Result<()> {
             }
         }
         Err(e) => {
-            println!("❌ Transport selection failed: {}", e);
+            println!("❌ Transport selection failed: {e}");
         }
     }
       // Test sending a message
@@ -89,7 +88,7 @@ async fn main() -> Result<()> {
             println!("   • Confirmation: {:?}", receipt.confirmation);
         }
         Err(e) => {
-            println!("❌ Message sending failed: {}", e);
+            println!("❌ Message sending failed: {e}");
         }
     }
     
@@ -97,7 +96,7 @@ async fn main() -> Result<()> {
     println!("\n📊 Collecting transport metrics...");
     let metrics = manager.get_metrics_summary().await;
     for (transport_name, transport_metrics) in metrics {
-        println!("📈 {} metrics:", transport_name);
+        println!("📈 {transport_name} metrics:");
         println!("   • Messages sent: {}", transport_metrics.messages_sent);
         println!("   • Messages received: {}", transport_metrics.messages_received);
         println!("   • Send failures: {}", transport_metrics.send_failures);

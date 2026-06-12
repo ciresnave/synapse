@@ -2,17 +2,17 @@
 
 use super::abstraction::{Transport, TransportMetrics};
 use crate::{
-    types::SecureMessage, 
-    error::Result,
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
+    error::Result,
+    types::SecureMessage,
 };
 use async_trait::async_trait;
-use std::time::{Duration, Instant};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
 use std::sync::{Arc, RwLock};
-use tracing::{info, debug, warn, error};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, warn};
 
 /// Enhanced TCP transport with circuit breaker for direct peer-to-peer communication
 pub struct TcpTransport {
@@ -23,20 +23,27 @@ pub struct TcpTransport {
     /// Circuit breaker for reliability
     circuit_breaker: Arc<CircuitBreaker>,
     /// Performance metrics
-    #[allow(dead_code)]
     metrics: Arc<RwLock<TransportMetrics>>,
 }
 
 impl TcpTransport {
     pub async fn new(listen_port: u16) -> Result<Self> {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", listen_port)).await.ok();
-        
+        let listener = TcpListener::bind(format!("0.0.0.0:{listen_port}"))
+            .await
+            .ok();
+
         if listener.is_some() {
-            info!("Enhanced TCP transport listening on port {} with circuit breaker", listen_port);
+            info!(
+                "Enhanced TCP transport listening on port {} with circuit breaker",
+                listen_port
+            );
         } else {
-            warn!("Failed to bind TCP port {}, will operate in client-only mode", listen_port);
+            warn!(
+                "Failed to bind TCP port {}, will operate in client-only mode",
+                listen_port
+            );
         }
-        
+
         Ok(Self {
             listen_port,
             listener,
@@ -46,23 +53,47 @@ impl TcpTransport {
             metrics: Arc::new(RwLock::new(TransportMetrics::default())),
         })
     }
-    
+
     /// Get circuit breaker reference for monitoring
     pub fn get_circuit_breaker(&self) -> Arc<CircuitBreaker> {
         Arc::clone(&self.circuit_breaker)
     }
-    
+
     /// Get circuit breaker statistics
     pub fn get_circuit_breaker_stats(&self) -> crate::circuit_breaker::CircuitStats {
         self.circuit_breaker.get_stats()
     }
-    
+
+    /// Get current transport metrics
+    pub async fn get_metrics(&self) -> TransportMetrics {
+        self.metrics.read().unwrap().clone()
+    }
+
+    /// Update transport metrics with new measurement
+    async fn update_metrics(&self, latency: Duration, success: bool) {
+        let mut metrics = self.metrics.write().unwrap();
+        metrics.average_latency_ms = latency.as_millis() as u64;
+        metrics.last_updated_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        if success {
+            metrics.messages_sent += 1;
+            // Improve reliability score
+            metrics.reliability_score = (metrics.reliability_score * 0.9 + 1.0 * 0.1).min(1.0);
+        } else {
+            metrics.send_failures += 1;
+            // Decrease reliability score
+            metrics.reliability_score = (metrics.reliability_score * 0.9).max(0.0);
+        }
+    }
     /// Start listening for incoming connections
     pub async fn start_server(&mut self) -> Result<()> {
         if let Some(listener) = &self.listener {
             info!("Starting TCP server on port {}", self.listen_port);
             let message_queue = Arc::clone(&self.received_messages);
-            
+
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
@@ -78,28 +109,33 @@ impl TcpTransport {
                 }
             }
         } else {
-            Err(crate::error::SynapseError::TransportError("TCP listener not available".into()))
+            Err(crate::error::SynapseError::TransportError(
+                "TCP listener not available".into(),
+            ))
         }
     }
-    
-    async fn handle_connection(mut stream: TcpStream, message_queue: Arc<Mutex<Vec<SecureMessage>>>) {
+
+    async fn handle_connection(
+        mut stream: TcpStream,
+        message_queue: Arc<Mutex<Vec<SecureMessage>>>,
+    ) {
         let mut buffer = vec![0; 8192];
-        
+
         match stream.read(&mut buffer).await {
             Ok(bytes_read) => {
                 debug!("Received {} bytes via TCP", bytes_read);
                 buffer.truncate(bytes_read);
-                
+
                 // Parse and handle the message
-                if let Ok(message_str) = String::from_utf8(buffer) {
-                    if let Ok(message) = serde_json::from_str::<SecureMessage>(&message_str) {
-                        debug!("Received Synapse message via TCP: {}", message.message_id);
-                        
-                        // Queue the received message
-                        if let Ok(mut queue) = message_queue.try_lock() {
-                            queue.push(message);
-                            debug!("Queued TCP message, total messages: {}", queue.len());
-                        }
+                if let Ok(message_str) = String::from_utf8(buffer)
+                    && let Ok(message) = serde_json::from_str::<SecureMessage>(&message_str)
+                {
+                    debug!("Received Synapse message via TCP: {}", message.message_id);
+
+                    // Queue the received message
+                    if let Ok(mut queue) = message_queue.try_lock() {
+                        queue.push(message);
+                        debug!("Queued TCP message, total messages: {}", queue.len());
                     }
                 }
             }
@@ -108,11 +144,11 @@ impl TcpTransport {
             }
         }
     }
-    
+
     pub async fn connect(&self, host: &str, port: u16) -> Result<TcpStream> {
-        let addr = format!("{}:{}", host, port);
+        let addr = format!("{host}:{port}");
         debug!("Attempting TCP connection to {}", addr);
-        
+
         match tokio::time::timeout(self.connection_timeout, TcpStream::connect(&addr)).await {
             Ok(Ok(stream)) => {
                 debug!("Successfully connected to {}", addr);
@@ -120,62 +156,89 @@ impl TcpTransport {
             }
             Ok(Err(e)) => {
                 debug!("Failed to connect to {}: {}", addr, e);
-                Err(crate::error::SynapseError::TransportError(format!("TCP connection failed: {}", e)))
+                Err(crate::error::SynapseError::TransportError(format!(
+                    "TCP connection failed: {e}"
+                )))
             }
             Err(_) => {
                 debug!("Timeout connecting to {}", addr);
-                Err(crate::error::SynapseError::TransportError("TCP connection timeout".into()))
+                Err(crate::error::SynapseError::TransportError(
+                    "TCP connection timeout".into(),
+                ))
             }
         }
     }
-    
-    pub async fn send_via_stream(&self, stream: &mut TcpStream, message: &SecureMessage) -> Result<()> {
-        let message_json = serde_json::to_string(message)
-            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to serialize message: {}", e)))?;
-        
-        stream.write_all(message_json.as_bytes()).await
-            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to send TCP message: {}", e)))?;
-        
-        stream.flush().await
-            .map_err(|e| crate::error::SynapseError::TransportError(format!("Failed to flush TCP stream: {}", e)))?;
-        
+
+    pub async fn send_via_stream(
+        &self,
+        stream: &mut TcpStream,
+        message: &SecureMessage,
+    ) -> Result<()> {
+        let message_json = serde_json::to_string(message).map_err(|e| {
+            crate::error::SynapseError::TransportError(format!("Failed to serialize message: {e}"))
+        })?;
+
+        stream
+            .write_all(message_json.as_bytes())
+            .await
+            .map_err(|e| {
+                crate::error::SynapseError::TransportError(format!(
+                    "Failed to send TCP message: {e}"
+                ))
+            })?;
+
+        stream.flush().await.map_err(|e| {
+            crate::error::SynapseError::TransportError(format!("Failed to flush TCP stream: {e}"))
+        })?;
+
         Ok(())
     }
-    
+
     /// Internal message sending implementation without circuit breaker checks
     async fn send_message_internal(&self, target: &str, message: &SecureMessage) -> Result<String> {
+        let start_time = Instant::now();
+
         // Parse target - handle both "host:port" and "host" formats
-        if let Some((host, port_str)) = target.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                // Direct connection to specified host:port
-                if let Ok(mut stream) = self.connect(host, port).await {
-                    match self.send_via_stream(&mut stream, message).await {
-                        Ok(_) => {
-                            info!("Successfully sent message via TCP to {}:{}", host, port);
-                            return Ok(format!("tcp://{}:{}", host, port));
-                        }
-                        Err(e) => {
-                            warn!("Failed to send via TCP to {}:{}: {}", host, port, e);
-                        }
+        if let Some((host, port_str)) = target.rsplit_once(':')
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            // Direct connection to specified host:port
+            match self.connect(host, port).await {
+                Ok(mut stream) => match self.send_via_stream(&mut stream, message).await {
+                    Ok(_) => {
+                        let latency = start_time.elapsed();
+                        self.update_metrics(latency, true).await;
+                        info!("Successfully sent message via TCP to {}:{}", host, port);
+                        return Ok(format!("tcp://{host}:{port}"));
                     }
+                    Err(e) => {
+                        let latency = start_time.elapsed();
+                        self.update_metrics(latency, false).await;
+                        warn!("Failed to send via TCP to {}:{}: {}", host, port, e);
+                    }
+                },
+                Err(e) => {
+                    let latency = start_time.elapsed();
+                    self.update_metrics(latency, false).await;
+                    warn!("Failed to connect to {}:{}: {}", host, port, e);
                 }
             }
         }
-        
+
         // Fallback: try common Synapse ports on the target host
         let host = if target.contains(':') {
             target.split(':').next().unwrap_or(target)
         } else {
             target
         };
-        
+
         let ports = vec![8080, 8443, 9090, 7777];
         for port in ports {
             if let Ok(mut stream) = self.connect(host, port).await {
                 match self.send_via_stream(&mut stream, message).await {
                     Ok(_) => {
                         info!("Successfully sent message via TCP to {}:{}", host, port);
-                        return Ok(format!("tcp://{}:{}", host, port));
+                        return Ok(format!("tcp://{host}:{port}"));
                     }
                     Err(e) => {
                         warn!("Failed to send via TCP to {}:{}: {}", host, port, e);
@@ -184,23 +247,27 @@ impl TcpTransport {
                 }
             }
         }
-        
-        Err(crate::error::SynapseError::TransportError("No TCP ports available".into()))
+
+        Err(crate::error::SynapseError::TransportError(
+            "No TCP ports available".into(),
+        ))
     }
 
     /// Internal connectivity test without circuit breaker checks
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used for internal diagnostics and debugging network connectivity issues
     async fn test_connectivity_internal(&self, target: &str) -> Result<Duration> {
         let start = Instant::now();
         let ports = vec![8080, 8443, 9090, 7777];
-        
+
         for port in ports {
             if let Ok(_stream) = self.connect(target, port).await {
                 return Ok(start.elapsed());
             }
         }
-        
-        Err(crate::error::SynapseError::TransportError("TCP connectivity test failed".into()))
+
+        Err(crate::error::SynapseError::TransportError(
+            "TCP connectivity test failed".into(),
+        ))
     }
 }
 
@@ -209,7 +276,7 @@ impl Transport for TcpTransport {
     fn transport_type(&self) -> super::abstraction::TransportType {
         super::abstraction::TransportType::Tcp
     }
-    
+
     fn capabilities(&self) -> super::abstraction::TransportCapabilities {
         super::abstraction::TransportCapabilities {
             max_message_size: 1_048_576, // 1MB
@@ -222,25 +289,21 @@ impl Transport for TcpTransport {
             supported_urgencies: vec![
                 super::abstraction::MessageUrgency::RealTime,
                 super::abstraction::MessageUrgency::Interactive,
-                super::abstraction::MessageUrgency::Background
+                super::abstraction::MessageUrgency::Background,
             ],
-            features: vec![
-                "circuit_breaker".to_string(),
-                "streaming".to_string()
-            ],
+            features: vec!["circuit_breaker".to_string(), "streaming".to_string()],
         }
     }
-    
+
     async fn can_reach(&self, target: &super::abstraction::TransportTarget) -> bool {
         // Parse target into host and port
-        if let Some(addr) = &target.address {
-            if let Some((host, port_str)) = addr.rsplit_once(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    return self.connect(host, port).await.is_ok();
-                }
-            }
+        if let Some(addr) = &target.address
+            && let Some((host, port_str)) = addr.rsplit_once(':')
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            return self.connect(host, port).await.is_ok();
         }
-        
+
         // Try with identifier if no specific address
         let host = &target.identifier;
         let ports = vec![8080, 8443, 9090, 7777];
@@ -251,8 +314,11 @@ impl Transport for TcpTransport {
         }
         false
     }
-    
-    async fn estimate_metrics(&self, target: &super::abstraction::TransportTarget) -> Result<super::abstraction::TransportEstimate> {
+
+    async fn estimate_metrics(
+        &self,
+        target: &super::abstraction::TransportTarget,
+    ) -> Result<super::abstraction::TransportEstimate> {
         Ok(super::abstraction::TransportEstimate {
             latency: Duration::from_millis(50),
             reliability: 0.95,
@@ -262,22 +328,31 @@ impl Transport for TcpTransport {
             confidence: 0.8,
         })
     }
-    
-    async fn send_message(&self, target: &super::abstraction::TransportTarget, message: &SecureMessage) -> Result<super::abstraction::DeliveryReceipt> {
+
+    async fn send_message(
+        &self,
+        target: &super::abstraction::TransportTarget,
+        message: &SecureMessage,
+    ) -> Result<super::abstraction::DeliveryReceipt> {
         // Check circuit breaker before proceeding
         if !self.circuit_breaker.can_proceed().await {
-            return Err(crate::error::SynapseError::TransportError(
-                format!("Circuit breaker is open for target {}", target.identifier)
-            ));
+            return Err(crate::error::SynapseError::TransportError(format!(
+                "Circuit breaker is open for target {}",
+                target.identifier
+            )));
         }
 
         let start_time = Instant::now();
-        let result = self.send_message_internal(&target.identifier, message).await;
+        let result = self
+            .send_message_internal(&target.identifier, message)
+            .await;
 
         // Record the outcome with the circuit breaker
         match &result {
             Ok(_) => {
-                self.circuit_breaker.record_outcome(RequestOutcome::Success).await;
+                self.circuit_breaker
+                    .record_outcome(RequestOutcome::Success)
+                    .await;
                 Ok(super::abstraction::DeliveryReceipt {
                     message_id: message.message_id.0.to_string(),
                     transport_used: self.transport_type(),
@@ -288,33 +363,49 @@ impl Transport for TcpTransport {
                 })
             }
             Err(e) => {
-                self.circuit_breaker.record_outcome(RequestOutcome::Failure(e.to_string())).await;
+                self.circuit_breaker
+                    .record_outcome(RequestOutcome::Failure(e.to_string()))
+                    .await;
                 Err((*e).clone())
             }
         }
     }
-    
+
     async fn receive_messages(&self) -> Result<Vec<super::abstraction::IncomingMessage>> {
         let mut messages = self.received_messages.lock().await;
-        let result: Vec<_> = messages.drain(..).map(|msg| {
-            super::abstraction::IncomingMessage::new(
-                msg,
-                self.transport_type(),
-                String::new() // Source address set later
-            )
-        }).collect();
+        let result: Vec<_> = messages
+            .drain(..)
+            .map(|msg| {
+                super::abstraction::IncomingMessage::new(
+                    msg,
+                    self.transport_type(),
+                    String::new(), // Source address set later
+                )
+            })
+            .collect();
         Ok(result)
     }
-    
-    async fn test_connectivity(&self, target: &super::abstraction::TransportTarget) -> Result<super::abstraction::ConnectivityResult> {
+
+    async fn test_connectivity(
+        &self,
+        target: &super::abstraction::TransportTarget,
+    ) -> Result<super::abstraction::ConnectivityResult> {
         let start = Instant::now();
         let can_reach = self.can_reach(target).await;
-        let rtt = if can_reach { Some(start.elapsed()) } else { None };
-        
+        let rtt = if can_reach {
+            Some(start.elapsed())
+        } else {
+            None
+        };
+
         Ok(super::abstraction::ConnectivityResult {
             connected: can_reach,
             rtt,
-            error: if can_reach { None } else { Some("Could not establish connection".to_string()) },
+            error: if can_reach {
+                None
+            } else {
+                Some("Could not establish connection".to_string())
+            },
             quality: if can_reach { 0.9 } else { 0.0 },
             details: std::collections::HashMap::new(),
         })
@@ -323,11 +414,11 @@ impl Transport for TcpTransport {
     async fn start(&self) -> Result<()> {
         Ok(()) // Already started in new()
     }
-    
+
     async fn stop(&self) -> Result<()> {
         Ok(()) // No cleanup needed
     }
-    
+
     async fn status(&self) -> super::abstraction::TransportStatus {
         if self.listener.is_some() {
             super::abstraction::TransportStatus::Running
@@ -335,7 +426,7 @@ impl Transport for TcpTransport {
             super::abstraction::TransportStatus::Degraded
         }
     }
-    
+
     async fn metrics(&self) -> super::abstraction::TransportMetrics {
         let metrics = self.metrics.read().unwrap();
         metrics.clone()

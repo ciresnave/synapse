@@ -1,18 +1,14 @@
 // Synapse Participant Registry - Core Data Models
-
-use std::str::FromStr;
-
-use chrono::{DateTime, Utc};
+use crate::synapse::TrustRatings;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use super::trust::TrustRatings;
-
-/// Core participant profile in the Synapse network
+use std::str::FromStr;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticipantProfile {
     // Core identity
-    pub global_id: String,              // "alice.work@ai-lab.com"
-    pub display_name: String,           // "Alice Smith (Work)"
-    pub entity_type: EntityType,        // Human, AiModel, Service
+    pub global_id: String,       // "alice.work@ai-lab.com"
+    pub display_name: String,    // "Alice Smith (Work)"
+    pub entity_type: EntityType, // Human, AiModel, Service
     pub identities: Vec<IdentityContext>,
 
     // Discovery and privacy
@@ -31,9 +27,36 @@ pub struct ParticipantProfile {
     // Technical details
     pub public_key: Option<Vec<u8>>,
     pub supported_protocols: Vec<String>,
-    pub last_seen: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Extensible attributes (e.g., password hashes)
+    #[serde(skip)]
+    pub metadata: DashMap<String, String>,
+}
+
+impl Default for ParticipantProfile {
+    fn default() -> Self {
+        Self {
+            global_id: String::new(),
+            display_name: String::new(),
+            entity_type: EntityType::Human,
+            identities: vec![],
+            discovery_permissions: DiscoveryPermissions::default(),
+            availability: AvailabilityStatus::default(),
+            contact_preferences: ContactPreferences::default(),
+            trust_ratings: TrustRatings::default(),
+            relationships: vec![],
+            topic_subscriptions: vec![],
+            organizational_context: None,
+            public_key: None,
+            supported_protocols: vec![],
+            last_seen: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: DashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +80,7 @@ impl FromStr for EntityType {
             "bot" => Ok(EntityType::Bot),
             "organization" => Ok(EntityType::Organization),
             "department" => Ok(EntityType::Department),
-            _ => Err(format!("Unknown entity type: {}", s)),
+            _ => Err(format!("Unknown entity type: {s}")),
         }
     }
 }
@@ -98,7 +121,7 @@ pub struct DiscoveryPermissions {
 pub enum DiscoverabilityLevel {
     /// Anyone can discover, appears in searches
     Public,
-    /// Discoverable through referrals/hints but not in general searches  
+    /// Discoverable through referrals/hints but not in general searches
     Unlisted,
     /// Not discoverable, direct contact only (requires exact contact info)
     Private,
@@ -113,16 +136,16 @@ pub struct AvailabilityStatus {
     pub status_message: Option<String>,
     pub available_hours: Option<BusinessHours>,
     pub time_zone: String,
-    pub last_updated: DateTime<Utc>,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Status {
-    Available,      // Open to contact
-    Busy,          // Limited availability
-    DoNotDisturb,  // No unsolicited contact
-    Away,          // Temporarily unavailable
-    Offline,       // Completely unavailable
+    Available,    // Open to contact
+    Busy,         // Limited availability
+    DoNotDisturb, // No unsolicited contact
+    Away,         // Temporarily unavailable
+    Offline,      // Completely unavailable
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +187,7 @@ pub enum ContactMethod {
 pub struct RateLimits {
     pub max_contacts_per_hour: Option<u32>,
     pub max_contacts_per_day: Option<u32>,
+    // Removed unexpected cfg for chrono
     pub cooldown_period: Option<chrono::Duration>,
 }
 
@@ -182,11 +206,12 @@ pub struct Relationship {
     pub with_participant: String,
     pub relationship_type: RelationshipType,
     pub priority_level: PriorityLevel,
-    pub established_at: DateTime<Utc>,
+    pub established_at: chrono::DateTime<chrono::Utc>,
     pub mutual: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Manual bincode impls are provided elsewhere; do not derive here
 pub enum RelationshipType {
     // Work relationships
     Boss,
@@ -194,17 +219,14 @@ pub enum RelationshipType {
     Colleague,
     Collaborator,
     TeamMember,
-    
     // Personal relationships
     Family,
     Friend,
     Acquaintance,
-    
     // Service relationships
     ServiceProvider,
     Customer,
     Support,
-    
     // Automated relationships
     Bot,
     Service,
@@ -219,8 +241,6 @@ pub enum PriorityLevel {
     Low,        // Can be delayed, batched
     Background, // Minimal priority, batch processing
 }
-
-/// Topic subscription for expertise and interests
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopicSubscription {
     pub topic: String,
@@ -231,10 +251,10 @@ pub struct TopicSubscription {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubscriptionType {
-    Expert,      // Can help with this topic
-    Interested,  // Want to know about this topic
-    Learning,    // Learning about this topic
-    Monitoring,  // Track this for awareness
+    Expert,     // Can help with this topic
+    Interested, // Want to know about this topic
+    Learning,   // Learning about this topic
+    Monitoring, // Track this for awareness
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,11 +298,11 @@ pub struct OrganizationalContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AccessLevel {
-    Public,        // Anyone can see this info
-    Internal,      // Only organization members
-    Department,    // Only department members
-    Team,          // Only team members
-    Confidential,  // Restricted access
+    Public,       // Anyone can see this info
+    Internal,     // Only organization members
+    Department,   // Only department members
+    Team,         // Only team members
+    Confidential, // Restricted access
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,9 +328,10 @@ impl ParticipantProfile {
             organizational_context: None,
             public_key: None,
             supported_protocols: vec!["synapse-v1".to_string()],
-            last_seen: Utc::now(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            last_seen: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: DashMap::new(),
         }
     }
 
@@ -320,8 +341,8 @@ impl ParticipantProfile {
             DiscoverabilityLevel::Public => true,
             DiscoverabilityLevel::Unlisted => {
                 // Unlisted requires some connection or hint
-                self.has_relationship_with(&requester.global_id) ||
-                self.shares_organization_with(requester)
+                self.has_relationship_with(&requester.global_id)
+                    || self.shares_organization_with(requester)
             }
             DiscoverabilityLevel::Private => {
                 // Private requires explicit permission or direct relationship
@@ -329,21 +350,27 @@ impl ParticipantProfile {
             }
             DiscoverabilityLevel::Stealth => {
                 // Stealth requires pre-authorization
-                false // TODO: Implement pre-authorization system
+                // Example: check if requester is in metadata pre_authorized list
+                if let Some(list) = self.metadata.get("pre_authorized") {
+                    let ids: Vec<&str> = list.split(',').collect();
+                    ids.contains(&requester.global_id.as_str())
+                } else {
+                    false
+                }
             }
         }
     }
 
     pub fn has_relationship_with(&self, participant_id: &str) -> bool {
-        self.relationships.iter()
+        self.relationships
+            .iter()
             .any(|rel| rel.with_participant == participant_id)
     }
 
     pub fn shares_organization_with(&self, other: &ParticipantProfile) -> bool {
-        if let (Some(self_org), Some(other_org)) = (
-            &self.organizational_context,
-            &other.organizational_context
-        ) {
+        if let (Some(self_org), Some(other_org)) =
+            (&self.organizational_context, &other.organizational_context)
+        {
             self_org.organization_id == other_org.organization_id
         } else {
             false
@@ -376,7 +403,7 @@ impl Default for AvailabilityStatus {
             status_message: None,
             available_hours: None,
             time_zone: "UTC".to_string(),
-            last_updated: Utc::now(),
+            last_updated: chrono::Utc::now(),
         }
     }
 }
@@ -398,7 +425,7 @@ impl Default for RateLimits {
         Self {
             max_contacts_per_hour: Some(10),
             max_contacts_per_day: Some(50),
-            cooldown_period: Some(chrono::Duration::minutes(5)),
+            cooldown_period: None,
         }
     }
 }

@@ -1,12 +1,13 @@
 //! Basic Chat Example
-//! 
+//!
 //! This example demonstrates how to create a simple chat application
 //! using the synapse library for message routing.
 
-use synapse::{Config, SynapseRouter, SimpleMessage, MessageType};
 use anyhow::Result;
-use tracing::{info, debug};
 use std::collections::HashMap;
+use synapse::types::{MessageType, SimpleMessage};
+use synapse::{Config, SynapseRouter};
+use tracing::{debug, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,16 +25,32 @@ async fn main() -> Result<()> {
     // Initialize routers for both participants
     let alice_router = SynapseRouter::new(alice_config, "alice".to_string()).await?;
     let bob_router = SynapseRouter::new(bob_config, "bob".to_string()).await?;
-    
+
     info!("✅ Chat participants Alice and Bob initialized");
 
     // Simulate a conversation
     let messages = vec![
         ("alice", "bob", "Hello Bob! How are you today?"),
-        ("bob", "alice", "Hi Alice! I'm doing great, thanks for asking. How about you?"),
-        ("alice", "bob", "I'm doing well too! Are you working on anything interesting?"),
-        ("bob", "alice", "Yes! I'm learning about distributed messaging systems. It's fascinating!"),
-        ("alice", "bob", "That sounds really cool! I'd love to hear more about it sometime."),
+        (
+            "bob",
+            "alice",
+            "Hi Alice! I'm doing great, thanks for asking. How about you?",
+        ),
+        (
+            "alice",
+            "bob",
+            "I'm doing well too! Are you working on anything interesting?",
+        ),
+        (
+            "bob",
+            "alice",
+            "Yes! I'm learning about distributed messaging systems. It's fascinating!",
+        ),
+        (
+            "alice",
+            "bob",
+            "That sounds really cool! I'd love to hear more about it sometime.",
+        ),
     ];
 
     info!("🗨️  Starting conversation simulation...");
@@ -49,11 +66,18 @@ async fn main() -> Result<()> {
         };
 
         info!("📨 {}: {}", from, content);
-        debug!("Message details: from={} to={} type={:?}", from, to, message.message_type);
+        debug!(
+            "Message details: from={} to={} type={:?}",
+            from, to, message.message_type
+        );
 
         // Convert to secure message format
-        let router = if from == "alice" { &alice_router } else { &bob_router };
-        
+        let router = if from == "alice" {
+            &alice_router
+        } else {
+            &bob_router
+        };
+
         match router.convert_to_secure_message(&message).await {
             Ok(secure_msg) => {
                 debug!("✅ Message secured with ID: {}", secure_msg.message_id);
@@ -69,6 +93,6 @@ async fn main() -> Result<()> {
 
     info!("💬 Conversation completed successfully!");
     info!("🎉 Basic Chat example finished!");
-    
+
     Ok(())
 }

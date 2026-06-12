@@ -1,7 +1,6 @@
 //! Simplified multi-transport demonstration
 
 use std::time::{Duration, Instant};
-use tokio;
 use synapse::{
     transport::abstraction::MessageUrgency, 
     transport::TransportRoute
@@ -19,6 +18,12 @@ pub struct SimpleMessage {
 /// Multi-transport router demonstration
 pub struct MultiTransportDemo {
     available_transports: Vec<TransportRoute>,
+}
+
+impl Default for MultiTransportDemo {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MultiTransportDemo {
@@ -58,6 +63,22 @@ impl MultiTransportDemo {
     /// Select best transport for message urgency
     pub fn select_transport(&self, urgency: &MessageUrgency) -> TransportRoute {
         match urgency {
+            MessageUrgency::Critical => {
+                // For critical messages, prefer the absolute fastest option
+                for transport in &self.available_transports {
+                    match transport {
+                        TransportRoute::LocalMdns { latency_ms, .. } if *latency_ms < 50 => {
+                            return transport.clone();
+                        }
+                        TransportRoute::DirectUdp { latency_ms, .. } if *latency_ms < 50 => {
+                            return transport.clone();
+                        }
+                        _ => continue,
+                    }
+                }
+                // Fallback to fastest available
+                self.available_transports[0].clone()
+            }
             MessageUrgency::RealTime => {
                 // Prefer lowest latency options
                 for transport in &self.available_transports {
@@ -123,23 +144,23 @@ impl MultiTransportDemo {
         let result = match &selected_transport {
             TransportRoute::DirectTcp { latency_ms, .. } => {
                 tokio::time::sleep(Duration::from_millis(*latency_ms as u64)).await;
-                format!("✅ Sent via TCP in {}ms", latency_ms)
+                format!("✅ Sent via TCP in {latency_ms}ms")
             }
             TransportRoute::DirectUdp { latency_ms, .. } => {
                 tokio::time::sleep(Duration::from_millis(*latency_ms as u64)).await;
-                format!("✅ Sent via UDP in {}ms", latency_ms)
+                format!("✅ Sent via UDP in {latency_ms}ms")
             }
             TransportRoute::LocalMdns { latency_ms, .. } => {
                 tokio::time::sleep(Duration::from_millis(*latency_ms as u64)).await;
-                format!("✅ Sent via mDNS in {}ms", latency_ms)
+                format!("✅ Sent via mDNS in {latency_ms}ms")
             }
             TransportRoute::FastEmailRelay { estimated_latency_ms, relay_server } => {
                 tokio::time::sleep(Duration::from_millis(*estimated_latency_ms as u64)).await;
-                format!("✅ Sent via Fast Email through {} in {}ms", relay_server, estimated_latency_ms)
+                format!("✅ Sent via Fast Email through {relay_server} in {estimated_latency_ms}ms")
             }
             TransportRoute::StandardEmail { estimated_latency_min } => {
                 tokio::time::sleep(Duration::from_millis(*estimated_latency_min as u64 * 100)).await; // Simulate
-                format!("✅ Sent via Standard Email in ~{}min", estimated_latency_min)
+                format!("✅ Sent via Standard Email in ~{estimated_latency_min}min")
             }
             TransportRoute::Udp { latency, .. } => {
                 tokio::time::sleep(*latency).await;
@@ -155,16 +176,16 @@ impl MultiTransportDemo {
             }
             TransportRoute::NatTraversal { latency_ms, .. } => {
                 tokio::time::sleep(Duration::from_millis(*latency_ms as u64)).await;
-                format!("✅ Sent via NAT Traversal in {}ms", latency_ms)
+                format!("✅ Sent via NAT Traversal in {latency_ms}ms")
             }
             TransportRoute::EmailDiscovery { target_transport } => {
                 // Recursively handle the discovered transport
                 match target_transport.as_ref() {
                     TransportRoute::DirectTcp { latency_ms, .. } => {
                         tokio::time::sleep(Duration::from_millis(*latency_ms as u64)).await;
-                        format!("✅ Sent via Email Discovery -> TCP in {}ms", latency_ms)
+                        format!("✅ Sent via Email Discovery -> TCP in {latency_ms}ms")
                     }
-                    _ => format!("✅ Sent via Email Discovery")
+                    _ => "✅ Sent via Email Discovery".to_string()
                 }
             }
         };
@@ -208,10 +229,10 @@ impl MultiTransportDemo {
             match self.send_message(message).await {
                 Ok(result) => {
                     let elapsed = start.elapsed();
-                    println!("   Result: {}", result);
-                    println!("   Actual time: {:?}\n", elapsed);
+                    println!("   Result: {result}");
+                    println!("   Actual time: {elapsed:?}\n");
                 }
-                Err(e) => println!("   Error: {}\n", e),
+                Err(e) => println!("   Error: {e}\n"),
             }
         }
     }

@@ -1,10 +1,11 @@
 //! Authorization and authentication for EMRP email server
 
-use crate::error::Result;
 use crate::email_server::smtp_server::AuthHandler;
+use crate::error::Result;
+use bcrypt::{DEFAULT_COST, hash, verify};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use serde::{Deserialize, Serialize};
 
 /// Default authorization handler for EMRP email server
 pub struct SynapseAuthHandler {
@@ -93,38 +94,60 @@ impl Default for RoutingPermissions {
     }
 }
 
+impl Default for SynapseAuthHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SynapseAuthHandler {
     /// Create a new auth handler with default configuration
     pub fn new() -> Self {
         let mut users = HashMap::new();
-        
-        // Add default admin user
-        users.insert("admin".to_string(), UserAccount {
-            username: "admin".to_string(),
-            password_hash: "admin".to_string(), // In production: hash this!
-            email: "admin@localhost".to_string(),
-            permissions: UserPermissions {
-                can_send: true,
-                can_receive: true,
-                can_relay: true,
-                is_admin: true,
-            },
-            active: true,
+
+        // Add default admin user with properly hashed password
+        let admin_password_hash = hash("admin", DEFAULT_COST).unwrap_or_else(|_| {
+            eprintln!("WARNING: Failed to hash admin password, using fallback");
+            "fallback_hash".to_string()
         });
-        
-        // Add default emrp user
-        users.insert("emrp".to_string(), UserAccount {
-            username: "emrp".to_string(),
-            password_hash: "emrp123".to_string(), // In production: hash this!
-            email: "emrp@localhost".to_string(),
-            permissions: UserPermissions {
-                can_send: true,
-                can_receive: true,
-                can_relay: false,
-                is_admin: false,
+
+        users.insert(
+            "admin".to_string(),
+            UserAccount {
+                username: "admin".to_string(),
+                password_hash: admin_password_hash,
+                email: "admin@localhost".to_string(),
+                permissions: UserPermissions {
+                    can_send: true,
+                    can_receive: true,
+                    can_relay: true,
+                    is_admin: true,
+                },
+                active: true,
             },
-            active: true,
+        );
+
+        // Add default emrp user with properly hashed password
+        let emrp_password_hash = hash("emrp123", DEFAULT_COST).unwrap_or_else(|_| {
+            eprintln!("WARNING: Failed to hash emrp password, using fallback");
+            "fallback_hash".to_string()
         });
+
+        users.insert(
+            "emrp".to_string(),
+            UserAccount {
+                username: "emrp".to_string(),
+                password_hash: emrp_password_hash,
+                email: "emrp@localhost".to_string(),
+                permissions: UserPermissions {
+                    can_send: true,
+                    can_receive: true,
+                    can_relay: false,
+                    is_admin: false,
+                },
+                active: true,
+            },
+        );
 
         Self {
             users: Arc::new(Mutex::new(users)),
@@ -145,6 +168,32 @@ impl SynapseAuthHandler {
         let mut users = self.users.lock().unwrap();
         users.insert(user.username.clone(), user);
         Ok(())
+    }
+
+    /// Add a new user account with password hashing
+    pub fn add_user_with_password(
+        &self,
+        username: &str,
+        password: &str,
+        email: &str,
+        permissions: UserPermissions,
+    ) -> Result<()> {
+        let password_hash = hash(password, DEFAULT_COST).map_err(|e| {
+            crate::error::SynapseError::AuthenticationError(format!(
+                "Failed to hash password: {}",
+                e
+            ))
+        })?;
+
+        let user = UserAccount {
+            username: username.to_string(),
+            password_hash,
+            email: email.to_string(),
+            permissions,
+            active: true,
+        };
+
+        self.add_user(user)
     }
 
     /// Remove a user account
@@ -181,10 +230,10 @@ impl SynapseAuthHandler {
     /// Check if email address is for a local domain
     fn is_local_domain(&self, email: &str) -> bool {
         let routing = self.routing_permissions.lock().unwrap();
-        
+
         if let Some(domain) = email.split('@').nth(1) {
             routing.local_domains.iter().any(|local_domain| {
-                domain == local_domain || domain.ends_with(&format!(".{}", local_domain))
+                domain == local_domain || domain.ends_with(&format!(".{local_domain}"))
             })
         } else {
             false
@@ -194,10 +243,10 @@ impl SynapseAuthHandler {
     /// Check if domain is allowed for relay
     fn is_relay_allowed(&self, email: &str) -> bool {
         let routing = self.routing_permissions.lock().unwrap();
-        
+
         if let Some(domain) = email.split('@').nth(1) {
             routing.relay_domains.iter().any(|relay_domain| {
-                domain == relay_domain || domain.ends_with(&format!(".{}", relay_domain))
+                domain == relay_domain || domain.ends_with(&format!(".{relay_domain}"))
             })
         } else {
             false
@@ -220,10 +269,17 @@ impl SynapseAuthHandler {
 impl AuthHandler for SynapseAuthHandler {
     /// Authenticate user credentials
     fn authenticate(&self, username: &str, password: &str) -> Result<bool> {
-        if let Some(user) = self.get_user(username) {
-            if user.active && user.password_hash == password {
-                // In production: use proper password hashing (bcrypt, argon2, etc.)
-                return Ok(true);
+        if let Some(user) = self.get_user(username)
+            && user.active
+        {
+            // Use bcrypt to verify the password against the stored hash
+            match verify(password, &user.password_hash) {
+                Ok(is_valid) => return Ok(is_valid),
+                Err(_) => {
+                    // If bcrypt verification fails, log and deny access
+                    eprintln!("Password verification failed for user: {}", username);
+                    return Ok(false);
+                }
             }
         }
         Ok(false)
@@ -270,25 +326,26 @@ impl AuthHandler for SynapseAuthHandler {
 /// Create a pre-configured auth handler for testing
 pub fn create_test_auth_handler() -> SynapseAuthHandler {
     let handler = SynapseAuthHandler::new();
-    
+
     // Add test domains
     handler.add_local_domain("synapse.local").unwrap();
     handler.add_local_domain("test.com").unwrap();
     handler.add_relay_domain("example.com").unwrap();
-    
-    // Add test user
-    handler.add_user(UserAccount {
-        username: "testuser".to_string(),
-        password_hash: "testpass".to_string(),
-        email: "test@synapse.local".to_string(),
-        permissions: UserPermissions {
-            can_send: true,
-            can_receive: true,
-            can_relay: true,
-            is_admin: false,
-        },
-        active: true,
-    }).unwrap();
-    
+
+    // Add test user with proper password hashing
+    handler
+        .add_user_with_password(
+            "testuser",
+            "testpass",
+            "test@synapse.local",
+            UserPermissions {
+                can_send: true,
+                can_receive: true,
+                can_relay: true,
+                is_admin: false,
+            },
+        )
+        .unwrap();
+
     handler
 }

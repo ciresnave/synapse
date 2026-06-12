@@ -1,24 +1,20 @@
-//! Demonstration of the EMRP Email Server with automatic connectivity detection
-
-use synapse::{
-    email_server::{ConnectivityDetector, create_test_auth_handler},
-    types::{SecureMessage, SecurityLevel},
-    error::Result,
-    synapse::blockchain::serialization::{UuidWrapper, DateTimeWrapper},
-};
-use tokio::time::{sleep, Duration};
-use tracing::{info, Level};
-use tracing_subscriber;
-use uuid::Uuid;
+//! Demonstration of the Synapse Email Server with automatic connectivity detection
 use chrono::Utc;
 use std::collections::HashMap;
+use synapse::{
+    email_server::{ConnectivityDetector, create_test_auth_handler},
+    error::Result,
+    synapse::blockchain::serialization::UuidWrapper,
+    types::{DateTimeWrapper, SecureMessage, SecurityLevel},
+};
+use tokio::time::{Duration, sleep};
+use tracing::{Level, info};
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .init();
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     info!("🚀 Starting EMRP Email Server Demo");
 
@@ -26,7 +22,7 @@ async fn main() -> Result<()> {
     info!("📡 Testing connectivity detection...");
     let detector = ConnectivityDetector::default();
     let assessment = detector.assess_connectivity().await?;
-    
+
     info!("Connectivity Assessment Results:");
     info!("  Can bind SMTP: {}", assessment.can_bind_smtp);
     info!("  Can bind IMAP: {}", assessment.can_bind_imap);
@@ -38,20 +34,24 @@ async fn main() -> Result<()> {
     // Step 2: Test authentication system
     info!("🔐 Testing authentication system...");
     let _auth_handler = create_test_auth_handler();
-    
+
     info!("✅ Authentication handler created successfully!");
 
     // Step 3: Test server mode selection
     info!("🔄 Demonstrating server mode selection...");
-    
+
     match &assessment.recommended_config {
-        synapse::email_server::ServerRecommendation::RunLocalServer { smtp_port, imap_port, external_ip } => {
+        synapse::email_server::ServerRecommendation::RunLocalServer {
+            smtp_port,
+            imap_port,
+            external_ip,
+        } => {
             info!("🏠 Local Server Mode:");
             info!("  SMTP Port: {}", smtp_port);
             info!("  IMAP Port: {}", imap_port);
             info!("  External IP: {}", external_ip);
             info!("  Status: Ready to accept external connections");
-            
+
             // In this mode, the server would start SMTP and IMAP listeners
             info!("  📧 SMTP server would bind to 0.0.0.0:{}", smtp_port);
             info!("  📬 IMAP server would bind to 0.0.0.0:{}", imap_port);
@@ -93,14 +93,14 @@ async fn main() -> Result<()> {
     // Step 5: Performance simulation
     info!("⚡ Simulating server performance...");
     let start_time = std::time::Instant::now();
-    
+
     // Simulate connectivity checks
     for i in 0..3 {
         let _quick_check = detector.test_external_port(25).await;
         sleep(Duration::from_millis(50)).await;
         info!("  Connectivity check {}/3 completed", i + 1);
     }
-    
+
     let elapsed = start_time.elapsed();
     info!("⏱️  Performance simulation completed in {:?}", elapsed);
 
@@ -130,9 +130,9 @@ async fn main() -> Result<()> {
     info!("  ✅ Message handling working");
     info!("  ✅ Performance simulation working");
     info!("  ✅ Security features available");
-    
+
     info!("🎉 EMRP Email Server Demo completed successfully!");
-    
+
     match &assessment.recommended_config {
         synapse::email_server::ServerRecommendation::RunLocalServer { .. } => {
             info!("💡 Your system is ready to run a local EMRP email server!");

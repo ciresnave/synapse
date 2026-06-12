@@ -1,9 +1,11 @@
-use crate::synapse::blockchain::{Block, BlockchainConfig, Transaction, serialization::DateTimeWrapper};
+use crate::synapse::blockchain::{
+    Block, BlockchainConfig, Transaction, serialization::DateTimeWrapper,
+};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 /// Consensus mechanism for Synapse blockchain
 pub struct ConsensusEngine {
@@ -19,6 +21,7 @@ pub struct ValidatorInfo {
     pub trust_score: f64,
     pub last_activity: DateTime<Utc>,
     pub is_active: bool,
+    pub public_key: Vec<u8>, // Ed25519 public key for signature verification
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,14 +39,15 @@ pub struct Vote {
     pub validator_id: String,
     pub block_hash: String,
     pub vote_type: VoteType,
+    pub round_number: u64,
     pub timestamp: DateTime<Utc>,
     pub signature: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VoteType {
-    Prevote,    // Initial vote for a block
-    Precommit,  // Commitment to finalize a block
+    Prevote,   // Initial vote for a block
+    Precommit, // Commitment to finalize a block
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,19 +79,22 @@ impl ConsensusEngine {
     /// Add a validator to the consensus
     pub async fn add_validator(&mut self, validator: ValidatorInfo) -> Result<()> {
         debug!("Adding validator: {}", validator.participant_id);
-        
+
         // Validate minimum stake requirement
-        if validator.stake_amount < self.config.staking_requirements.min_stake_for_consensus as u64 {
+        if validator.stake_amount < self.config.staking_requirements.min_stake_for_consensus as u64
+        {
             return Err(anyhow::anyhow!("Insufficient stake amount"));
         }
 
         // Validate minimum trust score
         // For now, we'll use a simple minimum trust threshold
-        if validator.trust_score < 50.0 { // Minimum 50% trust score
+        if validator.trust_score < 50.0 {
+            // Minimum 50% trust score
             return Err(anyhow::anyhow!("Insufficient trust score"));
         }
 
-        self.validators.insert(validator.participant_id.clone(), validator);
+        self.validators
+            .insert(validator.participant_id.clone(), validator);
         info!("Validator added successfully");
         Ok(())
     }
@@ -95,7 +102,7 @@ impl ConsensusEngine {
     /// Remove a validator from consensus
     pub async fn remove_validator(&mut self, participant_id: &str) -> Result<()> {
         debug!("Removing validator: {}", participant_id);
-        
+
         if let Some(_validator) = self.validators.remove(participant_id) {
             info!("Validator {} removed successfully", participant_id);
             Ok(())
@@ -111,15 +118,19 @@ impl ConsensusEngine {
         transactions: Vec<Transaction>,
     ) -> Result<ConsensusRound> {
         self.current_round += 1;
-        
-        debug!("Starting consensus round {} for block height {}", 
-               self.current_round, block_height);
+
+        debug!(
+            "Starting consensus round {} for block height {}",
+            self.current_round, block_height
+        );
 
         // Select proposer for this round (round-robin based on stake)
         let proposer = self.select_proposer()?;
-        
+
         // Create proposed block
-        let proposed_block = self.create_proposed_block(block_height, transactions, &proposer).await?;
+        let proposed_block = self
+            .create_proposed_block(block_height, transactions, &proposer)
+            .await?;
 
         let consensus_round = ConsensusRound {
             round_number: self.current_round,
@@ -130,8 +141,10 @@ impl ConsensusEngine {
             finalized_at: None,
         };
 
-        info!("Consensus round {} started with proposer: {}", 
-              self.current_round, proposer);
+        info!(
+            "Consensus round {} started with proposer: {}",
+            self.current_round, proposer
+        );
 
         Ok(consensus_round)
     }
@@ -145,7 +158,9 @@ impl ConsensusEngine {
         debug!("Processing vote from validator: {}", vote.validator_id);
 
         // Validate voter is an active validator
-        let validator = self.validators.get(&vote.validator_id)
+        let validator = self
+            .validators
+            .get(&vote.validator_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown validator"))?;
 
         if !validator.is_active {
@@ -156,7 +171,9 @@ impl ConsensusEngine {
         self.validate_vote_signature(&vote)?;
 
         // Store the vote
-        consensus_round.votes.insert(vote.validator_id.clone(), vote);
+        consensus_round
+            .votes
+            .insert(vote.validator_id.clone(), vote);
 
         // Check if we have enough votes to finalize
         let finalized = self.check_finalization(consensus_round).await?;
@@ -180,7 +197,7 @@ impl ConsensusEngine {
         for (validator_id, vote) in &consensus_round.votes {
             if let Some(validator) = self.validators.get(validator_id) {
                 _vote_stake += validator.stake_amount;
-                
+
                 if matches!(vote.vote_type, VoteType::Precommit) {
                     precommit_stake += validator.stake_amount;
                 }
@@ -194,10 +211,8 @@ impl ConsensusEngine {
     fn select_proposer(&self) -> Result<String> {
         // Simple round-robin selection weighted by stake
         // In practice, this would be more sophisticated
-        let active_validators: Vec<&ValidatorInfo> = self.validators
-            .values()
-            .filter(|v| v.is_active)
-            .collect();
+        let active_validators: Vec<&ValidatorInfo> =
+            self.validators.values().filter(|v| v.is_active).collect();
 
         if active_validators.is_empty() {
             return Err(anyhow::anyhow!("No active validators"));
@@ -224,18 +239,57 @@ impl ConsensusEngine {
             number: height,
             timestamp: DateTimeWrapper(Utc::now()),
             previous_hash: "".to_string(), // Would be actual previous hash
-            hash: "".to_string(), // Would be calculated
+            hash: "".to_string(),          // Would be calculated
             transactions,
-            nonce: 0, // Would be set during consensus
+            nonce: 0,
             validator: proposer.to_string(),
+            signature: None, // Will be added when block is signed
         };
 
         Ok(block)
     }
 
-    fn validate_vote_signature(&self, _vote: &Vote) -> Result<()> {
-        // Placeholder for signature validation
-        // In practice, this would verify the vote signature against the validator's public key
+    fn validate_vote_signature(&self, vote: &Vote) -> Result<()> {
+        use ring::signature::{ED25519, UnparsedPublicKey};
+
+        // Get validator's public key
+        let validator = self
+            .validators
+            .get(&vote.validator_id)
+            .ok_or_else(|| anyhow::anyhow!("Validator not found"))?;
+
+        // Validate signature length
+        if vote.signature.len() != 64 {
+            return Err(anyhow::anyhow!("Invalid signature length"));
+        }
+
+        // Validate public key length
+        if validator.public_key.len() != 32 {
+            return Err(anyhow::anyhow!("Invalid public key length"));
+        }
+
+        // Create the message that was signed (vote data without signature)
+        let vote_data = format!(
+            "{}:{}:{}:{}:{:?}",
+            vote.validator_id,
+            vote.block_hash,
+            vote.timestamp.timestamp(),
+            vote.round_number,
+            vote.vote_type
+        );
+
+        // Verify the signature
+        let public_key = UnparsedPublicKey::new(&ED25519, &validator.public_key);
+        public_key
+            .verify(vote_data.as_bytes(), &vote.signature)
+            .map_err(|_| anyhow::anyhow!("Invalid vote signature"))?;
+
+        // Log successful validation
+        debug!(
+            "Vote signature validated for validator: {}",
+            vote.validator_id
+        );
+
         Ok(())
     }
 
@@ -266,12 +320,15 @@ impl ConsensusEngine {
         for (validator_id, new_trust_score) in trust_updates {
             if let Some(validator) = self.validators.get_mut(&validator_id) {
                 validator.trust_score = new_trust_score;
-                
+
                 // Deactivate validator if trust falls below threshold
-                if new_trust_score < 50.0 { // Minimum trust threshold
+                if new_trust_score < 50.0 {
+                    // Minimum trust threshold
                     validator.is_active = false;
-                    warn!("Validator {} deactivated due to low trust score: {}", 
-                          validator_id, new_trust_score);
+                    warn!(
+                        "Validator {} deactivated due to low trust score: {}",
+                        validator_id, new_trust_score
+                    );
                 }
             }
         }

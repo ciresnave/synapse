@@ -10,7 +10,13 @@ homepage = "https://github.com/ciresnave/synapse"
 documentation = "https://docs.rs/synapse"
 readme = "README.md"
 keywords = ["neural", "communication", "ai", "federated", "blockchain"]
-categories = ["network-programming", "web-programming", "cryptography", "science", "wasm"]
+categories = [
+    "network-programming",
+    "web-programming",
+    "cryptography",
+    "science",
+    "wasm",
+]
 exclude = [
     "*.md",
     "docs/",
@@ -19,7 +25,7 @@ exclude = [
     ".git/",
     ".vscode/",
     "*.bat",
-    "*.sh"
+    "*.sh",
 ]
 
 [dependencies]
@@ -31,10 +37,20 @@ serde_json = { version = "1.0", features = ["std"] }
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits"] }
-tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "fs", "io-util", "io-std", "signal"], optional = true }
+tokio = { version = "1.46.1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "time",
+    "sync",
+    "fs",
+    "io-util",
+    "io-std",
+    "signal",
+], optional = true }
 dashmap = { version = "6.0", optional = true }
 ahash = { version = "0.8", optional = true }
-bincode = { version = "2.0.1", optional = true }
+bincode = { version = "2.0.1", features = ["serde"], optional = true }
 rand = { version = "0.9.1", optional = true }
 auto-discovery = { version = "0.2", optional = true, features = ["mdns"] }
 
@@ -67,6 +83,12 @@ tokio-tungstenite = { version = "0.27.0", optional = true }
 tungstenite = { version = "0.27.0", optional = true }
 futures-util = { version = "0.3", optional = true }
 
+# NAT traversal dependencies for real implementation
+bytecodec = { version = "0.4", optional = true }
+stun_codec = { version = "0.3", optional = true }
+bytes = { version = "1.5", optional = true }
+igd = { version = "0.12", optional = true }       # UPnP port mapping
+
 # System monitoring - optional
 sysinfo = { version = "0.36.0", optional = true }
 parking_lot = { version = "0.12", optional = true }
@@ -76,13 +98,36 @@ async-smtp = { version = "0.10", optional = true }
 async-imap = { version = "0.10", optional = true }
 lettre = { version = "0.11", optional = true }
 mail-parser = { version = "0.11", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+native-tls = { version = "0.2", optional = true }
 
 # Database connections - optional
-sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"], optional = true }
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+], optional = true }
 redis = { version = "0.32.4", features = ["tokio-comp"], optional = true }
 
-# Authentication framework
-auth-framework = { version = "0.3", optional = true, features = ["oauth-device-flows", "enhanced-device-flow"] }
+# Authentication framework - Latest version with enhanced features
+auth-framework = { version = "0.3.0", optional = true, features = [
+    "oauth-device-flows",
+    "enhanced-device-flow",
+    "config-management",
+    "enterprise-features",
+    "token-to-profile",
+] }
+
+# Missing dependencies that are needed
+regex = { version = "1.10", optional = true }
+jsonwebtoken = { version = "9.3", optional = true }
+pem = { version = "3.0", optional = true }
+bcrypt = { version = "0.15", optional = true }
+hmac = { version = "0.12", optional = true }
+hex = { version = "0.4", optional = true }
 
 # Network discovery - uses auto-discovery crate
 socket2 = { version = "0.6.0", optional = true } # Used for other network operations
@@ -91,8 +136,14 @@ socket2 = { version = "0.6.0", optional = true } # Used for other network operat
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", features = [
-    "console", "Window", "WebSocket", "MessageEvent", "CloseEvent", 
-    "ErrorEvent", "BinaryType", "BroadcastChannel"
+    "console",
+    "Window",
+    "WebSocket",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    "BinaryType",
+    "BroadcastChannel",
 ], optional = true }
 js-sys = { version = "0.3", optional = true }
 getrandom = { version = "0.3.3", optional = true }
@@ -108,7 +159,7 @@ pretty_assertions = "1.0"
 tempfile = "3.0"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 
-# WASM-specific dev dependencies  
+# WASM-specific dev dependencies
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
 
@@ -126,6 +177,11 @@ wasm-bindgen-test = "0.3"
 # name = "synapse-demo"
 # path = "src/bin/synapse_demo.rs"
 # required-features = ["native"]
+
+[[example]]
+name = "auth_framework_v3_demo"
+path = "examples/auth_framework_v3_demo.rs"
+required-features = ["auth", "core"]
 
 [[example]]
 name = "hello_world"
@@ -209,14 +265,14 @@ std = []
 # Minimal feature set for basic functionality
 minimal = [
     "dep:tokio",
-    "dep:bincode", 
+    "dep:bincode",
     "dep:rand",
     "dep:dashmap",
     "telemetry",
     "dep:toml",
     "dep:config",
     "dep:base64",
-    "dep:sha2"
+    "dep:sha2",
 ]
 
 # Core functionality (minimal dependencies)
@@ -224,18 +280,24 @@ core = [
     "minimal",
     "crypto",
     "dep:ahash",
-    "dep:clap"
+    "dep:clap",
+    "dep:regex",
+    "dep:jsonwebtoken",
+    "dep:pem",
+    "dep:bcrypt",
+    "dep:hmac",
+    "dep:hex",
 ]
 
 # Feature definitions for subsystems and implementations
 crypto = [
-    "dep:ring", 
-    "dep:rsa", 
-    "dep:aes-gcm", 
-    "dep:sha2", 
-    "dep:ed25519-dalek", 
-    "dep:blake3", 
-    "dep:base64"
+    "dep:ring",
+    "dep:rsa",
+    "dep:aes-gcm",
+    "dep:sha2",
+    "dep:ed25519-dalek",
+    "dep:blake3",
+    "dep:base64",
 ]
 http = ["dep:reqwest", "dep:tokio-tungstenite", "dep:tungstenite"]
 mdns = ["dep:auto-discovery", "dep:socket2"] # Using auto-discovery crate now
@@ -244,39 +306,40 @@ cache = ["dep:redis"]
 telemetry = ["dep:tracing-subscriber"]
 
 # Networking feature (adds network transport capabilities)
-networking = [
+networking = ["core", "http", "mdns", "dep:futures-util"]
+
+# NAT traversal feature (adds real NAT traversal capabilities)
+nat_traversal = [
     "core",
-    "http",
-    "mdns",
-    "dep:futures-util"
+    "dep:bytecodec",
+    "dep:stun_codec",
+    "dep:bytes",
+    "dep:igd",
 ]
 
 # Email feature (adds email server capabilities)
 email = [
     "core",
     "dep:async-smtp",
-    "dep:async-imap", 
+    "dep:async-imap",
     "dep:lettre",
-    "dep:mail-parser"
+    "dep:mail-parser",
+    "dep:native-tls",
+    "dep:tokio-rustls",
+    "dep:rustls-native-certs",
 ]
 
 # Database feature (adds database support)
-database = [
-    "core",
-    "cache",
-    "dep:sqlx"
-]
+database = ["core", "cache", "dep:sqlx"]
 
 # Authentication feature (adds federated authentication)
-auth = [
-    "core",
-    "auth-framework"
-]
+auth = ["core", "auth-framework"]
 
 # Full native platform support (the original working config but with updated deps)
 native = [
     "core",
     "networking",
+    "nat_traversal",
     "email",
     "database",
     "auth",
@@ -286,7 +349,7 @@ native = [
     "cache",
     "telemetry",
     "dep:sysinfo",
-    "dep:parking_lot"
+    "dep:parking_lot",
 ]
 
 # WASM feature for browser environments
@@ -299,7 +362,7 @@ wasm = [
     "dep:gloo-storage",
     "dep:console_error_panic_hook",
     "dep:wasm-logger",
-    "dep:getrandom"
+    "dep:getrandom",
 ]
 
 [lib]

@@ -1,36 +1,27 @@
-//! Email transport layer for EMRP
-
+use crate::error::EmailError;
+use crate::types::{MessageType, SecureMessage, SecurityLevel};
+/// Email transport layer for EMRP
 use crate::{
-    types::{SimpleMessage, MessageType, EmailConfig, SecureMessage},
-    error::{Result, EmailError},
+    error::Result,
+    types::{EmailConfig, SimpleMessage},
 };
-use std::string::ToString;
+use base64::Engine;
 use std::collections::HashMap;
+use std::string::ToString;
 
-#[cfg(feature = "email")]
 use lettre::{
-    message::{header, Mailbox, Message, SinglePart},
-    transport::smtp::authentication::Credentials,
     SmtpTransport, Transport,
+    message::{Mailbox, Message, SinglePart, header},
+    transport::smtp::authentication::Credentials,
 };
-
-use base64::Engine as _;
 
 /// Email transport for sending and receiving EMRP messages
-#[cfg(feature = "email")]
 #[derive(Debug, Clone)]
 pub struct EmailTransport {
     config: EmailConfig,
     smtp_transport: SmtpTransport,
 }
 
-/// Dummy email transport for when email feature is disabled
-#[cfg(not(feature = "email"))]
-pub struct EmailTransport {
-    config: EmailConfig, // Configuration for email transport (stored for future use)
-}
-
-#[cfg(feature = "email")]
 impl EmailTransport {
     /// Create a new email transport
     pub async fn new(config: EmailConfig) -> Result<Self> {
@@ -53,11 +44,7 @@ impl EmailTransport {
                     config.smtp.password.clone(),
                 ));
 
-            if config.smtp.use_tls {
-                transport_builder.build()
-            } else {
-                transport_builder.build()
-            }
+            transport_builder.build()
         };
 
         Ok(Self {
@@ -67,26 +54,49 @@ impl EmailTransport {
     }
 
     /// Send an EMRP message via email
-    pub async fn send_message(&self, secure_msg: &SecureMessage, from_email: &str, to_email: &str, simple_msg: &SimpleMessage) -> Result<()> {
-        let email_message = self.create_email_message(secure_msg, from_email, to_email, simple_msg)?;
-        
-        let _response = self.smtp_transport.send(&email_message)
+    pub async fn send_message(&self, simple_msg: &SimpleMessage) -> Result<()> {
+        // Use simple_msg to construct the email message
+        let from_email = &simple_msg.from_entity;
+        let to_email = &simple_msg.to;
+        let secure_msg = SecureMessage {
+            message_id: Default::default(),
+            to_global_id: to_email.clone(),
+            from_global_id: from_email.clone(),
+            encrypted_content: simple_msg.content.as_bytes().to_vec(),
+            signature: vec![],
+            timestamp: Default::default(),
+            security_level: SecurityLevel::Authenticated,
+            routing_path: vec![],
+            metadata: simple_msg.metadata.clone(),
+        };
+        let email_message =
+            self.create_email_message(&secure_msg, from_email, to_email, simple_msg)?;
+        let _response = self
+            .smtp_transport
+            .send(&email_message)
             .map_err(|e| EmailError::SendFailed(e.to_string()))?;
-
         tracing::debug!("Email sent successfully");
         Ok(())
     }
 
     /// Create an email message with EMRP headers
-    fn create_email_message(&self, secure_msg: &SecureMessage, from_email: &str, to_email: &str, simple_msg: &SimpleMessage) -> Result<Message> {
-        let from_mailbox = from_email.parse::<Mailbox>()
-            .map_err(|e| EmailError::InvalidFormat(format!("Invalid from address: {}", e)))?;
-        
-        let to_mailbox = to_email.parse::<Mailbox>()
-            .map_err(|e| EmailError::InvalidFormat(format!("Invalid to address: {}", e)))?;
+    fn create_email_message(
+        &self,
+        secure_msg: &SecureMessage,
+        from_email: &str,
+        to_email: &str,
+        simple_msg: &SimpleMessage,
+    ) -> Result<Message> {
+        let from_mailbox = from_email
+            .parse::<Mailbox>()
+            .map_err(|e| EmailError::InvalidFormat(format!("Invalid from address: {e}")))?;
+
+        let to_mailbox = to_email
+            .parse::<Mailbox>()
+            .map_err(|e| EmailError::InvalidFormat(format!("Invalid to address: {e}")))?;
 
         let subject = self.generate_subject(simple_msg);
-        
+
         // Create message without custom headers first (lettre doesn't support arbitrary headers well)
         let body_content = if secure_msg.encrypted_content.is_empty() {
             simple_msg.content.clone()
@@ -99,9 +109,11 @@ impl EmailTransport {
             .from(from_mailbox)
             .to(to_mailbox)
             .subject(subject)
-            .singlepart(SinglePart::builder()
-                .header(header::ContentType::TEXT_PLAIN)
-                .body(body_content))
+            .singlepart(
+                SinglePart::builder()
+                    .header(header::ContentType::TEXT_PLAIN)
+                    .body(body_content),
+            )
             .map_err(|e| EmailError::InvalidFormat(e.to_string()))?;
 
         Ok(message)
@@ -110,21 +122,33 @@ impl EmailTransport {
     /// Generate appropriate email subject
     fn generate_subject(&self, simple_msg: &SimpleMessage) -> String {
         match simple_msg.message_type {
-            MessageType::ToolCall => format!("[Synapse Tool Call] {} → {}", simple_msg.from_entity, simple_msg.to),
-            MessageType::ToolResponse => format!("[Synapse Tool Response] {} → {}", simple_msg.from_entity, simple_msg.to),
-            MessageType::System => format!("[Synapse System] {} → {}", simple_msg.from_entity, simple_msg.to),
+            MessageType::ToolCall => format!(
+                "[Synapse Tool Call] {} → {}",
+                simple_msg.from_entity, simple_msg.to
+            ),
+            MessageType::ToolResponse => format!(
+                "[Synapse Tool Response] {} → {}",
+                simple_msg.from_entity, simple_msg.to
+            ),
+            MessageType::System => format!(
+                "[Synapse System] {} → {}",
+                simple_msg.from_entity, simple_msg.to
+            ),
             MessageType::Broadcast => format!("[Synapse Broadcast] {}", simple_msg.from_entity),
-            MessageType::StreamChunk => format!("[Synapse Stream] {} → {}", simple_msg.from_entity, simple_msg.to),
+            MessageType::StreamChunk => format!(
+                "[Synapse Stream] {} → {}",
+                simple_msg.from_entity, simple_msg.to
+            ),
             MessageType::Direct => {
                 // Extract first few words for subject
                 let words: Vec<&str> = simple_msg.content.split_whitespace().take(5).collect();
                 let preview = words.join(" ");
                 let preview = if simple_msg.content.split_whitespace().count() > 5 {
-                    format!("{}...", preview)
+                    format!("{preview}...")
                 } else {
                     preview
                 };
-                format!("[Synapse] {}", preview)
+                format!("[Synapse] {preview}")
             }
         }
     }
@@ -133,9 +157,9 @@ impl EmailTransport {
     pub async fn receive_messages(&self) -> Result<Vec<SynapseEmailMessage>> {
         // Note: This is a simplified IMAP implementation
         // In production, you'd want to use async-imap for full functionality
-        
+
         tracing::debug!("Checking for new messages via IMAP simulation");
-        
+
         // For now, simulate checking for messages
         // In a real implementation, this would:
         // 1. Connect to IMAP server
@@ -144,10 +168,10 @@ impl EmailTransport {
         // 4. Search for new EMRP messages
         // 5. Parse email headers and body
         // 6. Convert to SynapseEmailMessage structs
-        
+
         // Simulate finding some messages (empty for now)
         let messages = Vec::new();
-        
+
         tracing::debug!("Retrieved {} messages from IMAP", messages.len());
         Ok(messages)
     }
@@ -156,9 +180,9 @@ impl EmailTransport {
     pub async fn receive_messages_imap(&self) -> Result<Vec<SynapseEmailMessage>> {
         // This would be the real IMAP implementation
         // For now, we'll provide a framework that could be extended
-        
+
         tracing::info!("Attempting IMAP connection to {}", self.config.imap.host);
-        
+
         // In a real implementation, you would:
         // let tls = async_native_tls::TlsConnector::new();
         // let client = async_imap::connect(
@@ -166,17 +190,17 @@ impl EmailTransport {
         //     &self.config.imap.host,
         //     &tls,
         // ).await?;
-        
+
         // let mut imap_session = client
         //     .login(&self.config.imap.username, &self.config.imap.password)
         //     .await?;
-        
+
         // imap_session.select("INBOX").await?;
-        
+
         // let messages = imap_session.search("UNSEEN").await?;
-        
+
         // Parse and convert messages here...
-        
+
         // For now, return empty list
         tracing::warn!("Full IMAP implementation requires async-imap dependency");
         Ok(Vec::new())
@@ -184,7 +208,7 @@ impl EmailTransport {
 
     /// Check if SMTP is properly configured
     pub fn is_smtp_configured(&self) -> bool {
-        !self.config.smtp.username.is_empty() 
+        !self.config.smtp.username.is_empty()
             && !self.config.smtp.password.is_empty()
             && !self.config.smtp.host.is_empty()
             && self.config.smtp.port > 0
@@ -192,7 +216,7 @@ impl EmailTransport {
 
     /// Check if IMAP is properly configured
     pub fn is_imap_configured(&self) -> bool {
-        !self.config.imap.username.is_empty() 
+        !self.config.imap.username.is_empty()
             && !self.config.imap.password.is_empty()
             && !self.config.imap.host.is_empty()
             && self.config.imap.port > 0
@@ -213,29 +237,6 @@ impl EmailTransport {
     pub async fn stop(&self) -> Result<()> {
         // No specific cleanup needed for email transport
         Ok(())
-    }
-}
-
-#[cfg(not(feature = "email"))]
-impl EmailTransport {
-    pub async fn new(config: EmailConfig) -> Result<Self> {
-        Ok(Self { _config: config })
-    }
-    
-    pub async fn send_message(&self, _message: &SimpleMessage) -> Result<()> {
-        Err(crate::error::SynapseError::Anyhow("Email feature not enabled".to_string()))
-    }
-    
-    pub async fn receive_messages(&self) -> Result<Vec<SimpleMessage>> {
-        Ok(Vec::new())
-    }
-    
-    pub fn is_smtp_configured(&self) -> bool {
-        false
-    }
-    
-    pub fn is_imap_configured(&self) -> bool {
-        false
     }
 }
 
@@ -277,14 +278,14 @@ impl SynapseEmailMessage {
     }
 }
 
-#[cfg(all(test, feature = "email"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_subject_generation() {
         let transport = create_test_transport();
-        
+
         let tool_call = SimpleMessage {
             to: "FileSystem".to_string(),
             from_entity: "Claude".to_string(),
@@ -292,7 +293,7 @@ mod tests {
             message_type: MessageType::ToolCall,
             metadata: HashMap::new(),
         };
-        
+
         let subject = transport.generate_subject(&tool_call);
         assert_eq!(subject, "[Synapse Tool Call] Claude → FileSystem");
 
@@ -303,7 +304,7 @@ mod tests {
             message_type: MessageType::Direct,
             metadata: HashMap::new(),
         };
-        
+
         let subject = transport.generate_subject(&direct_msg);
         assert_eq!(subject, "[Synapse] Hello! How can I help...");
     }
