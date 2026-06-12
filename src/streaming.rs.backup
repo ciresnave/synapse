@@ -1,0 +1,125 @@
+/// Manager for streaming sessions
+pub struct StreamManager {
+    pub router: Arc<SynapseRouter>,
+}
+
+/// Represents a streaming session between two entities
+pub struct StreamSession {
+    pub to_entity: String,
+    pub from_entity: String,
+    pub sender: mpsc::UnboundedSender<StreamChunk>,
+    pub receiver: Option<mpsc::UnboundedReceiver<StreamChunk>>,
+    pub stream_id: String,
+    pub chunk_counter: u64,
+}
+use crate::router::SynapseRouter;
+use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
+use crate::types::{MessageType, SimpleMessage, StreamChunk};
+#[cfg(feature = "base64")]
+use base64::Engine;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use uuid::Uuid;
+impl StreamManager {
+    pub fn new(router: Arc<SynapseRouter>) -> Self {
+        Self { router }
+    }
+
+    pub async fn start_stream(
+        &self,
+        to_entity: &str,
+        from_entity: &str,
+    ) -> crate::error::Result<StreamSession> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Ok(StreamSession {
+            to_entity: to_entity.to_string(),
+            from_entity: from_entity.to_string(),
+            sender: tx,
+            receiver: Some(rx),
+            stream_id: UuidWrapper::new(Uuid::new_v4()).to_string(),
+            chunk_counter: 0,
+        })
+    }
+
+    pub async fn send_chunk(
+        &self,
+        session: &mut StreamSession,
+        data: &[u8],
+    ) -> crate::error::Result<()> {
+        let chunk = StreamChunk {
+            stream_id: UuidWrapper::new(
+                Uuid::parse_str(&session.stream_id)
+                    .map_err(|e| crate::error::SynapseError::InvalidMessageFormat(e.to_string()))?,
+            ),
+            sequence_number: session.chunk_counter,
+            chunk_type: "data".to_string(),
+            #[cfg(feature = "base64")]
+            data: base64::engine::general_purpose::STANDARD.encode(data),
+#[cfg(not(feature = "base64"))]
+            data: String::from_utf8_lossy(data).to_string(),
+            #[cfg(feature = "chrono")]
+            timestamp: DateTimeWrapper::new(chrono::Utc::now()),
+#[cfg(not(feature = "chrono"))]
+            timestamp: DateTimeWrapper::default(),
+            priority: crate::types::StreamPriority::Background,
+            is_final: false,
+            compression: "none".to_string(),
+        };
+
+        session.chunk_counter += 1;
+
+        let content = serde_json::to_string(&chunk)
+            .map_err(|e| crate::error::SynapseError::SerializationError(e.to_string()))?;
+
+        let simple_msg = SimpleMessage {
+            to: session.to_entity.clone(),
+            from_entity: session.from_entity.clone(),
+            content,
+            message_type: MessageType::StreamChunk,
+            metadata: HashMap::new(),
+        };
+
+        self.router
+            .send_message(simple_msg, session.to_entity.clone())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn finish_stream(&self, session: &mut StreamSession) -> crate::error::Result<()> {
+        // Mark the stream as finished and send a final chunk if needed
+        let chunk = StreamChunk {
+            stream_id: UuidWrapper::new(
+                Uuid::parse_str(&session.stream_id)
+                    .map_err(|e| crate::error::SynapseError::InvalidMessageFormat(e.to_string()))?,
+            ),
+            sequence_number: session.chunk_counter,
+            chunk_type: "end".to_string(),
+            data: String::new(),
+            #[cfg(feature = "chrono")]
+            timestamp: DateTimeWrapper::new(chrono::Utc::now()),
+#[cfg(not(feature = "chrono"))]
+            timestamp: DateTimeWrapper::default(),
+            priority: crate::types::StreamPriority::Background,
+            is_final: true,
+            compression: "none".to_string(),
+        };
+
+        let content = serde_json::to_string(&chunk)
+            .map_err(|e| crate::error::SynapseError::SerializationError(e.to_string()))?;
+
+        let simple_msg = SimpleMessage {
+            to: session.to_entity.clone(),
+            from_entity: session.from_entity.clone(),
+            content,
+            message_type: MessageType::StreamChunk,
+            metadata: HashMap::new(),
+        };
+
+        self.router
+            .send_message(simple_msg, session.to_entity.clone())
+            .await?;
+        Ok(())
+    }
+}
