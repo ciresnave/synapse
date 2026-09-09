@@ -316,9 +316,37 @@ format observed off a raw socket in Probe B. **Receiver:** Synapse, UDP, via
 [inbound] RESULT: FOREIGN -> SYNAPSE SUCCEEDED
 ```
 
-**Payload, sender identity, recipient and security level all survived the crossing.** The
-`encrypted_content` field was sent as a JSON array of byte integers — the encoding observed in Probe
-B, not base64 — and deserialised correctly.
+**Payload, sender identity, recipient and security level all survived the crossing.**
+
+##### ⚠️ The encoding detail a foreign client author will get wrong first
+
+Stated as a finding rather than left as an implementation detail of the probe, because **it is
+invisible from the Rust side and it is the first thing an independent client implementation would get
+wrong.**
+
+**`encrypted_content` and `signature` are JSON ARRAYS OF BYTE INTEGERS, not base64 strings.**
+
+```json
+"encrypted_content": [72, 69, 76, 76, 79, 45, 70, 82, 79, 77, ...]   // correct
+"encrypted_content": "SEVMTE8tRlJPTS4uLg=="                          // WRONG -- will not deserialise
+```
+
+**Why it is invisible from inside the crate:** `SecureMessage` declares these fields as `Vec<u8>` and
+serde's default JSON representation of `Vec<u8>` is an array of numbers. Nobody chose it; nobody
+wrote it down; it does not appear in any type signature a reader would consult. **A Rust author
+reading `Vec<u8>` and a Python author reaching for `base64.b64encode()` will produce incompatible
+wire formats and neither will see anything wrong in their own code.**
+
+⚠️ **It is also the expensive convention on the wire:** each byte costs 2–4 JSON characters plus a
+separator, so a payload is roughly **4× larger than base64** and ~6× larger than raw. The 33-byte
+probe payload occupied ~130 bytes of the 473-byte datagram. **Against UDP's 65507-byte cap that puts
+the practical maximum payload near 16 KB, not 64 KB** — an operational limit that follows from an
+unrecorded serialisation default.
+
+**Neither of these is a defect to fix in this pass** — changing the encoding is a wire-compatibility
+decision, and the crate is published. They are recorded because **an implementer needs both, and
+neither is discoverable from the source without doing what this probe did: reading the bytes off a
+live socket.**
 
 ⚠️ **What this establishes, precisely:** a process written in any language, running under any model
 provider, can both **send to** and **receive from** this fabric using nothing but a UDP socket and a
