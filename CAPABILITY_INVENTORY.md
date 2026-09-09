@@ -396,10 +396,38 @@ This is the structural explanation for how everything else in this document surv
 run on my own branch (2026-09-09) fails identically, at the same step, with the same four skips —
 **two runs, three months apart, same shape.**
 
-**Why the formatting check fails, measured:** `cargo fmt -- --check` flags **23 files**, all in
-`examples/` and `tests/`, none in `src/`. **The set is byte-identical at `f0f570c` and on the repair
-branch** — I diffed the two lists and they match exactly, so **this red is entirely pre-existing and
-no change in this pass touched it.**
+**Why the formatting check fails — and ⚠️ MY FIRST ANSWER WAS AN ARTIFACT OF THE INSTRUMENT.**
+
+I originally recorded: *"`cargo fmt -- --check` flags 23 files, all in `examples/` and `tests/`, none
+in `src/`."* The set was byte-identical at `f0f570c` and on the repair branch, so the red was
+correctly identified as pre-existing. **But "none in `src/`" was false, and so was the portfolio
+PM's independently-measured version of the same claim.** When I ran `cargo fmt` to fix it, it did not
+format — it **errored**:
+
+```
+Error writing files: failed to resolve mod `wasm`: file for module found at both
+  "C:\Projects\synapse\src\wasm.rs" and "C:\Projects\synapse\src\wasm\mod.rs"
+```
+
+⚠️ **`src/wasm.rs` is 0 bytes and has been since the initial release commit `33f3448` — it has never
+held content at any ref** (`git cat-file -s <ref>:src/wasm.rs` → `0` at `33f3448`, `7b80ca4`,
+`f0f570c`; it is 0 bytes in the published 1.1.0 crate too). **`src/wasm/mod.rs` is the real module.**
+The collision made the module tree unresolvable, **so rustfmt bailed out before it ever reached
+`src/`.**
+
+**Two people measured "no `src/` files affected" and both were reading the shape of a crash.** After
+deleting the empty file, `cargo fmt` touched **18 `src/` files that have never been formatted in this
+repository's history** — including `config.rs`, `router.rs`, `transport/manager.rs`, and the whole of
+`synapse/telemetry/`. The true figure is **44 files** (26 under `examples/`+`tests/`, 18 under
+`src/`), not 23.
+
+⚠️ **The general shape, which is the transferable part: a tool that fails early reports a SMALLER
+population than the truth, and the smaller number looks like good news.** "The formatting problems
+are confined to examples and tests" was a more comfortable finding than "the formatter has never
+run", and nothing in the output announced the difference. This document previously recorded the
+comfortable version. **The `src/wasm.rs` collision was already documented in §5.4 as a predicted
+`wasm32` failure — it was in fact breaking the build pipeline on every platform, on every run, and I
+did not connect the two until the formatter refused to run.**
 
 ⚠️ **The consequence is the important part. `cargo fmt` does not need dependency resolution — it
 parses sources and never consults the lockfile — so it runs fine at `f0f570c`, where `cargo build`
@@ -714,7 +742,12 @@ The six real WASM implementation files (2,692 lines — browser, crypto, storage
 worker) are in §5.3: unreachable.
 
 ⚠️ Additionally **`src/wasm.rs` (0 bytes) and `src/wasm/mod.rs` both exist.** That is a hard rustc
-error (`file for module 'wasm' found at both …`) on any `wasm32` target. `Cargo.toml` declares
+error (`file for module 'wasm' found at both …`) on any `wasm32` target — **and, discovered later,
+it also broke `cargo fmt` on EVERY platform, which is why CI never reached its build step (§2.4).
+`src/wasm.rs` is removed on this branch.** I recorded this defect as a *prediction about wasm32*
+before realising it was already causing a *measured* failure on the host, in the pipeline, on every
+run. **A defect scoped to a platform nobody builds for was the one blocking the platform everybody
+builds on.** `Cargo.toml` declares
 `crate-type = ["cdylib", "rlib"]`, a `wasm` feature, `Cargo-wasm.toml`, `build-wasm.sh` and
 `build-wasm.bat`. **No wasm32 build was attempted in this pass** — recorded as unmeasured, not as
 working.
