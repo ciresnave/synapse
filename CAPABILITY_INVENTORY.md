@@ -296,7 +296,39 @@ capped at 65507 bytes (`max_message_size` default). **This is a working link, no
 | **Synapse → foreign process (TCP)** | ✅ **WORKS — measured.** A Python/Node/Go process opening a TCP listener receives clean parseable JSON. No Rust linkage required. |
 | **foreign process → Synapse (TCP)** | 🔴 **BROKEN — measured.** Synapse's TCP listener never accepts. |
 | **Synapse ↔ Synapse (UDP)** | ✅ **WORKS — measured, both directions of the round trip.** Via the factory path with `bind_port` set. |
-| **foreign process ↔ Synapse (UDP)** | **Not probed**, but the receive loop is real and reads datagrams off a bound socket, so a foreign process sending the same JSON to that port is the most promising untested path. |
+| **foreign process → Synapse (UDP)** | ✅ **WORKS — MEASURED.** See Probe D below. |
+
+#### ✅ PROBE D — A PYTHON PROCESS DELIVERED INTO SYNAPSE. NO RUST ANYWHERE ON THE SENDING SIDE.
+
+This is the measurement that closes the multi-provider question, and it was the last row in this
+table that was **inferred rather than measured**. It is now measured.
+
+**Sender:** plain CPython 3, standard library only (`json`, `socket`, `uuid`, `datetime`). No Rust,
+no bindings, no generated code, no `synapse` crate — the message was hand-constructed from the wire
+format observed off a raw socket in Probe B. **Receiver:** Synapse, UDP, via
+`UdpTransportFactory` with `bind_port` set.
+
+```
+[python]  sending 473 bytes of JSON to 127.0.0.1:47950
+[inbound] ***** DELIVERED FROM A NON-RUST PROCESS *****
+          from=python-agent@openai.example  to=synapse-node@local
+          payload="HELLO-FROM-PYTHON-NO-RUST-LINKAGE"  security=Public
+[inbound] RESULT: FOREIGN -> SYNAPSE SUCCEEDED
+```
+
+**Payload, sender identity, recipient and security level all survived the crossing.** The
+`encrypted_content` field was sent as a JSON array of byte integers — the encoding observed in Probe
+B, not base64 — and deserialised correctly.
+
+⚠️ **What this establishes, precisely:** a process written in any language, running under any model
+provider, can both **send to** and **receive from** this fabric using nothing but a UDP socket and a
+JSON encoder. **`src/types.rs::SecureMessage` is the de facto schema.** There is still no published
+specification and no client library — but neither is required, and the absence of one is now a
+documentation gap rather than an architectural blocker.
+
+**Limits, so this is not over-read:** loopback, one message, UDP only. UDP remains lossy and capped
+at 65507 bytes, and TCP inbound is still broken (fixed in PR #11, not yet merged). **This is a
+working link, not a reliable transport.** Nothing here was tested across machines or through a NAT.
 
 **There is no published wire specification, no schema, and no client library in any language** — but
 the format is simple enough to implement from the capture above, and `src/types.rs::SecureMessage` is
