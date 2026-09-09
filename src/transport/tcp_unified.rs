@@ -25,8 +25,9 @@ use tracing::{debug, error, info, warn};
 pub struct TcpTransportImpl {
     /// Local listening port
     listen_port: u16,
-    /// TCP listener (if acting as server)
-    listener: Option<TcpListener>,
+    /// TCP listener (if acting as server). `Arc` so the accept loop spawned by
+    /// `start_server` serves THIS listener instead of binding a second one.
+    listener: Option<Arc<TcpListener>>,
     /// Connection timeout
     connection_timeout: Duration,
     /// Received messages queue
@@ -57,7 +58,7 @@ impl TcpTransportImpl {
             match TcpListener::bind(format!("0.0.0.0:{}", listen_port)).await {
                 Ok(listener) => {
                     info!("TCP transport listening on port {}", listen_port);
-                    Some(listener)
+                    Some(Arc::new(listener))
                 }
                 Err(e) => {
                     warn!("Failed to bind TCP port {}: {}", listen_port, e);
@@ -87,8 +88,16 @@ impl TcpTransportImpl {
         if let Some(listener) = &self.listener {
             let received_messages = Arc::clone(&self.received_messages);
             let metrics = Arc::clone(&self.metrics);
-
-            // Clone the listener for the task - this requires cloning the socket
+            // Serve the listener the constructor already bound. The previous version
+            // bound a SECOND listener on the same port inside this task; that bind
+            // fails because the port is already owned by this struct's own listener,
+            // the error was swallowed (the `if let Ok` fell through to a logged-only
+            // `else`), so the accept loop never ran. Meanwhile the constructor's
+            // listener held the port and its backlog absorbed connections that were
+            // never accepted — so `send_message` connected, wrote, and receipted
+            // `Sent` while `receive_messages` returned nothing. Sharing the existing
+            // listener via `Arc` removes the second bind entirely.
+            let listener = Arc::clone(listener);
             let local_addr = listener.local_addr().map_err(|e| {
                 crate::error::SynapseError::TransportError(format!(
                     "Failed to get local address: {}",
@@ -97,35 +106,29 @@ impl TcpTransportImpl {
             })?;
 
             tokio::spawn(async move {
-                // Create a new listener for the server task
-                if let Ok(listener) = TcpListener::bind(local_addr).await {
-                    info!("TCP server started on {}", local_addr);
+                info!("TCP server started on {}", local_addr);
+                loop {
+                    match listener.accept().await {
+                        Ok((stream, addr)) => {
+                            debug!("Accepted TCP connection from {}", addr);
+                            let messages_clone = Arc::clone(&received_messages);
+                            let metrics_clone = Arc::clone(&metrics);
 
-                    loop {
-                        match listener.accept().await {
-                            Ok((stream, addr)) => {
-                                debug!("Accepted TCP connection from {}", addr);
-                                let messages_clone = Arc::clone(&received_messages);
-                                let metrics_clone = Arc::clone(&metrics);
-
-                                tokio::spawn(async move {
-                                    Self::handle_connection(
-                                        stream,
-                                        addr.to_string(),
-                                        messages_clone,
-                                        metrics_clone,
-                                    )
-                                    .await;
-                                });
-                            }
-                            Err(e) => {
-                                error!("Failed to accept TCP connection: {}", e);
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                            }
+                            tokio::spawn(async move {
+                                Self::handle_connection(
+                                    stream,
+                                    addr.to_string(),
+                                    messages_clone,
+                                    metrics_clone,
+                                )
+                                .await;
+                            });
+                        }
+                        Err(e) => {
+                            error!("Failed to accept TCP connection: {}", e);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
-                } else {
-                    error!("Failed to create TCP listener for server task");
                 }
             });
 
