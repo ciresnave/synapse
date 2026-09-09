@@ -5,11 +5,11 @@ pub mod trust;
 
 // Re-export common types
 pub use participant::{
-    ParticipantProfile, EntityType, IdentityContext, DiscoveryPermissions, 
-    DiscoverabilityLevel, AvailabilityStatus, ContactPreferences,
+    AvailabilityStatus, ContactPreferences, DiscoverabilityLevel, DiscoveryPermissions, EntityType,
+    IdentityContext, ParticipantProfile,
 };
 
 pub use trust::{
-    TrustRatings, EntityTrustRatings, NetworkTrustRating, TrustBalance,
-    DirectTrustScore, TrustCategory, ParticipationMetrics,
+    DirectTrustScore, EntityTrustRatings, NetworkTrustRating, ParticipationMetrics, TrustBalance,
+    TrustCategory, TrustRatings,
 };

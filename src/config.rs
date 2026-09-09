@@ -1,7 +1,7 @@
 //! Configuration management for EMRP
 
-use crate::types::{EmailConfig, SmtpConfig, ImapConfig};
 use crate::error::{ConfigError, Result};
+use crate::types::{EmailConfig, ImapConfig, SmtpConfig};
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -90,25 +90,26 @@ impl Config {
         let content = std::fs::read_to_string(path.as_ref())
             .map_err(|e| ConfigError::FileNotFound(e.to_string()))?;
 
-        toml::from_str(&content)
-            .map_err(|e| ConfigError::InvalidFormat(e.to_string()))
+        toml::from_str(&content).map_err(|e| ConfigError::InvalidFormat(e.to_string()))
     }
 
     /// Save configuration to a TOML file (not available on WASM)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| ConfigError::InvalidFormat(e.to_string()))?;
+        let content =
+            toml::to_string_pretty(self).map_err(|e| ConfigError::InvalidFormat(e.to_string()))?;
 
-        std::fs::write(path.as_ref(), content)
-            .map_err(|e| ConfigError::FileNotFound(e.to_string()))
+        std::fs::write(path.as_ref(), content).map_err(|e| ConfigError::FileNotFound(e.to_string()))
     }
 
     /// Create a default configuration
-    pub fn default_for_entity(local_name: impl Into<String>, entity_type: impl Into<String>) -> Self {
+    pub fn default_for_entity(
+        local_name: impl Into<String>,
+        entity_type: impl Into<String>,
+    ) -> Self {
         let local_name = local_name.into();
         let entity_type = entity_type.into();
-        
+
         Self {
             entity: EntityConfig {
                 local_name: local_name.clone(),
@@ -172,14 +173,8 @@ impl Config {
                 "decision_making".to_string(),
                 "creativity".to_string(),
             ],
-            "tool" => vec![
-                "task_execution".to_string(),
-                "data_processing".to_string(),
-            ],
-            "service" => vec![
-                "api_access".to_string(),
-                "data_storage".to_string(),
-            ],
+            "tool" => vec!["task_execution".to_string(), "data_processing".to_string()],
+            "service" => vec!["api_access".to_string(), "data_storage".to_string()],
             "router" => vec![
                 "message_routing".to_string(),
                 "identity_resolution".to_string(),
@@ -192,57 +187,82 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         // Check entity configuration
         if self.entity.local_name.trim().is_empty() {
-            return Err(ConfigError::ValidationFailed("Local name cannot be empty".to_string()));
+            return Err(ConfigError::ValidationFailed(
+                "Local name cannot be empty".to_string(),
+            ));
         }
 
         if self.entity.domain.trim().is_empty() {
-            return Err(ConfigError::ValidationFailed("Domain cannot be empty".to_string()));
+            return Err(ConfigError::ValidationFailed(
+                "Domain cannot be empty".to_string(),
+            ));
         }
 
         // Check email configuration
         if self.email.smtp.host.trim().is_empty() {
-            return Err(ConfigError::ValidationFailed("SMTP host cannot be empty".to_string()));
+            return Err(ConfigError::ValidationFailed(
+                "SMTP host cannot be empty".to_string(),
+            ));
         }
 
         if self.email.imap.host.trim().is_empty() {
-            return Err(ConfigError::ValidationFailed("IMAP host cannot be empty".to_string()));
+            return Err(ConfigError::ValidationFailed(
+                "IMAP host cannot be empty".to_string(),
+            ));
         }
 
         // Check ports are valid
         if self.email.smtp.port == 0 {
-            return Err(ConfigError::ValidationFailed("Invalid SMTP port".to_string()));
+            return Err(ConfigError::ValidationFailed(
+                "Invalid SMTP port".to_string(),
+            ));
         }
 
         if self.email.imap.port == 0 {
-            return Err(ConfigError::ValidationFailed("Invalid IMAP port".to_string()));
+            return Err(ConfigError::ValidationFailed(
+                "Invalid IMAP port".to_string(),
+            ));
         }
 
         // Check security configuration
-        if !["public", "private", "authenticated", "secure"].contains(&self.security.default_security_level.as_str()) {
-            return Err(ConfigError::ValidationFailed("Invalid default security level".to_string()));
+        if !["public", "private", "authenticated", "secure"]
+            .contains(&self.security.default_security_level.as_str())
+        {
+            return Err(ConfigError::ValidationFailed(
+                "Invalid default security level".to_string(),
+            ));
         }
 
         // Check logging configuration
         if !["trace", "debug", "info", "warn", "error"].contains(&self.logging.level.as_str()) {
-            return Err(ConfigError::ValidationFailed("Invalid log level".to_string()));
+            return Err(ConfigError::ValidationFailed(
+                "Invalid log level".to_string(),
+            ));
         }
 
         if !["compact", "pretty", "json"].contains(&self.logging.format.as_str()) {
-            return Err(ConfigError::ValidationFailed("Invalid log format".to_string()));
+            return Err(ConfigError::ValidationFailed(
+                "Invalid log format".to_string(),
+            ));
         }
 
         Ok(())
     }
 
     /// Create Gmail configuration
-    pub fn gmail_config(local_name: impl Into<String>, entity_type: impl Into<String>, email: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn gmail_config(
+        local_name: impl Into<String>,
+        entity_type: impl Into<String>,
+        email: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         let local_name = local_name.into();
         let entity_type = entity_type.into();
         let email = email.into();
         let password = password.into();
 
         let mut config = Self::default_for_entity(&local_name, &entity_type);
-        
+
         config.email.smtp = SmtpConfig {
             host: "smtp.gmail.com".to_string(),
             port: 587,
@@ -264,14 +284,19 @@ impl Config {
     }
 
     /// Create Outlook configuration
-    pub fn outlook_config(local_name: impl Into<String>, entity_type: impl Into<String>, email: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn outlook_config(
+        local_name: impl Into<String>,
+        entity_type: impl Into<String>,
+        email: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         let local_name = local_name.into();
         let entity_type = entity_type.into();
         let email = email.into();
         let password = password.into();
 
         let mut config = Self::default_for_entity(&local_name, &entity_type);
-        
+
         config.email.smtp = SmtpConfig {
             host: "smtp-mail.outlook.com".to_string(),
             port: 587,
@@ -322,8 +347,18 @@ impl ConfigTemplates {
         password: impl Into<String>,
     ) -> Result<Config> {
         match provider.to_lowercase().as_str() {
-            "gmail" => Ok(Config::gmail_config(local_name, entity_type, email, password)),
-            "outlook" => Ok(Config::outlook_config(local_name, entity_type, email, password)),
+            "gmail" => Ok(Config::gmail_config(
+                local_name,
+                entity_type,
+                email,
+                password,
+            )),
+            "outlook" => Ok(Config::outlook_config(
+                local_name,
+                entity_type,
+                email,
+                password,
+            )),
             "yahoo" => {
                 let mut config = Config::outlook_config(local_name, entity_type, email, password);
                 config.email.smtp.host = "smtp.mail.yahoo.com".to_string();
@@ -331,7 +366,9 @@ impl ConfigTemplates {
                 Ok(config)
             }
             "custom" => Ok(Config::default_for_entity(local_name, entity_type)),
-            _ => Err(ConfigError::ValidationFailed(format!("Unknown provider: {provider}"))),
+            _ => Err(ConfigError::ValidationFailed(format!(
+                "Unknown provider: {provider}"
+            ))),
         }
     }
 
@@ -343,19 +380,19 @@ impl ConfigTemplates {
                 - Enable 2-factor authentication\n\
                 - Generate an App Password\n\
                 - Use App Password instead of regular password\n\
-                - Enable IMAP in Gmail settings"
+                - Enable IMAP in Gmail settings",
             ),
             "outlook" => Some(
                 "Outlook Configuration:\n\
                 - Works with Microsoft 365 accounts\n\
                 - Use your regular email and password\n\
-                - May require app-specific password for some accounts"
+                - May require app-specific password for some accounts",
             ),
             "yahoo" => Some(
                 "Yahoo Configuration:\n\
                 - Generate an App Password in Yahoo Account Security\n\
                 - Use App Password instead of regular password\n\
-                - Enable IMAP access in Yahoo Mail settings"
+                - Enable IMAP access in Yahoo Mail settings",
             ),
             _ => None,
         }
@@ -386,12 +423,12 @@ mod tests {
     #[test]
     fn test_config_file_operations() {
         let config = Config::default_for_entity("Test", "tool");
-        
+
         let temp_file = NamedTempFile::new().unwrap();
-        
+
         // Save config
         assert!(config.to_file(temp_file.path()).is_ok());
-        
+
         // Load config
         let loaded_config = Config::from_file(temp_file.path()).unwrap();
         assert_eq!(config.entity.local_name, loaded_config.entity.local_name);
@@ -400,18 +437,18 @@ mod tests {
     #[test]
     fn test_config_validation() {
         let mut config = Config::default_for_entity("Test", "ai_model");
-        
+
         // Valid config should pass
         assert!(config.validate().is_ok());
-        
+
         // Invalid entity name should fail
         config.entity.local_name = "".to_string();
         assert!(config.validate().is_err());
-        
+
         // Fix entity name
         config.entity.local_name = "Test".to_string();
         assert!(config.validate().is_ok());
-        
+
         // Test config with invalid values should fail
         let mut invalid_config = config.clone();
         invalid_config.email.smtp.host = "".to_string(); // Empty host
@@ -424,10 +461,22 @@ mod tests {
         assert!(providers.contains(&"gmail"));
         assert!(providers.contains(&"outlook"));
 
-        let gmail_config = ConfigTemplates::for_provider("gmail", "Test", "ai_model", "test@gmail.com", "password");
+        let gmail_config = ConfigTemplates::for_provider(
+            "gmail",
+            "Test",
+            "ai_model",
+            "test@gmail.com",
+            "password",
+        );
         assert!(gmail_config.is_ok());
-        
-        let unknown_config = ConfigTemplates::for_provider("unknown", "Test", "ai_model", "test@example.com", "password");
+
+        let unknown_config = ConfigTemplates::for_provider(
+            "unknown",
+            "Test",
+            "ai_model",
+            "test@example.com",
+            "password",
+        );
         assert!(unknown_config.is_err());
     }
 }

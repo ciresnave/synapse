@@ -1,20 +1,20 @@
 //! Synapse Email Server Implementation
-//! 
+//!
 //! High-performance SMTP and IMAP servers optimized for low-latency communication
 
-pub mod smtp_server;
-pub mod imap_server;
-pub mod connectivity;
 pub mod auth;
+pub mod connectivity;
+pub mod imap_server;
+pub mod smtp_server;
 
-pub use smtp_server::{SynapseSmtpServer, SmtpServerConfig, AuthHandler};
-pub use imap_server::{SynapseImapServer, ImapServerConfig};
-pub use connectivity::{ConnectivityDetector, ConnectivityAssessment, ServerRecommendation};
 pub use auth::{SynapseAuthHandler, UserAccount, UserPermissions, create_test_auth_handler};
+pub use connectivity::{ConnectivityAssessment, ConnectivityDetector, ServerRecommendation};
+pub use imap_server::{ImapServerConfig, SynapseImapServer};
+pub use smtp_server::{AuthHandler, SmtpServerConfig, SynapseSmtpServer};
 
 use crate::error::Result;
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 /// Complete Synapse email server with both SMTP and IMAP
@@ -31,41 +31,47 @@ impl SynapseEmailServer {
         // Assess connectivity first
         let detector = ConnectivityDetector::default();
         let connectivity = detector.assess_connectivity().await?;
-        
-        info!("Email server connectivity assessment: {:?}", connectivity.recommended_config);
-        
+
+        info!(
+            "Email server connectivity assessment: {:?}",
+            connectivity.recommended_config
+        );
+
         // Create auth handler
         let auth_handler = Arc::new(SynapseAuthHandler::new());
-        
+
         // Configure SMTP server
         let smtp_config = match &connectivity.recommended_config {
-            ServerRecommendation::RunLocalServer { smtp_port, .. } => {
-                SmtpServerConfig {
-                    port: *smtp_port,
-                    ..Default::default()
-                }
-            }
+            ServerRecommendation::RunLocalServer { smtp_port, .. } => SmtpServerConfig {
+                port: *smtp_port,
+                ..Default::default()
+            },
             _ => SmtpServerConfig::default(),
         };
-        
+
         // Configure IMAP server
         let imap_config = match &connectivity.recommended_config {
-            ServerRecommendation::RunLocalServer { imap_port, .. } => {
-                ImapServerConfig {
-                    port: *imap_port,
-                    ..Default::default()
-                }
-            }
+            ServerRecommendation::RunLocalServer { imap_port, .. } => ImapServerConfig {
+                port: *imap_port,
+                ..Default::default()
+            },
             _ => ImapServerConfig::default(),
         };
-        
+
         // Shared message store
         let message_store = Arc::new(Mutex::new(HashMap::new()));
-        
+
         // Create servers
-        let smtp_server = SynapseSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-        let imap_server = SynapseImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-        
+        let smtp_server = SynapseSmtpServer::new(
+            smtp_config,
+            Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+        );
+        let imap_server = SynapseImapServer::new(
+            imap_config,
+            Arc::clone(&message_store),
+            Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+        );
+
         Ok(Self {
             smtp_server,
             imap_server,
@@ -82,10 +88,17 @@ impl SynapseEmailServer {
     ) -> Result<Self> {
         let auth_handler = Arc::new(SynapseAuthHandler::new());
         let message_store = Arc::new(Mutex::new(HashMap::new()));
-        
-        let smtp_server = SynapseSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-        let imap_server = SynapseImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-        
+
+        let smtp_server = SynapseSmtpServer::new(
+            smtp_config,
+            Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+        );
+        let imap_server = SynapseImapServer::new(
+            imap_config,
+            Arc::clone(&message_store),
+            Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+        );
+
         Ok(Self {
             smtp_server,
             imap_server,
@@ -97,9 +110,16 @@ impl SynapseEmailServer {
     /// Start both SMTP and IMAP servers
     pub async fn start(&self) -> Result<()> {
         match &self.connectivity.recommended_config {
-            ServerRecommendation::RunLocalServer { smtp_port, imap_port, external_ip } => {
-                info!("Starting local email server on {}:{}/{}", external_ip, smtp_port, imap_port);
-                
+            ServerRecommendation::RunLocalServer {
+                smtp_port,
+                imap_port,
+                external_ip,
+            } => {
+                info!(
+                    "Starting local email server on {}:{}/{}",
+                    external_ip, smtp_port, imap_port
+                );
+
                 // Start SMTP server in background
                 let smtp_server = self.smtp_server.clone();
                 tokio::spawn(async move {
@@ -107,7 +127,7 @@ impl SynapseEmailServer {
                         warn!("SMTP server error: {}", e);
                     }
                 });
-                
+
                 // Start IMAP server in background
                 let imap_server = self.imap_server.clone();
                 tokio::spawn(async move {
@@ -115,13 +135,13 @@ impl SynapseEmailServer {
                         warn!("IMAP server error: {}", e);
                     }
                 });
-                
+
                 info!("Email servers started successfully");
                 Ok(())
             }
             ServerRecommendation::RelayOnly { reason } => {
                 warn!("Email server in relay-only mode: {}", reason);
-                
+
                 // Start SMTP server only for outgoing mail
                 let smtp_server = self.smtp_server.clone();
                 tokio::spawn(async move {
@@ -129,7 +149,7 @@ impl SynapseEmailServer {
                         warn!("SMTP relay server error: {}", e);
                     }
                 });
-                
+
                 Ok(())
             }
             ServerRecommendation::ExternalProvider { reason } => {
@@ -185,19 +205,19 @@ impl SynapseEmailServer {
 /// Create a test email server for development
 pub async fn create_test_email_server() -> Result<SynapseEmailServer> {
     let auth_handler = Arc::new(create_test_auth_handler());
-    
+
     // Use test configuration
     let smtp_config = SmtpServerConfig {
         port: 2525,
         require_auth: false, // Easier for testing
         ..Default::default()
     };
-    
+
     let imap_config = ImapServerConfig {
         port: 1143,
         ..Default::default()
     };
-    
+
     // Mock connectivity assessment for testing
     let connectivity = ConnectivityAssessment {
         can_bind_smtp: true,
@@ -211,11 +231,18 @@ pub async fn create_test_email_server() -> Result<SynapseEmailServer> {
             external_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
         },
     };
-    
+
     let message_store = Arc::new(Mutex::new(HashMap::new()));
-    let smtp_server = SynapseSmtpServer::new(smtp_config, Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-    let imap_server = SynapseImapServer::new(imap_config, Arc::clone(&message_store), Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>);
-    
+    let smtp_server = SynapseSmtpServer::new(
+        smtp_config,
+        Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+    );
+    let imap_server = SynapseImapServer::new(
+        imap_config,
+        Arc::clone(&message_store),
+        Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+    );
+
     Ok(SynapseEmailServer {
         smtp_server,
         imap_server,

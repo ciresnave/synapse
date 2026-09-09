@@ -329,12 +329,13 @@ impl SynapseBlockchain {
         for block in chain.iter() {
             for transaction in &block.transactions {
                 if let Transaction::TrustReport(report) = transaction
-                    && report.subject_id == participant_id {
-                        let age_days = (chrono::Utc::now() - report.timestamp.0).num_days();
-                        let weight = if age_days < 30 { 1.0 } else { 0.5 };
-                        total_score += report.score as f64 * weight;
-                        report_count += 1;
-                    }
+                    && report.subject_id == participant_id
+                {
+                    let age_days = (chrono::Utc::now() - report.timestamp.0).num_days();
+                    let weight = if age_days < 30 { 1.0 } else { 0.5 };
+                    total_score += report.score as f64 * weight;
+                    report_count += 1;
+                }
             }
         }
 

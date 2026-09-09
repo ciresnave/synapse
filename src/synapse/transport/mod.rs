@@ -5,4 +5,4 @@
 
 pub mod error_recovery;
 
-pub use error_recovery::{CircuitBreaker, RetryPolicy, ConnectionHealthMonitor, ConnectionStatus};
+pub use error_recovery::{CircuitBreaker, ConnectionHealthMonitor, ConnectionStatus, RetryPolicy};

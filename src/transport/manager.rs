@@ -207,9 +207,10 @@ impl TransportManager {
             if available_transports.contains(&preferred) {
                 let transports = self.transports.read().await;
                 if let Some(transport) = transports.get(&preferred)
-                    && transport.can_reach(target).await {
-                        return Ok(preferred);
-                    }
+                    && transport.can_reach(target).await
+                {
+                    return Ok(preferred);
+                }
             }
         }
 
@@ -217,9 +218,10 @@ impl TransportManager {
         let transports = self.transports.read().await;
         for &transport_type in &available_transports {
             if let Some(transport) = transports.get(&transport_type)
-                && transport.can_reach(target).await {
-                    return Ok(transport_type);
-                }
+                && transport.can_reach(target).await
+            {
+                return Ok(transport_type);
+            }
         }
 
         Err(crate::error::SynapseError::TransportError(
@@ -611,9 +613,10 @@ impl TransportManager {
         let transports = self.transports.read().await;
         for (&transport_type, transport) in transports.iter() {
             if transport.can_reach(target).await
-                && let Ok(estimate) = transport.estimate_metrics(target).await {
-                    candidates.push((transport_type, estimate));
-                }
+                && let Ok(estimate) = transport.estimate_metrics(target).await
+            {
+                candidates.push((transport_type, estimate));
+            }
         }
 
         // Sort by performance score
@@ -796,14 +799,15 @@ impl TransportManager {
 
     async fn should_mark_transport_failed(&self, transport_type: TransportType) -> bool {
         if let Ok(breakers) = self.circuit_breakers.read()
-            && let Some(breaker) = breakers.get(&transport_type) {
-                let stats = breaker.get_stats();
-                let total_requests = stats.total_requests;
-                if total_requests > 0 {
-                    let failure_rate = stats.failure_count as f64 / total_requests as f64;
-                    return failure_rate > self.config.failover_config.failure_threshold;
-                }
+            && let Some(breaker) = breakers.get(&transport_type)
+        {
+            let stats = breaker.get_stats();
+            let total_requests = stats.total_requests;
+            if total_requests > 0 {
+                let failure_rate = stats.failure_count as f64 / total_requests as f64;
+                return failure_rate > self.config.failover_config.failure_threshold;
             }
+        }
         false
     }
 

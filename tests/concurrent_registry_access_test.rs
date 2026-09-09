@@ -54,9 +54,7 @@ mod concurrent_registry_tests {
             success_count >= num_tasks * 8 / 10,
             "At least 80% of concurrent router creations should succeed"
         );
-        println!(
-            "Successfully created {success_count} out of {num_tasks} routers concurrently"
-        );
+        println!("Successfully created {success_count} out of {num_tasks} routers concurrently");
         Ok(())
     }
 
@@ -154,9 +152,7 @@ mod concurrent_registry_tests {
             success_count, num_configs,
             "All concurrent config creations should succeed"
         );
-        println!(
-            "Successfully created {success_count} configs concurrently"
-        );
+        println!("Successfully created {success_count} configs concurrently");
         Ok(())
     }
 

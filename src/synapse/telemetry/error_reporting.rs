@@ -354,16 +354,18 @@ impl ErrorTelemetry {
                 };
 
                 // If we have errors, send them to the remote endpoint
-                if !batch.is_empty() && telemetry.config.remote_endpoint.is_some()
-                    && let Err(e) = telemetry.send_batch_to_remote(&batch).await {
-                        tracing::error!("Failed to send error batch: {}", e);
+                if !batch.is_empty()
+                    && telemetry.config.remote_endpoint.is_some()
+                    && let Err(e) = telemetry.send_batch_to_remote(&batch).await
+                {
+                    tracing::error!("Failed to send error batch: {}", e);
 
-                        // Re-queue the errors
-                        let mut errors = telemetry.errors.lock().unwrap();
-                        for error in batch {
-                            errors.push_back(error);
-                        }
+                    // Re-queue the errors
+                    let mut errors = telemetry.errors.lock().unwrap();
+                    for error in batch {
+                        errors.push_back(error);
                     }
+                }
 
                 // Update last batch time
                 *telemetry.last_batch_time.lock().unwrap() = Instant::now();

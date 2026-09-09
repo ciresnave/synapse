@@ -1,10 +1,7 @@
 //! Simplified multi-transport demonstration
 
 use std::time::{Duration, Instant};
-use synapse::{
-    transport::abstraction::MessageUrgency, 
-    transport::TransportRoute
-};
+use synapse::{transport::TransportRoute, transport::abstraction::MessageUrgency};
 
 /// Simple message structure
 #[derive(Debug, Clone)]
@@ -30,36 +27,36 @@ impl MultiTransportDemo {
     pub fn new() -> Self {
         Self {
             available_transports: vec![
-                TransportRoute::DirectTcp { 
-                    address: "127.0.0.1".to_string(), 
-                    port: 8080, 
-                    latency_ms: 25, 
-                    established_at: std::time::Instant::now() 
+                TransportRoute::DirectTcp {
+                    address: "127.0.0.1".to_string(),
+                    port: 8080,
+                    latency_ms: 25,
+                    established_at: std::time::Instant::now(),
                 },
-                TransportRoute::DirectUdp { 
-                    address: "127.0.0.1".to_string(), 
-                    port: 8081, 
-                    latency_ms: 15, 
-                    established_at: std::time::Instant::now() 
+                TransportRoute::DirectUdp {
+                    address: "127.0.0.1".to_string(),
+                    port: 8081,
+                    latency_ms: 15,
+                    established_at: std::time::Instant::now(),
                 },
-                TransportRoute::LocalMdns { 
+                TransportRoute::LocalMdns {
                     service_name: "example-service".to_string(),
-                    address: "local.example.com".to_string(), 
-                    port: 5353, 
-                    latency_ms: 5, 
-                    discovered_at: std::time::Instant::now() 
+                    address: "local.example.com".to_string(),
+                    port: 5353,
+                    latency_ms: 5,
+                    discovered_at: std::time::Instant::now(),
                 },
-                TransportRoute::FastEmailRelay { 
+                TransportRoute::FastEmailRelay {
                     relay_server: "relay.example.com".to_string(),
-                    estimated_latency_ms: 500 
+                    estimated_latency_ms: 500,
                 },
-                TransportRoute::StandardEmail { 
-                    estimated_latency_min: 1 
+                TransportRoute::StandardEmail {
+                    estimated_latency_min: 1,
                 },
             ],
         }
     }
-    
+
     /// Select best transport for message urgency
     pub fn select_transport(&self, urgency: &MessageUrgency) -> TransportRoute {
         match urgency {
@@ -102,12 +99,17 @@ impl MultiTransportDemo {
                 // Accept up to 1 second latency
                 for transport in &self.available_transports {
                     match transport {
-                        TransportRoute::LocalMdns { latency_ms, .. } |
-                        TransportRoute::DirectUdp { latency_ms, .. } |
-                        TransportRoute::DirectTcp { latency_ms, .. } if *latency_ms < 1000 => {
+                        TransportRoute::LocalMdns { latency_ms, .. }
+                        | TransportRoute::DirectUdp { latency_ms, .. }
+                        | TransportRoute::DirectTcp { latency_ms, .. }
+                            if *latency_ms < 1000 =>
+                        {
                             return transport.clone();
                         }
-                        TransportRoute::FastEmailRelay { estimated_latency_ms, .. } if *estimated_latency_ms < 1000 => {
+                        TransportRoute::FastEmailRelay {
+                            estimated_latency_ms,
+                            ..
+                        } if *estimated_latency_ms < 1000 => {
                             return transport.clone();
                         }
                         _ => continue,
@@ -128,18 +130,23 @@ impl MultiTransportDemo {
             }
             MessageUrgency::Batch => {
                 // Always use standard email for batch processing
-                TransportRoute::StandardEmail { estimated_latency_min: 1 }
+                TransportRoute::StandardEmail {
+                    estimated_latency_min: 1,
+                }
             }
         }
     }
-    
+
     /// Send message with automatic transport selection
     pub async fn send_message(&self, message: SimpleMessage) -> Result<String, String> {
         let selected_transport = self.select_transport(&message.urgency);
-        
-        println!("📨 Sending message to '{}' via {:?}", message.to, selected_transport);
+
+        println!(
+            "📨 Sending message to '{}' via {:?}",
+            message.to, selected_transport
+        );
         println!("   Content: {}", message.content);
-        
+
         // Simulate sending based on transport type
         let result = match &selected_transport {
             TransportRoute::DirectTcp { latency_ms, .. } => {
@@ -154,12 +161,18 @@ impl MultiTransportDemo {
                 tokio::time::sleep(Duration::from_millis(*latency_ms as u64)).await;
                 format!("✅ Sent via mDNS in {latency_ms}ms")
             }
-            TransportRoute::FastEmailRelay { estimated_latency_ms, relay_server } => {
+            TransportRoute::FastEmailRelay {
+                estimated_latency_ms,
+                relay_server,
+            } => {
                 tokio::time::sleep(Duration::from_millis(*estimated_latency_ms as u64)).await;
                 format!("✅ Sent via Fast Email through {relay_server} in {estimated_latency_ms}ms")
             }
-            TransportRoute::StandardEmail { estimated_latency_min } => {
-                tokio::time::sleep(Duration::from_millis(*estimated_latency_min as u64 * 100)).await; // Simulate
+            TransportRoute::StandardEmail {
+                estimated_latency_min,
+            } => {
+                tokio::time::sleep(Duration::from_millis(*estimated_latency_min as u64 * 100))
+                    .await; // Simulate
                 format!("✅ Sent via Standard Email in ~{estimated_latency_min}min")
             }
             TransportRoute::Udp { latency, .. } => {
@@ -185,18 +198,18 @@ impl MultiTransportDemo {
                         tokio::time::sleep(Duration::from_millis(*latency_ms as u64)).await;
                         format!("✅ Sent via Email Discovery -> TCP in {latency_ms}ms")
                     }
-                    _ => "✅ Sent via Email Discovery".to_string()
+                    _ => "✅ Sent via Email Discovery".to_string(),
                 }
             }
         };
-        
+
         Ok(result)
     }
-    
+
     /// Test all transport selection scenarios
     pub async fn demo_transport_selection(&self) {
         println!("🚀 Multi-Transport Synapse Demonstration\n");
-        
+
         let test_messages = vec![
             SimpleMessage {
                 to: "Alice".to_string(),
@@ -223,7 +236,7 @@ impl MultiTransportDemo {
                 urgency: MessageUrgency::Batch,
             },
         ];
-        
+
         for message in test_messages {
             let start = Instant::now();
             match self.send_message(message).await {
@@ -236,41 +249,78 @@ impl MultiTransportDemo {
             }
         }
     }
-    
+
     /// Show transport capabilities
     pub fn show_capabilities(&self) {
         println!("📊 Available Transport Capabilities:");
         for (i, transport) in self.available_transports.iter().enumerate() {
             match transport {
                 TransportRoute::DirectTcp { latency_ms, .. } => {
-                    println!("  {}. TCP Direct: {}ms latency, high reliability", i+1, latency_ms);
+                    println!(
+                        "  {}. TCP Direct: {}ms latency, high reliability",
+                        i + 1,
+                        latency_ms
+                    );
                 }
                 TransportRoute::DirectUdp { latency_ms, .. } => {
-                    println!("  {}. UDP Direct: {}ms latency, fast but lossy", i+1, latency_ms);
+                    println!(
+                        "  {}. UDP Direct: {}ms latency, fast but lossy",
+                        i + 1,
+                        latency_ms
+                    );
                 }
                 TransportRoute::LocalMdns { latency_ms, .. } => {
-                    println!("  {}. mDNS Local: {}ms latency, LAN only", i+1, latency_ms);
+                    println!(
+                        "  {}. mDNS Local: {}ms latency, LAN only",
+                        i + 1,
+                        latency_ms
+                    );
                 }
-                TransportRoute::FastEmailRelay { estimated_latency_ms, .. } => {
-                    println!("  {}. Fast Email: {}ms latency, global reach", i+1, estimated_latency_ms);
+                TransportRoute::FastEmailRelay {
+                    estimated_latency_ms,
+                    ..
+                } => {
+                    println!(
+                        "  {}. Fast Email: {}ms latency, global reach",
+                        i + 1,
+                        estimated_latency_ms
+                    );
                 }
-                TransportRoute::StandardEmail { estimated_latency_min } => {
-                    println!("  {}. Standard Email: ~{}min latency, universal compatibility", i+1, estimated_latency_min);
+                TransportRoute::StandardEmail {
+                    estimated_latency_min,
+                } => {
+                    println!(
+                        "  {}. Standard Email: ~{}min latency, universal compatibility",
+                        i + 1,
+                        estimated_latency_min
+                    );
                 }
                 TransportRoute::Udp { latency, .. } => {
-                    println!("  {}. UDP: {}ms latency, fast", i+1, latency.as_millis());
+                    println!("  {}. UDP: {}ms latency, fast", i + 1, latency.as_millis());
                 }
                 TransportRoute::WebSocket { latency, .. } => {
-                    println!("  {}. WebSocket: {}ms latency, real-time", i+1, latency.as_millis());
+                    println!(
+                        "  {}. WebSocket: {}ms latency, real-time",
+                        i + 1,
+                        latency.as_millis()
+                    );
                 }
                 TransportRoute::Quic { latency, .. } => {
-                    println!("  {}. QUIC: {}ms latency, modern", i+1, latency.as_millis());
+                    println!(
+                        "  {}. QUIC: {}ms latency, modern",
+                        i + 1,
+                        latency.as_millis()
+                    );
                 }
                 TransportRoute::NatTraversal { latency_ms, .. } => {
-                    println!("  {}. NAT Traversal: {}ms latency, NAT-aware", i+1, latency_ms);
+                    println!(
+                        "  {}. NAT Traversal: {}ms latency, NAT-aware",
+                        i + 1,
+                        latency_ms
+                    );
                 }
                 TransportRoute::EmailDiscovery { .. } => {
-                    println!("  {}. Email Discovery: dynamic discovery", i+1);
+                    println!("  {}. Email Discovery: dynamic discovery", i + 1);
                 }
             }
         }
@@ -282,15 +332,15 @@ impl MultiTransportDemo {
 async fn main() {
     println!("🌟 Synapse Neural Communication Network");
     println!("    Multi-Transport Architecture Demo\n");
-    
+
     let router = MultiTransportDemo::new();
-    
+
     // Show available capabilities
     router.show_capabilities();
-    
+
     // Demonstrate intelligent transport selection
     router.demo_transport_selection().await;
-    
+
     println!("✨ Demo completed successfully!");
     println!("\n📋 Key Features Demonstrated:");
     println!("   • Intelligent transport selection based on message urgency");

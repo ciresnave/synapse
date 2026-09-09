@@ -2,13 +2,10 @@
 //!
 //! This example demonstrates how AI entities can call tools and receive responses.
 
-use synapse::{
-    Config,
-    types::SimpleMessage,
-};
 use anyhow::Result;
-use tracing::info;
 use serde_json::json;
+use synapse::{Config, types::SimpleMessage};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,7 +18,7 @@ async fn main() -> Result<()> {
 
     // Set up entity configurations
     demo_tool_interaction_setup().await?;
-    
+
     info!("🔧 Tool Interaction Demo completed!");
     Ok(())
 }
@@ -33,9 +30,18 @@ async fn demo_tool_interaction_setup() -> Result<()> {
     let service_config = Config::default_for_entity("Calculator", "Service");
 
     info!("✅ Entity configurations created:");
-    info!("   AI: {} ({})", ai_config.entity.local_name, ai_config.entity.entity_type);
-    info!("   Tool: {} ({})", tool_config.entity.local_name, tool_config.entity.entity_type);
-    info!("   Service: {} ({})", service_config.entity.local_name, service_config.entity.entity_type);
+    info!(
+        "   AI: {} ({})",
+        ai_config.entity.local_name, ai_config.entity.entity_type
+    );
+    info!(
+        "   Tool: {} ({})",
+        tool_config.entity.local_name, tool_config.entity.entity_type
+    );
+    info!(
+        "   Service: {} ({})",
+        service_config.entity.local_name, service_config.entity.entity_type
+    );
 
     // Simulate tool interaction scenarios
     demo_file_operations().await?;
@@ -51,7 +57,7 @@ async fn demo_file_operations() -> Result<()> {
     // AI requests file listing
     let _list_request = SimpleMessage::new(
         "Claude",
-        "FileSystem", 
+        "FileSystem",
         json!({
             "action": "list_files",
             "path": "/workspace",
@@ -59,7 +65,8 @@ async fn demo_file_operations() -> Result<()> {
                 "include_hidden": false,
                 "recursive": false
             }
-        }).to_string()
+        })
+        .to_string(),
     );
 
     info!("🤖 Claude → FileSystem: {}", "Requesting file list");
@@ -75,31 +82,34 @@ async fn demo_file_operations() -> Result<()> {
                 {"name": "images", "size": 0, "type": "directory"},
                 {"name": "config.json", "size": 512, "type": "file"}
             ]
-        }).to_string()
+        })
+        .to_string(),
     );
 
     info!("📁 FileSystem → Claude: Found 3 items");
 
     // AI requests file content
     let _read_request = SimpleMessage::new(
-        "Claude", 
+        "Claude",
         "FileSystem",
         json!({
             "action": "read_file",
             "path": "/workspace/document.txt"
-        }).to_string()
+        })
+        .to_string(),
     );
 
     info!("🤖 Claude → FileSystem: Reading document.txt");
 
     let _read_response = SimpleMessage::new(
         "FileSystem",
-        "Claude", 
+        "Claude",
         json!({
             "status": "success",
             "content": "This is the content of the document.",
             "encoding": "utf-8"
-        }).to_string()
+        })
+        .to_string(),
     );
 
     info!("📄 FileSystem → Claude: File content delivered");
@@ -118,26 +128,28 @@ async fn demo_calculation_request() -> Result<()> {
             "operation": "complex_math",
             "expression": "sqrt(144) + pow(2, 3) * 5",
             "precision": 10
-        }).to_string()
+        })
+        .to_string(),
     );
 
     info!("🤖 Claude → Calculator: Requesting calculation");
 
     // Calculator responds with result
     let _calc_response = SimpleMessage::new(
-        "Calculator", 
+        "Calculator",
         "Claude",
         json!({
-            "status": "success", 
+            "status": "success",
             "result": 52.0,
             "expression": "sqrt(144) + pow(2, 3) * 5",
             "steps": [
                 "sqrt(144) = 12",
-                "pow(2, 3) = 8", 
+                "pow(2, 3) = 8",
                 "8 * 5 = 40",
                 "12 + 40 = 52"
             ]
-        }).to_string()
+        })
+        .to_string(),
     );
 
     info!("🧮 Calculator → Claude: Result = 52.0");
@@ -154,7 +166,8 @@ async fn demo_tool_capabilities() -> Result<()> {
         "FileSystem",
         json!({
             "action": "get_capabilities"
-        }).to_string()
+        })
+        .to_string(),
     );
 
     info!("🤖 Claude → FileSystem: Requesting capabilities");
@@ -173,7 +186,8 @@ async fn demo_tool_capabilities() -> Result<()> {
                 "features": ["recursive_search", "file_watching", "backup"]
             },
             "version": "1.0.0"
-        }).to_string()
+        })
+        .to_string(),
     );
 
     info!("⚙️ FileSystem → Claude: Capabilities shared");
