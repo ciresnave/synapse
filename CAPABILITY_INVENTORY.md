@@ -337,11 +337,26 @@ wrote it down; it does not appear in any type signature a reader would consult. 
 reading `Vec<u8>` and a Python author reaching for `base64.b64encode()` will produce incompatible
 wire formats and neither will see anything wrong in their own code.**
 
-⚠️ **It is also the expensive convention on the wire:** each byte costs 2–4 JSON characters plus a
-separator, so a payload is roughly **4× larger than base64** and ~6× larger than raw. The 33-byte
-probe payload occupied ~130 bytes of the 473-byte datagram. **Against UDP's 65507-byte cap that puts
-the practical maximum payload near 16 KB, not 64 KB** — an operational limit that follows from an
-unrecorded serialisation default.
+⚠️ **It is also the expensive convention on the wire, and here the measured numbers differ from the
+obvious estimate — so these are measured, not reasoned:**
+
+```
+payload  1024 bytes -> json-array  4695   base64  1368     4.58x raw   3.43x base64
+payload  8192 bytes -> json-array 37508   base64 10924     4.58x raw   3.43x base64
+```
+
+**The array form is ~4.6× raw and ~3.4× base64**, stable across sizes. **Against UDP's 65507-byte
+datagram cap, the largest payload whose encoded form alone fits is 14,328 bytes of random data
+(14.0 KB) — 15,291 bytes (14.9 KB) for ASCII text**, measured by binary search, and that is *before*
+the rest of the envelope (ids, addresses, timestamp, metadata).
+
+⚠️ **So the practical maximum message payload over UDP is about 14 KB, not the 65 KB the
+`max_message_size` default (65507) implies.** That is an operational limit produced entirely by an
+unrecorded serialisation default, and `max_message_size` measures the wrong thing — it bounds the
+datagram, not the payload a caller can pass.
+
+*(I first wrote "roughly 4× larger than base64" here from intuition. Measured, it is 3.43× base64 and
+4.58× raw, and the cap is 14 KB rather than the 16 KB I estimated. Corrected in place.)*
 
 **Neither of these is a defect to fix in this pass** — changing the encoding is a wire-compatibility
 decision, and the crate is published. They are recorded because **an implementer needs both, and
