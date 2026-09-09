@@ -1,13 +1,13 @@
 //! High-performance IMAP server for EMRP
 
-use crate::error::{SynapseError, Result};
+use crate::error::{Result, SynapseError};
 use crate::types::SecureMessage;
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{info, error, debug};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tracing::{debug, error, info};
 
 /// High-performance IMAP server optimized for EMRP
 pub struct SynapseImapServer {
@@ -96,8 +96,9 @@ impl SynapseImapServer {
     /// Start the IMAP server
     pub async fn start(&self) -> Result<()> {
         let addr = format!("0.0.0.0:{}", self.config.port);
-        let listener = TcpListener::bind(&addr).await
-            .map_err(|e| SynapseError::NetworkError(format!("Failed to bind IMAP server to {addr}: {e}")))?;
+        let listener = TcpListener::bind(&addr).await.map_err(|e| {
+            SynapseError::NetworkError(format!("Failed to bind IMAP server to {addr}: {e}"))
+        })?;
 
         info!("EMRP IMAP Server listening on {}", addr);
 
@@ -126,9 +127,15 @@ impl SynapseImapServer {
         let (read_half, write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
-        
+
         let mut session = ImapSession {
-            id: format!("imap_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()),
+            id: format!(
+                "imap_{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis()
+            ),
             state: ImapState::NotAuthenticated,
             authenticated_user: None,
             selected_mailbox: None,
@@ -146,7 +153,7 @@ impl SynapseImapServer {
             debug!("IMAP command: {}", command);
 
             let responses = self.process_imap_command(command, &mut session).await?;
-            
+
             for response in responses {
                 writer.write_all(response.as_bytes()).await?;
             }
@@ -164,7 +171,11 @@ impl SynapseImapServer {
     }
 
     /// Process IMAP command
-    async fn process_imap_command(&self, command: &str, session: &mut ImapSession) -> Result<Vec<String>> {
+    async fn process_imap_command(
+        &self,
+        command: &str,
+        session: &mut ImapSession,
+    ) -> Result<Vec<String>> {
         let parts: Vec<&str> = command.split_whitespace().collect();
         if parts.len() < 2 {
             return Ok(vec!["* BAD Syntax error\r\n".to_string()]);
@@ -172,7 +183,7 @@ impl SynapseImapServer {
 
         let tag = parts[0];
         let cmd = parts[1].to_uppercase();
-        
+
         match cmd.as_str() {
             "CAPABILITY" => {
                 let mut responses = vec![
@@ -183,34 +194,31 @@ impl SynapseImapServer {
             }
             "LOGIN" => {
                 if parts.len() < 4 {
-                    return Ok(vec![format!("{} BAD LOGIN requires username and password\r\n", tag)]);
+                    return Ok(vec![format!(
+                        "{} BAD LOGIN requires username and password\r\n",
+                        tag
+                    )]);
                 }
-                
+
                 let username = parts[2].trim_matches('"');
                 let password = parts[3].trim_matches('"');
-                
+
                 match self.auth_handler.authenticate(username, password) {
                     Ok(true) => {
                         session.state = ImapState::Authenticated;
                         session.authenticated_user = Some(username.to_string());
                         Ok(vec![format!("{} OK LOGIN completed\r\n", tag)])
                     }
-                    Ok(false) => {
-                        Ok(vec![format!("{} NO LOGIN failed\r\n", tag)])
-                    }
-                    Err(_) => {
-                        Ok(vec![format!("{} NO LOGIN failed\r\n", tag)])
-                    }
+                    Ok(false) => Ok(vec![format!("{} NO LOGIN failed\r\n", tag)]),
+                    Err(_) => Ok(vec![format!("{} NO LOGIN failed\r\n", tag)]),
                 }
             }
             "LIST" => {
                 if session.state == ImapState::NotAuthenticated {
                     return Ok(vec![format!("{} NO Not authenticated\r\n", tag)]);
                 }
-                
-                let mut responses = vec![
-                    "* LIST () \"/\" \"INBOX\"\r\n".to_string(),
-                ];
+
+                let mut responses = vec!["* LIST () \"/\" \"INBOX\"\r\n".to_string()];
                 responses.push(format!("{tag} OK LIST completed\r\n"));
                 Ok(responses)
             }
@@ -218,13 +226,16 @@ impl SynapseImapServer {
                 if session.state == ImapState::NotAuthenticated {
                     return Ok(vec![format!("{} NO Not authenticated\r\n", tag)]);
                 }
-                
+
                 if parts.len() < 3 {
-                    return Ok(vec![format!("{} BAD SELECT requires mailbox name\r\n", tag)]);
+                    return Ok(vec![format!(
+                        "{} BAD SELECT requires mailbox name\r\n",
+                        tag
+                    )]);
                 }
-                
+
                 let mailbox = parts[2].trim_matches('"');
-                
+
                 // Get message count for this user
                 let message_count = {
                     let store = self.message_store.lock().unwrap();
@@ -234,10 +245,10 @@ impl SynapseImapServer {
                         0
                     }
                 };
-                
+
                 session.state = ImapState::Selected;
                 session.selected_mailbox = Some(mailbox.to_string());
-                
+
                 let mut responses = vec![
                     format!("* {} EXISTS\r\n", message_count),
                     "* 0 RECENT\r\n".to_string(),
@@ -253,14 +264,17 @@ impl SynapseImapServer {
                 if session.state != ImapState::Selected {
                     return Ok(vec![format!("{} NO Not in selected state\r\n", tag)]);
                 }
-                
+
                 if parts.len() < 4 {
-                    return Ok(vec![format!("{} BAD FETCH requires sequence set and items\r\n", tag)]);
+                    return Ok(vec![format!(
+                        "{} BAD FETCH requires sequence set and items\r\n",
+                        tag
+                    )]);
                 }
-                
+
                 let sequence_set = parts[2];
                 let items = parts[3..].join(" ");
-                
+
                 // Get messages for this user
                 let messages = {
                     let store = self.message_store.lock().unwrap();
@@ -270,9 +284,9 @@ impl SynapseImapServer {
                         Vec::new()
                     }
                 };
-                
+
                 let mut responses = Vec::new();
-                
+
                 // Parse sequence set (simplified - just handle "1:*" and single numbers)
                 let seq_nums: Vec<usize> = if sequence_set == "1:*" {
                     (1..=messages.len()).collect()
@@ -285,12 +299,16 @@ impl SynapseImapServer {
                 } else {
                     Vec::new()
                 };
-                
+
                 for seq_num in seq_nums {
                     if let Some(message) = messages.get(seq_num - 1) {
                         if items.contains("RFC822") || items.contains("BODY[]") {
                             let email_content = self.format_as_email(message);
-                            responses.push(format!("* {} FETCH (RFC822 {{{}}}\r\n", seq_num, email_content.len()));
+                            responses.push(format!(
+                                "* {} FETCH (RFC822 {{{}}}\r\n",
+                                seq_num,
+                                email_content.len()
+                            ));
                             responses.push(format!("{email_content}\r\n"));
                             responses.push(")\r\n".to_string());
                         } else if items.contains("FLAGS") {
@@ -298,7 +316,7 @@ impl SynapseImapServer {
                         }
                     }
                 }
-                
+
                 responses.push(format!("{tag} OK FETCH completed\r\n"));
                 Ok(responses)
             }
@@ -306,11 +324,11 @@ impl SynapseImapServer {
                 if session.state != ImapState::Selected {
                     return Ok(vec![format!("{} NO Not in selected state\r\n", tag)]);
                 }
-                
+
                 if !self.config.enable_idle {
                     return Ok(vec![format!("{} NO IDLE not supported\r\n", tag)]);
                 }
-                
+
                 session.idle_mode = true;
                 Ok(vec!["+ idling\r\n".to_string()])
             }
@@ -324,15 +342,11 @@ impl SynapseImapServer {
             }
             "LOGOUT" => {
                 session.state = ImapState::Logout;
-                let mut responses = vec![
-                    "* BYE EMRP IMAP Server logging out\r\n".to_string(),
-                ];
+                let mut responses = vec!["* BYE EMRP IMAP Server logging out\r\n".to_string()];
                 responses.push(format!("{tag} OK LOGOUT completed\r\n"));
                 Ok(responses)
             }
-            _ => {
-                Ok(vec![format!("{} BAD Command not recognized\r\n", tag)])
-            }
+            _ => Ok(vec![format!("{} BAD Command not recognized\r\n", tag)]),
         }
     }
 
@@ -341,10 +355,7 @@ impl SynapseImapServer {
         let content = String::from_utf8_lossy(&message.encrypted_content);
         format!(
             "From: {}\r\nTo: {}\r\nSubject: EMRP Message\r\nDate: {:?}\r\n\r\n{}",
-            message.from_global_id,
-            message.to_global_id,
-            message.timestamp,
-            content
+            message.from_global_id, message.to_global_id, message.timestamp, content
         )
     }
 }

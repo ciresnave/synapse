@@ -1,47 +1,47 @@
-use serde::{Serialize, Deserialize};
+use crate::synapse::blockchain::serialization::UuidWrapper;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
-use crate::synapse::blockchain::serialization::UuidWrapper;
 
 /// API Error Types - standardized error handling for Synapse API endpoints
 #[derive(Debug, Error, Serialize, Deserialize, Clone)]
 pub enum ApiError {
     #[error("Resource not found: {0}")]
     NotFound(String),
-    
+
     #[error("Authentication required")]
     Unauthorized,
-    
+
     #[error("Permission denied: {0}")]
     Forbidden(String),
-    
+
     #[error("Validation error: {0}")]
     ValidationError(String),
-    
+
     #[error("Conflict: {0}")]
     Conflict(String),
-    
+
     #[error("Rate limit exceeded")]
     RateLimited,
-    
+
     #[error("External service error: {0}")]
     ExternalServiceError(String),
-    
+
     #[error("Database error")]
     DatabaseError,
-    
+
     #[error("Network error: {0}")]
     NetworkError(String),
-    
+
     #[error("Trust system error: {0}")]
     TrustSystemError(String),
-    
+
     #[error("Invalid request: {0}")]
     BadRequest(String),
-    
+
     #[error("Internal server error")]
     InternalServerError,
-    
+
     #[error("Service unavailable")]
     ServiceUnavailable,
 }
@@ -96,20 +96,24 @@ impl<T> ApiResponse<T> {
             message,
         }
     }
-    
+
     /// Create an error response
     pub fn error(err: ApiError) -> Self {
         let request_id = UuidWrapper::new(Uuid::new_v4()).to_string();
-        
+
         // Log the error with request ID for traceability
         tracing::error!("API Error [{}]: {}", request_id, err);
-        
+
         Self {
             success: false,
             data: None,
             error: Some(ApiErrorResponse {
                 code: err.status_code(),
-                error_type: format!("{err:?}").split('(').next().unwrap_or("Unknown").to_string(),
+                error_type: format!("{err:?}")
+                    .split('(')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string(),
                 message: err.to_string(),
                 details: None,
                 request_id: Some(request_id),
@@ -117,20 +121,29 @@ impl<T> ApiResponse<T> {
             message: None,
         }
     }
-    
+
     /// Create an error response with additional details
     pub fn error_with_details(err: ApiError, details: serde_json::Value) -> Self {
         let request_id = UuidWrapper::new(Uuid::new_v4()).to_string();
-        
+
         // Log the error with request ID and details for traceability
-        tracing::error!("API Error [{}]: {} - Details: {:?}", request_id, err, details);
-        
+        tracing::error!(
+            "API Error [{}]: {} - Details: {:?}",
+            request_id,
+            err,
+            details
+        );
+
         Self {
             success: false,
             data: None,
             error: Some(ApiErrorResponse {
                 code: err.status_code(),
-                error_type: format!("{err:?}").split('(').next().unwrap_or("Unknown").to_string(),
+                error_type: format!("{err:?}")
+                    .split('(')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string(),
                 message: err.to_string(),
                 details: Some(details),
                 request_id: Some(request_id),
@@ -145,12 +158,12 @@ impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         // Log original error with full context
         tracing::error!("Converting anyhow error to ApiError: {:?}", err);
-        
+
         // Try to downcast to ApiError if it's already wrapped
         if let Some(api_err) = err.downcast_ref::<ApiError>() {
             return api_err.clone();
         }
-        
+
         // Otherwise, create a generic internal server error
         ApiError::InternalServerError
     }

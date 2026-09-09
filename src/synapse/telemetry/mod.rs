@@ -5,7 +5,9 @@
 
 pub mod error_reporting;
 
-pub use error_reporting::{ErrorTelemetry, ErrorReport, ErrorSource, ErrorSeverity, ErrorTelemetryConfig};
+pub use error_reporting::{
+    ErrorReport, ErrorSeverity, ErrorSource, ErrorTelemetry, ErrorTelemetryConfig,
+};
 
 // Re-export the error reporting macro for convenience
 pub use crate::report_error;

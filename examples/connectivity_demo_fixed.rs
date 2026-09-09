@@ -2,11 +2,8 @@
 //!
 //! This example demonstrates basic connectivity concepts and configuration.
 
-use synapse::{
-    Config,
-    types::SimpleMessage,
-};
 use anyhow::Result;
+use synapse::{Config, types::SimpleMessage};
 use tracing::info;
 
 #[tokio::main]
@@ -20,7 +17,7 @@ async fn main() -> Result<()> {
 
     // Create different types of configurations
     demo_different_config_types().await?;
-    
+
     info!("🌐 Connectivity Demo completed!");
     Ok(())
 }
@@ -31,32 +28,37 @@ async fn demo_different_config_types() -> Result<()> {
     info!("🧪 Test config created: {}", test_config.entity.local_name);
 
     // Gmail configuration example
-    let gmail_config = Config::gmail_config(
-        "MyBot",
-        "Tool", 
-        "mybot@gmail.com",
-        "app_password_here"
+    let gmail_config =
+        Config::gmail_config("MyBot", "Tool", "mybot@gmail.com", "app_password_here");
+    info!(
+        "📧 Gmail config created: {}",
+        gmail_config.entity.local_name
     );
-    info!("📧 Gmail config created: {}", gmail_config.entity.local_name);
 
-    // Outlook configuration example  
+    // Outlook configuration example
     let outlook_config = Config::outlook_config(
         "OfficeBot",
         "Service",
-        "officebot@outlook.com", 
-        "password_here"
+        "officebot@outlook.com",
+        "password_here",
     );
-    info!("🏢 Outlook config created: {}", outlook_config.entity.local_name);
+    info!(
+        "🏢 Outlook config created: {}",
+        outlook_config.entity.local_name
+    );
 
     // Default configuration for an entity
     let entity_config = Config::default_for_entity("NetworkBot", "AiModel");
-    info!("🤖 Entity config created: {}", entity_config.entity.local_name);
+    info!(
+        "🤖 Entity config created: {}",
+        entity_config.entity.local_name
+    );
 
     // Create a sample message for the demo
     let message = SimpleMessage::new(
         "ConnectivityDemo",
         "NetworkTest",
-        "Testing connectivity configurations"
+        "Testing connectivity configurations",
     );
 
     info!("📤 Demo message created: {}", message.content);

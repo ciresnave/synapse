@@ -75,9 +75,10 @@ impl SynapseRouter {
         {
             let crypto = self.crypto.read().await;
             if let SecurityLevel::Secure = secure_msg.security_level
-                && let Ok(encrypted) = crypto.encrypt_message(&simple_msg.content, &simple_msg.to) {
-                    secure_msg.encrypted_content = encrypted;
-                }
+                && let Ok(encrypted) = crypto.encrypt_message(&simple_msg.content, &simple_msg.to)
+            {
+                secure_msg.encrypted_content = encrypted;
+            }
         }
         // Sign the message
         let signature = {
@@ -165,8 +166,7 @@ impl SynapseRouter {
     /// Register a peer's public key
     pub async fn register_peer_key(&self, global_id: &str, public_key_pem: &str) -> Result<()> {
         let mut crypto_manager = self.crypto.write().await;
-        crypto_manager
-            .import_public_key(global_id, public_key_pem)
+        crypto_manager.import_public_key(global_id, public_key_pem)
     }
 
     /// Generate our own keypair

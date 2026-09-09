@@ -78,7 +78,6 @@ fn generate_response(query: &str) -> String {
     } else if query_lower.contains("help") {
         "I'm here to help! I can answer questions and assist with various tasks.".to_string()
     } else if query_lower.contains("time") {
-        
         {
             format!(
                 "The current time is approximately {}",

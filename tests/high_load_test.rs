@@ -68,9 +68,7 @@ async fn test_high_load_routing() -> Result<()> {
     }
 
     println!("High load test completed in {duration:?}");
-    println!(
-        "Successfully processed {success_count} out of {NUM_ROUTERS} router load tests"
-    );
+    println!("Successfully processed {success_count} out of {NUM_ROUTERS} router load tests");
 
     assert!(
         success_count >= NUM_ROUTERS * 8 / 10,
@@ -138,12 +136,8 @@ async fn test_concurrent_message_conversion() -> Result<()> {
         }
     }
 
-    println!(
-        "Concurrent message conversion test completed in {duration:?}"
-    );
-    println!(
-        "Successfully processed {success_count} out of {NUM_OPERATIONS} operations"
-    );
+    println!("Concurrent message conversion test completed in {duration:?}");
+    println!("Successfully processed {success_count} out of {NUM_OPERATIONS} operations");
 
     assert!(
         success_count >= NUM_OPERATIONS * 9 / 10,

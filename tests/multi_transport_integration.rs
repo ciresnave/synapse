@@ -101,9 +101,7 @@ async fn test_concurrent_transport_operations() -> Result<()> {
         }
     }
 
-    println!(
-        "Concurrent transport operations: {success_count} out of {NUM_OPERATIONS} succeeded"
-    );
+    println!("Concurrent transport operations: {success_count} out of {NUM_OPERATIONS} succeeded");
     assert!(
         success_count >= NUM_OPERATIONS * 8 / 10,
         "At least 80% of operations should succeed"

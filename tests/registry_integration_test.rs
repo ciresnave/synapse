@@ -7,5 +7,3 @@ mod registry_tests {
         assert!(result, "Registry test placeholder");
     }
 }
-
-
