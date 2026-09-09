@@ -26,6 +26,20 @@ compiler. Two defects caused this; both are now fixed, and the library builds an
 | feature configurations that resolve | **0 of 10** | 10 of 10 |
 | feature configurations that compile | **0 of 10** | **1 of 10** (`native` only — see §3) |
 
+**And the question nothing in the repository answers — does a message actually get from A to B?** No
+test sends one over a socket, so I ran the probes myself (§2.2):
+
+| | result |
+|---|---|
+| **UDP round trip** | ✅ **DELIVERS** — payload intact, ~1 ms, via the factory path with `bind_port` set |
+| **TCP round trip** | 🔴 **SILENTLY DROPS** — `send_message` returns `Ok(confirmation: Sent)`; nothing ever arrives |
+| **WebSocket** | 🔴 same defect as TCP, read not run |
+| **QUIC** | 🔴 **simulation** — binds nothing, fabricates connections with a hardcoded RTT |
+
+⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
+undocumented construction requirements.** That single fact matters more for planning than everything
+else in this document.
+
 ---
 
 ## 1. What was blocking the build
@@ -182,6 +196,34 @@ INFO  TCP message sent to 127.0.0.1:47812 in 1.01ms  <- reported success
 `accept()` on it.** Bytes are written into a socket no one reads. `start()` returns `Ok(())` and
 `status()` reports `Running` regardless.
 
+#### ✅ Independently confirmed, by a different method, and the fix is verified
+
+The Fuel 1 lane replicated this at the portfolio PM's request, deliberately **without** my probe, my
+instrument, or my diagnosis — they were given the symptom only, plus a frozen base and a
+pre-registered prediction. They reached the **same cause by reading**, and then went further than I
+did:
+
+```
+their observation:  send Ok / confirmation=Sent / 1.35ms, receive_messages -> 0
+                    then -> 1 AFTER THEIR FIX
+their cause:        the double-bind, same lines (:57 bind, :101 re-bind, :128 swallowed else)
+their fix:          make self.listener an Arc<TcpListener>, clone the Arc into the accept
+                    loop, delete the second bind
+```
+
+⚠️ **Two independent methods converged on one cause, and the fix is verified rather than plausible.**
+I had recorded this as "looks small — someone should confirm that before believing it." It is now
+confirmed: **a message arrives after the change.** Filed as
+[`ciresnave/synapse#9`](https://github.com/ciresnave/synapse/issues/9) with the patch, marked
+UNAPPLIED because `push=false`.
+
+⚠️ **And they resolved a gap I had flagged in my own experiment.** I had noted that I only ever set an
+explicit `listen_port` and never tested `listen_port = 0` / absent. Their answer: that is a
+**separate state, not this bug** — with port 0 the constructor binds no listener at all,
+`start_server` is a no-op, and there is no address to receive on. **So there are two distinct ways to
+get a deaf TCP transport: "never a server" (port unset) and "port owned but never served" (port set).
+Both report `Running`.** The measured symptom above is the second.
+
 **Probe B — the wire format, captured by a RAW `tokio::net::TcpListener` with no Synapse on the
 receiving side.** This direction *works*:
 
@@ -199,21 +241,116 @@ receiving side.** This direction *works*:
 close. Not bincode, not a Rust-specific encoding. `encrypted_content` and `signature` are JSON arrays
 of byte integers rather than base64 (verbose, but trivial to implement).
 
+#### ✅ PROBE C — UDP DELIVERS END TO END. THERE IS A WORKING TRANSPORT TODAY.
+
+**This is the most useful result in this document.** Same shape of probe, UDP instead of TCP,
+receiver built through `UdpTransportFactory` with `bind_port` set:
+
+```
+INFO  UDP transport bound to 0.0.0.0:47901
+[udp] sending...
+DEBUG Sending UDP message to 127.0.0.1:47901
+DEBUG Received 321 bytes via UDP from 127.0.0.1:57249
+DEBUG Queued UDP message, total: 1
+[udp] attempt 1: 1 message(s)
+[udp] ***** DELIVERED ***** from=alice@synapse.local payload=UDP_PROBE_PAYLOAD
+[udp] RESULT: UDP ROUND TRIP SUCCEEDED
+```
+
+**A `SecureMessage` was serialised, sent over a real loopback socket, received, queued, and returned
+by `receive_messages()` with its payload intact, in about 1 ms.**
+
+⚠️ **BUT ONLY VIA THE FACTORY, AND THE LIFECYCLE CONTRACT DIFFERS FROM TCP'S.** This is the part that
+would cost someone a day:
+
+| | what starts the receive loop |
+|---|---|
+| `tcp_unified` | `Transport::start()` calls `self.start_server()` — so `new()` + `start()` is the right path |
+| `udp_unified` | ⚠️ **`Transport::start()` does NOT call `start_server()`.** Only `UdpTransportFactory::create_transport` does, and **only if `bind_port` is present and > 0** |
+
+`UdpTransportImpl::new()` leaves `socket: None`, and `start()` merely logs:
+
+```rust
+// Note: We need mutable access to self to start the server
+// This is a limitation of the current design - we'll work around it
+info!("UDP transport ready (server will start on first use)");
+```
+
+⚠️ **"server will start on first use" is false — nothing starts it on first use.** Construct a UDP
+transport the way you construct a TCP one and you get a permanently deaf transport that reports
+`Running`. **The two transports have opposite construction requirements and neither is documented.**
+
+Two further observations, recorded because they mislead:
+- `receiver.status()` returned **`Stopped`** immediately after the factory had already bound the
+  socket and started the loop. Status does not track the server.
+- `start()` then logged *"server will start on first use"* on a transport whose server was **already
+  running**. The log describes the code path, not the state.
+
+**Limits: single process, loopback, one message, one direction.** UDP is also inherently lossy and
+capped at 65507 bytes (`max_message_size` default). **This is a working link, not a reliable one.**
+
 #### What this means for a non-Rust agent runtime
 
 | direction | status |
 |---|---|
-| **Synapse → foreign process** | ⚠️ **WORKS — measured.** A Python/Node/Go process that opens a TCP listener receives clean, parseable JSON. No Rust linkage required. |
-| **foreign process → Synapse** | ⚠️ **BROKEN — measured.** Synapse's TCP listener never accepts, so nothing can deliver into it. |
+| **Synapse → foreign process (TCP)** | ✅ **WORKS — measured.** A Python/Node/Go process opening a TCP listener receives clean parseable JSON. No Rust linkage required. |
+| **foreign process → Synapse (TCP)** | 🔴 **BROKEN — measured.** Synapse's TCP listener never accepts. |
+| **Synapse ↔ Synapse (UDP)** | ✅ **WORKS — measured, both directions of the round trip.** Via the factory path with `bind_port` set. |
+| **foreign process ↔ Synapse (UDP)** | **Not probed**, but the receive loop is real and reads datagrams off a bound socket, so a foreign process sending the same JSON to that port is the most promising untested path. |
 
 **There is no published wire specification, no schema, and no client library in any language** — but
 the format is simple enough to implement from the capture above, and `src/types.rs::SecureMessage` is
 its de facto schema. **The blocking defect is the receive path, not the protocol.**
 
-**Only TCP was probed.** UDP, QUIC, WebSocket and HTTP are unmeasured end-to-end (§9). ⚠️ **Note that
-`udp_unified.rs`, `quic_unified.rs` and `websocket_unified.rs` follow the same
-`bind-then-spawn-and-bind-again` shape in `start_server`, so the same defect is plausible there —
-plausible, not measured, and I am not asserting it.**
+#### The other transports — read, not run, and the speculation I first published was wrong
+
+⚠️ **I originally wrote that `udp_unified`, `quic_unified` and `websocket_unified` "follow the same
+`bind-then-spawn-and-bind-again` shape." I had not checked. One of the three does; the other two do
+not, and one of them does something worse.** Corrected by reading each `start_server`:
+
+| transport | server side | verdict |
+|---|---|---|
+| `tcp_unified` | binds, then re-binds inside `tokio::spawn` | 🔴 **defect MEASURED end-to-end** (above) |
+| `websocket_unified` | **same shape** — binds at :904, stores it, then re-binds the same port at :931 inside the spawn | 🔴 **same defect, READ not run** |
+| `udp_unified` | binds once at :72, stores `Arc<UdpSocket>`, receive path uses `self.socket` | ✅ **structurally sound** — my speculation was wrong |
+| `quic_unified` | **does not bind anything** | 🔴 **simulation — see below** |
+| `tcp_simple`, `http_unified` | no bind call in the file | no server side |
+
+⚠️ **`websocket_unified` is the same bug and is more silent than the TCP one.** It stores the real
+listener, then in the spawned task binds a second one on the same port and swallows the failure with
+`.ok()` — so unlike `tcp_unified` there is **no error log at all**, and the code comments admit it:
+
+```rust
+tokio::spawn(async move {
+    let listener = {
+        // We need to move the listener out to avoid borrowing issues
+        // In a real implementation, we'd keep the listener in the task
+        TcpListener::bind(format!("0.0.0.0:{}", actual_port)).await.ok()   // <-- port in use
+    };
+    if let Some(listener) = listener { ... while let Ok(..) = listener.accept().await ... }
+});
+```
+
+⚠️ **`quic_unified` performs no networking whatsoever. It is a simulation that reports success.**
+`start_server()` binds nothing and returns `Ok` after logging **`"QUIC server started on {addr}"`** at
+INFO. `connect_to_server()` sleeps 50 ms to "simulate connection establishment", fabricates a
+`QuicConnection` with a hardcoded `rtt: Some(20ms)`, and stores it. **The file contains no reference
+to `quinn` or any QUIC library** — control: `grep -n quinn src/transport/quic_unified.rs` returns
+nothing, while `quinn` is present in `Cargo.lock`. Its own comments say so:
+
+```
+// In real implementation, this would:
+//   1. Configure QUIC server with certificates and crypto  2. Bind to local address ...
+// For simulation, just log
+```
+
+**So an operator enabling QUIC sees `QUIC transport started` in the logs and has no QUIC.** The
+orphaned `src/transport/quic.rs` (740 lines, §5.3) *does* contain a real `endpoint.accept()` loop —
+**the working-looking implementation is the one excluded from the build.**
+
+**Still unmeasured end-to-end:** UDP, WebSocket, QUIC, HTTP, email. The table above is a reading of
+`start_server` in each, not a round trip. **`udp_unified` being structurally sound is not a claim that
+it delivers.**
 
 **Reproducing:** the two probes are ~70 lines each and are not committed (adding a build target is
 outside this pass's charter). Probe A: construct two `TcpTransportImpl` via
