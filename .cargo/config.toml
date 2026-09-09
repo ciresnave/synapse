@@ -1,2 +1,21 @@
-[target.x86_64-pc-windows-msvc]
-linker = "lld-link"
+# Windows linker workaround -- DISABLED 2026-09-09, deliberately.
+#
+# This file previously forced `lld-link` unconditionally for every build on the
+# x86_64-pc-windows-msvc target. `lld-link` ships with LLVM, NOT with Rust, and is not
+# present on a stock Rust + MSVC Build Tools install. On a machine without it, every
+# cargo invocation in this repo died before compiling anything:
+#
+#     error: linker `lld-link` not found
+#     note: the msvc targets depend on the msvc linker but `link.exe` was not found
+#
+# Measured 2026-09-09 on rustc 1.100.0-nightly (cea272fa3): with this override removed,
+# the default MSVC linker links the library and all 11 integration-test binaries with no
+# LNK1318. The stack-overflow/LNK1318 problem the override was added for (see README
+# "Platform-Specific Notes") did not reproduce here.
+#
+# It is left commented rather than deleted so the workaround stays discoverable: if you do
+# hit LNK1318, install LLVM and uncomment. Do not re-commit it enabled -- forcing a linker
+# that most contributors do not have makes the repo unbuildable for them.
+#
+# [target.x86_64-pc-windows-msvc]
+# linker = "lld-link"

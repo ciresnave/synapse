@@ -112,13 +112,18 @@ sqlx = { version = "0.8.6", features = [
 ], optional = true }
 redis = { version = "0.32.4", features = ["tokio-comp"], optional = true }
 
-# Authentication framework - Latest version with enhanced features
+# Authentication framework.
+# NOTE: the feature list below is the set that actually exists in auth-framework 0.3.0.
+# The previous list also requested "config-management", "enterprise-features" and
+# "token-to-profile"; those three names have never existed in ANY published version of
+# auth-framework (checked 0.1.1 through 0.5.0-rc19 against index.crates.io, 2026-09-09).
+# Cargo rejects unknown dependency features at RESOLUTION time, which made every single
+# feature configuration of this crate unresolvable -- including `--no-default-features
+# --features minimal`, which does not enable auth at all. Removing them is not a version
+# migration; the 0.3 -> 0.4/0.5 question is deliberately left open for the merge.
 auth-framework = { version = "0.3.0", optional = true, features = [
     "oauth-device-flows",
     "enhanced-device-flow",
-    "config-management",
-    "enterprise-features",
-    "token-to-profile",
 ] }
 
 # Missing dependencies that are needed
@@ -181,7 +186,9 @@ wasm-bindgen-test = "0.3"
 [[example]]
 name = "auth_framework_v3_demo"
 path = "examples/auth_framework_v3_demo.rs"
-required-features = ["auth", "core"]
+# Requires `enhanced-auth`, which is aspirational and does not build. See
+# src/auth_integration_enhanced.rs, the only module this example uses.
+required-features = ["auth", "core", "enhanced-auth"]
 
 [[example]]
 name = "hello_world"
@@ -257,6 +264,11 @@ required-features = ["minimal", "mdns", "networking"]
 default = ["native"]
 
 # Auth features
+# ⚠️ KNOWN BROKEN, DELIBERATELY. Gates src/auth_integration_enhanced.rs, which imports nine
+# items that exist in no published auth-framework (0.1.1..0.5.0-rc19). Enabling this feature
+# fails to compile. It is wired up rather than deleted so the module's status is explicit
+# and the merge can decide its fate. Before this commit the feature was declared but gated
+# nothing at all, while src/synapse/auth/README.md told users to build with it.
 enhanced-auth = []
 
 # Standard library support

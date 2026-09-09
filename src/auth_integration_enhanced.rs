@@ -1,9 +1,37 @@
 //! Enhanced Synapse Authentication Integration - Latest Auth-Framework
 //!
-//! This module leverages the latest auth-framework features to provide cutting-edge
-//! authentication for AI neural communication networks. Features the new configuration
-//! management system, token-to-profile conversion, enhanced device flows, and enterprise
-//! security capabilities.
+//! # ⚠️ ASPIRATIONAL — THIS MODULE HAS NEVER COMPILED AGAINST A REAL auth-framework
+//!
+//! Measured 2026-09-09 against rustc 1.100.0-nightly and auth-framework 0.3.0 (the pinned
+//! version, and the only one `^0.3.0` admits). This module is gated behind the
+//! `enhanced-auth` feature, which is OFF by default. **Enabling `enhanced-auth` does not
+//! build.** It is retained in-tree, unmodified, so that the pending Synapse/FAM merge and
+//! the auth-framework upgrade decision can dispose of it deliberately.
+//!
+//! Its `use auth_framework::{...}` block imports nine items that do not exist in any
+//! published auth-framework (0.1.1 through 0.5.0-rc19, checked against index.crates.io):
+//!
+//! ```text
+//!   OAuthTokenResponse            no such item in the crate root
+//!   TokenToProfile                no such item in the crate root
+//!   audit::{AuditEvent, AuditLogger}          no `audit` module
+//!   compliance::{ComplianceLevel, ...}        no `compliance` module
+//!   config::{AuthFrameworkConfigManager, ConfigManager}   not in `config`
+//!   device_flow::{DeviceFlowConfig, ...}      no `device_flow` module
+//!   methods::AuthMethodEnum                   not in `methods`
+//!   storage::PostgreSqlStorage                not in `storage`
+//! ```
+//!
+//! Plus four API-shape errors past the imports: `AuthConfig::enable_audit_logging` (no such
+//! method), a `&Vec<String>`/`Vec<String>` mismatch, an `AuthToken`/`Box<AuthToken>`
+//! mismatch, and `Credential::enhanced_device_flow` (no such variant).
+//!
+//! The three phantom names in the old `Cargo.toml` feature list — `config-management`,
+//! `enterprise-features`, `token-to-profile` — correspond one-to-one with the phantom
+//! imports above. The feature list and this module were written against the same
+//! anticipated API, and that API was never published.
+//!
+//! The doc comment below describes intent, not behaviour. Nothing in it is verified.
 //!
 //! 🆕 Latest Features:
 //! - 🔧 Configuration Management: Multi-format config files with environment variables
