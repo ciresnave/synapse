@@ -367,6 +367,58 @@ assertion total, and `registry_integration_test` is 1 test with 1 assertion. Ass
 
 ---
 
+## 2.4 ⚠️ CI HAS NEVER COMPILED THIS REPOSITORY — NOT ONCE, IN ITS ENTIRE HISTORY
+
+This is the structural explanation for how everything else in this document survived unnoticed.
+
+**The repository has had exactly three GitHub Actions runs, ever:**
+
+```
+34368757423  2026-09-09  pull_request  repair/buildable-and-inventory  failure   <- this pass
+27432430342  2026-06-12  dynamic       main                            success
+27432424608  2026-06-12  push          main                            failure   <- the only real run on main
+```
+
+**The only push-triggered run on `main` — at `f0f570c`, the checkpoint commit — failed at step 8 of
+16, and everything that matters was skipped:**
+
+```
+ 6 Install stable toolchain      success
+ 7 Install wasm-pack             success
+ 8 Check formatting              FAILURE      <- cargo fmt -- --check
+ 9 Clippy                        skipped
+10 Build                         skipped
+11 Run tests                     skipped
+12 Build WebAssembly package     skipped
+```
+
+⚠️ **`Build`, `Run tests`, `Clippy` and the WASM build have never executed on this repository.** The
+run on my own branch (2026-09-09) fails identically, at the same step, with the same four skips —
+**two runs, three months apart, same shape.**
+
+**Why the formatting check fails, measured:** `cargo fmt -- --check` flags **23 files**, all in
+`examples/` and `tests/`, none in `src/`. **The set is byte-identical at `f0f570c` and on the repair
+branch** — I diffed the two lists and they match exactly, so **this red is entirely pre-existing and
+no change in this pass touched it.**
+
+⚠️ **The consequence is the important part. `cargo fmt` does not need dependency resolution — it
+parses sources and never consults the lockfile — so it runs fine at `f0f570c`, where `cargo build`
+cannot resolve at all (§1.1).** The pipeline therefore fails on *formatting* and short-circuits
+before it can discover that **the crate does not build**. **The most serious defect in the repository
+was invisible to CI because a cosmetic check ran first and failed.**
+
+**This also means every "the build is green" claim in the root status documents (§6) was
+uncheckable**: there has never been a CI run that got as far as compiling, and at `f0f570c` a local
+build could not resolve either. ⚠️ **Nobody was ignoring a red build signal. There was no build
+signal.**
+
+**Remedy is not in this pass's scope** (it changes CI behaviour, and the 23 files are examples and
+tests whose fate the merge decides), but the shape is small: the formatting failures are whitespace
+and import-order drift, and moving `Check formatting` after `Build`/`Run tests` — or fixing the 23
+files — would make the pipeline able to report on the thing it exists to report on.
+
+---
+
 ## 3. ⚠️ The feature system is decorative — `native` is the only configuration that can compile
 
 **Of the 17 declared features, exactly ONE gates any compiled code.**
