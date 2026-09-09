@@ -440,6 +440,40 @@ uncheckable**: there has never been a CI run that got as far as compiling, and a
 build could not resolve either. ⚠️ **Nobody was ignoring a red build signal. There was no build
 signal.**
 
+#### Update after the formatting fix: the pipeline advanced one step, and stopped again
+
+Run `34371759050`, head `54c2596`, after `src/wasm.rs` was removed and `cargo fmt` applied:
+
+```
+ 8  Check formatting          SUCCESS   <- first time in this repository's history
+ 9  Clippy                    FAILURE   <- the new blocker
+10  Build                     skipped
+11  Run tests                 skipped
+12  Build WebAssembly package skipped
+```
+
+⚠️ **`Build` and `Run tests` have STILL never executed here.** The heading of this section remains
+literally true.
+
+CI runs `cargo clippy -- -D warnings`, so **31 ordinary style and dead-code lints become hard
+errors** — 6 × "this `if` statement can be collapsed", 3 × "this operation has no effect", 2 ×
+"`map_or` can be simplified", plus unused imports, unused variables and never-read fields.
+
+**They are not introduced by this pass.** Clippy at `7579b56` (before the `cargo fmt` commit) and at
+`HEAD` both report *"could not compile `synapse` (lib) due to 31 previous errors"*, and a diff of the
+two lint-kind sets is **empty**. `cargo fmt` introduced zero lints.
+
+**They are also not fixed here, for a specific reason:** 8 of the 31 are in
+`src/transport/tcp_unified.rs`, the entire subject of the stacked PR #11. Fixing clippy in this
+branch would rewrite another author's file under their open PR. Clippy belongs in its own PR once
+that file has one owner again.
+
+⚠️ **The structural observation is worth more than the fix: a pipeline that refuses to compile
+because an `if` could be collapsed has never told anyone whether the code compiles.** Step 8 was
+crashing outright from the first release commit (above) and step 9 gates `Build` behind style. **This
+repository has had a CI configuration capable of reporting on everything except the thing it exists
+to report on.** That is a CI-design question, not a code question, and it is deliberately left open.
+
 **Remedy is not in this pass's scope** (it changes CI behaviour, and the 23 files are examples and
 tests whose fate the merge decides), but the shape is small: the formatting failures are whitespace
 and import-order drift, and moving `Check formatting` after `Build`/`Run tests` — or fixing the 23
