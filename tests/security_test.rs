@@ -178,9 +178,19 @@ async fn test_password_key_derivation_security() {
     );
 }
 
-/// Test blockchain block signature verification
+/// Test blockchain block SIGNING. Named for what it asserts.
+///
+/// ⚠️ IT DOES NOT VERIFY A SIGNATURE, AND IT NEVER DID. It was previously
+/// called `test_blockchain_signature_verification`, which is what `cargo test`
+/// printed on every green run — so anyone asking "does this project test that
+/// block signatures are verified?" got a yes from a test that only signs.
+///
+/// The verification half is blocked on a function that does not exist:
+/// `verify_block_signature` appears exactly ONCE in this repository, inside a
+/// comment deferring it. Not renamed, not private — never written.
+/// `tests/blockchain_verification_is_still_unbuilt.rs` reddens when it appears.
 #[tokio::test]
-async fn test_blockchain_signature_verification() {
+async fn test_blockchain_block_signing() {
     use synapse::synapse::blockchain::serialization::DateTimeWrapper;
 
     let mut block = Block {
@@ -229,19 +239,26 @@ async fn test_blockchain_signature_verification() {
         "Signature should use secure algorithm"
     );
 
-    // Test verification requires proper implementation of verify_block_signature
-    // This ensures blocks can't be tampered with after signing
-
-    // Test verification fails with tampered block content
+    // ⚠️ WHAT FOLLOWS IS NOT AN INTEGRITY CHECK, AND ITS OLD COMMENT SAID IT
+    // WAS. The assertion compares a field to the literal assigned two lines
+    // above it, so it is true by construction and cannot fail. It confirms that
+    // `clone()` and a field assignment work. It says nothing about whether a
+    // tampered block's SIGNATURE stops verifying, which is the property the
+    // surrounding comments claimed.
+    //
+    // It is kept rather than deleted because it is harmless and it does pin the
+    // clone-then-mutate step; only the claim about it was wrong.
     let mut tampered_block = block.clone();
     tampered_block.hash = "tampered_hash".to_string();
-
-    // The signature should no longer match the tampered content
-    // This test verifies blockchain integrity protection
     assert_ne!(
         tampered_block.hash, block.hash,
-        "Tampered block should have different hash"
+        "the assignment above took effect — true by construction, NOT an integrity check"
     );
+
+    // ⚠️ THE REAL CHECK CANNOT BE WRITTEN YET: it needs a verifier that does
+    // not exist. When `verify_block_signature` is implemented, assert here that
+    // it ACCEPTS `block` and REJECTS `tampered_block`, and delete the tripwire
+    // in tests/blockchain_verification_is_still_unbuilt.rs.
 }
 
 /// Test encryption and decryption security
