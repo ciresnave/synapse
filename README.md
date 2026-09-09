@@ -3,7 +3,7 @@
 ![Synapse Enterprise AI Communication Platform](Synapse.jpeg)
 
 [![Rust](https://img.shields.io/badge/rust-2021%2B-brightgreen.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Version](https://img.shields.io/badge/version-1.1.0-orange.svg)](Cargo.toml)
 [![Enterprise Ready](https://img.shields.io/badge/enterprise-ready-gold.svg)](docs/ENTERPRISE_AI_PLATFORM.md)
 [![AI Native](https://img.shields.io/badge/ai-native-purple.svg)](examples/enterprise_ai_auth_platform.rs)
@@ -405,10 +405,9 @@ while let Some(alert) = alerts.recv().await {
 
 ### Examples
 
-- **[Basic Messaging](examples/basic_messaging.rs)**: Simple send/receive
-- **[AI Collaboration](examples/ai_collaboration.rs)**: Multi-agent scenarios
-- **[File Transfer](examples/file_transfer.rs)**: Large data exchange
-- **[Real-time Chat](examples/real_time_chat.rs)**: Interactive communication
+- **[All runnable examples](examples/)** — 33 of them, including `hello_world.rs`,
+  `basic_chat.rs`, `synapse_ai_network.rs` and `email_server_demo.rs`.
+  Run one with `cargo run --example <name>`.
 - **[Email Server](examples/email_server_demo.rs)**: Server functionality
 - **[Integration Test](examples/email_integration_test.rs)**: System validation
 
@@ -453,7 +452,7 @@ linker = "lld-link"
 
 ## 🤝 Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+We welcome contributions! See the [Developer Guide](docs/DEVELOPER_GUIDE.md) for build, test and layout details.
 
 ### Development Setup
 
@@ -515,17 +514,14 @@ tests/                  # Integration tests
 
 - **[Examples Directory](examples/)** - Working examples for different use cases
 - **[Hello World Example](examples/hello_world.rs)** - Simplest Synapse application
-- **[AI Assistant Example](examples/ai_assistant.rs)** - Multi-AI agent communication
+- **[AI Assistant Network](examples/ai_assistant_network.rs)** - Multi-AI agent communication
 
 ### 🔧 Technical References
 
 - **Generated API Docs**: Run `cargo doc --open` for complete API reference
-- **[Production Readiness Report](PRODUCTION_READINESS_REPORT.md)** - Production deployment guide
-- **[Transport Status Report](TRANSPORT_STATUS.md)** - Multi-transport implementation details
 
 ### 📊 Project Status
 
-- **[Renaming Progress](RENAMING_RECOMMENDATIONS.md)** - Current renaming status and next steps
 - **[New Features](docs/NEW_FEATURES.md)** - Latest features and capabilities added in v1.0.0
 - **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation with examples
 - **[Developer Guide](docs/DEVELOPER_GUIDE.md)** - Development tutorials and best practices
