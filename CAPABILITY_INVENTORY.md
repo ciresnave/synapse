@@ -451,10 +451,31 @@ recipient can verify **without asking the relay**; **three** distinguishable out
 — verified / could-not-verify / verified-and-contradicted; and **failure that is never silent** — a
 message that could not be verified must arrive marked unverifiable, not arrive looking ordinary.
 
-**Synapse currently produces the fourth state: not verified, not marked, indistinguishable from
-verified.** That is safe today only because no policy anywhere is per-sender. **The first per-sender
+**Synapse currently produces a fourth state that lane's spec did not enumerate until this
+measurement: not verified, not marked, indistinguishable from verified.** FAM at least reports
+`sender_vouched: false`; Synapse carries no such field, **so a consumer cannot fail closed on its
+absence without already knowing to look for something that was never there.** It is the only one of
+the four that cannot be detected by reading the message.
+
+That is safe today only because no policy anywhere is per-sender. **The first per-sender
 authorisation rule anyone writes turns `from_global_id` from metadata into an authorisation input,
 and there is no local check that recovers what the transport never carried.**
+
+##### The requirement, stated so it is checkable
+
+Contributed by that lane after this measurement, and worth recording verbatim because it is a design
+constraint rather than a wish: **a recipient must be able to compute, from the message alone plus
+keys obtained independently of the relay, exactly one of — `VERIFIED` / `UNVERIFIABLE` /
+`CONTRADICTED`.**
+
+⚠️ **And the fourth state is eliminated by the field being MANDATORY in the wire format, not
+optional.** A message without it must **fail to parse** rather than arrive looking ordinary. **A
+field a sender may omit is a field a consumer cannot rely on** — an optional `sender_vouched` would
+reproduce precisely the state measured above, because the absence and the negative are then
+indistinguishable at the receiver.
+
+This bears directly on §2.2's finding that the wire format is plain self-describing JSON: **adding
+an optional identity field would be the cheap change and the wrong one.**
 
 **Not fixed here** — signing and verifying messages is a protocol addition and a merge decision, and
 FAM (being rewritten into Synapse) already has a voucher-chain design for it. Recorded so the merge
