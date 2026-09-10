@@ -65,11 +65,7 @@ fn documented_features(doc: &str) -> Option<Vec<String>> {
         .filter(|s| s.contains('-') && !s.contains(' '))
         .map(|s| s.trim().to_string())
         .collect();
-    if feats.is_empty() {
-        None
-    } else {
-        Some(feats)
-    }
+    if feats.is_empty() { None } else { Some(feats) }
 }
 
 #[test]
