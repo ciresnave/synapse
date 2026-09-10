@@ -1,5 +1,20 @@
 # 🎯 Synapse + Auth-Framework Integration Summary
 
+> ⚠️ **CORRECTION — 2026-09-10. THE ACCOMPLISHMENT BELOW WAS NEVER POSSIBLE, AND HAS SINCE BEEN UNDONE.**
+>
+> **"Added new feature flags: `config-management`, `enterprise-features`, `token-to-profile`" is literally accurate about what was typed into `Cargo.toml` — and all three name features that do not exist.** Measured against the crates.io sparse index across **all 9 published `auth-framework` versions**, implicit optional-dependency features included: none of the three is declared by any of them. *(Controls: `oauth-device-flows` and `enhanced-device-flow`, requested on the same line, resolve from 0.3.0 onward; 34 distinct declared features were found across the 9, so the query reads the field.)*
+>
+> **Requesting them made the crate unresolvable.** `cargo check` — default features, not an unusual combination — failed at version selection with *"`auth-framework` does not have that feature"*, **before the compiler ran at all**. That is why this repository did not build.
+>
+> ⚠️ **They were removed in #10.** As of this commit the requested set is exactly: **`oauth-device-flows`, `enhanced-device-flow`**.
+>
+> **So the sentence describes an edit that was made, was never valid, and no longer exists.** The frame — *"Integration Complete"*, *"what we've accomplished"* — is what is false; the edit itself is reported faithfully. ⚠️ **A change described accurately and framed as a success is harder to catch than a wrong description, because the detail checks out.**
+>
+> *(`"Updated from auth-framework v0.3 to v0.3.0"` on the line above is a no-op: `^0.3` and `0.3.0` are the same requirement. Nothing moved.)*
+>
+> **The original text is kept below rather than rewritten**, because what was claimed, and when, is the record. `tests/integration_summary_matches_manifest.rs` now reddens if the set stated here and the set in `Cargo.toml` disagree.
+
+
 ## 🚀 Integration Complete
 
 Your auth-framework crate is **perfectly suited** for the Synapse neural communication network! Here's what we've accomplished:
