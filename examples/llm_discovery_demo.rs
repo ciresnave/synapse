@@ -238,6 +238,8 @@ async fn connect_and_chat(
             "You are a helpful AI assistant. Be concise and informative.".to_string(),
         ),
         metadata,
+        top_p: None,
+        stop_sequences: None,
     };
 
     println!("📝 Sending structured request...");

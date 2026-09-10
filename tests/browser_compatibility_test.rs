@@ -1,5 +1,14 @@
 //! Browser Compatibility Test for WebAssembly (WASM)
 //!
+//! GATED 2026-09-10. This file is wasm32-only -- every test is
+//! `#[wasm_bindgen_test]`, and it uses `js_sys`, `web_sys` and
+//! `wasm_bindgen::prelude`, none of which resolve on a host target. It carried
+//! no `cfg` gate, so a host `cargo test` tried to compile it and failed with 23
+//! errors, which contributed to the whole test suite never running in CI. The
+//! gate below restores the file's evident intent; its 7 tests still require a
+//! wasm32 target and a browser runner, and have never executed on this machine.
+#![cfg(target_arch = "wasm32")]
+//!
 //! This test validates that Synapse's WASM implementation works correctly
 //! across major browsers (Chrome, Firefox, Safari).
 //!

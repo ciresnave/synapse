@@ -83,11 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test connectivity to a target
     println!("\n📡 Testing connectivity...");
-    let target = TransportTarget {
-        identifier: "test_target".to_string(),
-        address: Some("8.8.8.8:53".to_string()), // Google DNS
-        metadata: HashMap::new(),
-    };
+    // Google DNS
+    let target =
+        TransportTarget::new("test_target".to_string()).with_address("8.8.8.8:53".to_string());
 
     let connectivity_result = transport.test_connectivity(&target).await?;
     println!("✅ Connectivity test results:");
@@ -130,11 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Test sending to localhost (this should work)
-    let localhost_target = TransportTarget {
-        identifier: "localhost_test".to_string(),
-        address: Some("127.0.0.1:12346".to_string()),
-        metadata: HashMap::new(),
-    };
+    let localhost_target = TransportTarget::new("localhost_test".to_string())
+        .with_address("127.0.0.1:12346".to_string());
 
     match transport
         .send_message(&localhost_target, &test_message)
