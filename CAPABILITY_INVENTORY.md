@@ -22,7 +22,7 @@ compiler. Two defects caused this; both are now fixed, and the library builds an
 | | at `f0f570c` | now |
 |---|---|---|
 | `cargo check --lib` (default features) | **fails at dependency resolution** | **EXIT 0** |
-| `cargo test` | **fails at dependency resolution** | **102 tests, 101 pass, 1 fail** |
+| `cargo test` | **fails at dependency resolution** | **106 tests, 105 pass, 1 fail** (and now runs in CI) |
 | feature configurations that resolve | **0 of 10** | 10 of 10 |
 | feature configurations that compile | **0 of 10** | **1 of 10** (`native` only — see §3) |
 
@@ -116,7 +116,24 @@ override was added for did not reproduce.
 
 ## 2. Verified working — measured by execution
 
-`cargo test` on the default (`native`) feature set. **102 tests, 101 passed, 1 failed, 0 ignored.**
+`cargo test` on the default (`native`) feature set. **106 tests, 105 passed, 1 failed, 0 ignored**,
+across 21 test binaries.
+
+⚠️ **And as of PR #18 + #24 this is CI-verified, not only local.** Until 2026-09-10 no test had ever
+executed in this repository's CI — the pipeline died at a style check before reaching `Run tests`
+(§2.4). It now runs, and **CI's result is identical to the local one, checked figure by figure
+rather than by conclusion:**
+
+```
+                binaries  passed  failed  total   failing test              assertion
+local                 21     105       1    106   test_transport_error_..   "Should fail with invalid email"
+CI (run 34517609451)  21     105       1    106   test_transport_error_..   "Should fail with invalid email"
+```
+
+**Same count, same test, same assertion.** ⚠️ Worth stating explicitly because a local run and a
+containerised CI run differ in ways that can produce genuinely different failures under the same
+test name — **agreement on the name is not agreement on the failure**, so the message was compared
+too.
 
 | target | tests | result |
 |---|---:|---|
@@ -288,6 +305,198 @@ Two further observations, recorded because they mislead:
 
 **Limits: single process, loopback, one message, one direction.** UDP is also inherently lossy and
 capped at 65507 bytes (`max_message_size` default). **This is a working link, not a reliable one.**
+
+#### ⚠️ EVERY DELIVERY CONFIRMATION SYNAPSE PRODUCES IS SENDER-SIDE
+
+Checked because the FAM lane, whose fabric is being rewritten into Synapse, handed over a measured
+requirement — *"the ack must belong to the receiver"* — after their own system marked a message
+delivered on the **pushing** side and a client silently destroyed its own backlog. **Synapse has the
+same defect, and one detail makes it worse.**
+
+`DeliveryConfirmation` declares four variants. Only two are ever constructed:
+
+```
+DeliveryConfirmation::Sent          14 occurrences
+DeliveryConfirmation::Delivered      4
+DeliveryConfirmation::Received       0   <- never constructed, anywhere
+DeliveryConfirmation::Acknowledged   0   <- never constructed, anywhere
+```
+
+**Control:** the same query finds `Delivered` at `mdns_enhanced.rs:576`, `providers.rs:270`,
+`quic_unified.rs:415`, so it discriminates. `Received` and `Acknowledged` appear **nowhere in
+`src/`, `tests/` or `examples/` outside the enum definition itself.**
+
+⚠️ **The two variants that would mean "the recipient got it" exist in the public type and are never
+produced.** A caller matching on `DeliveryConfirmation::Received` has written a branch that can
+never be taken, and nothing — not the compiler, not a test, not the docs — says so. **The type
+advertises a guarantee the implementation has never been able to make.**
+
+**And no confirmation is derived from the far end.** Every one is constructed immediately after a
+local write:
+
+```rust
+tcp_unified.rs:270   confirmation: DeliveryConfirmation::Sent,
+udp_unified.rs:207   confirmation: DeliveryConfirmation::Sent,   // UDP is best-effort
+```
+
+⚠️ **This is exactly what made the TCP silent drop unobservable (§2.2): `send_message` returned
+`Ok(confirmation: Sent)` with a sub-millisecond delivery time for a message that never arrived,
+because `Sent` only ever meant "written to a socket".** The receipt was accurate; the reader's
+interpretation of it could not be.
+
+⚠️ **And the strongest delivery claim in the codebase is made by the transport that does no
+networking at all.** `quic_unified.rs:415` constructs `Delivered` — a stronger assertion than TCP's
+`Sent` — with the comment *"QUIC provides delivery confirmation"*, in a module that binds nothing and
+fabricates its connections (§2.2). **The simulation out-claims every real transport.**
+
+**Not fixed here.** A receiver-derived acknowledgement is a protocol addition, not a repair, and it
+is precisely the kind of decision the pending merge should make deliberately. **Recorded because it
+is cheap to design in now and, in the FAM lane's words from having lived it, unfixable later.**
+
+#### ⚠️ `receive_messages` IS 26 DIFFERENT FUNCTIONS WITH FOUR RETURN TYPES AND THREE SEMANTICS
+
+Found because the FAM lane tried to verify a claim of mine — *"`receive_messages()` drains"* — and
+**could not**, correctly. Their first hit was `src/email.rs:157`, an IMAP simulation whose body is a
+comment describing what a real implementation would do. **Same name, different module, different
+thing.** My claim was true of the one I had read and unverifiable as stated.
+
+```
+26 definitions across 25 files.  Return types:
+    Vec<IncomingMessage>      the Transport trait's
+    Vec<SecureMessage>        transport/mod.rs, providers.rs, tcp_enhanced.rs, udp.rs
+    Vec<SimpleMessage>        router.rs
+    Vec<SynapseEmailMessage>  email.rs (x2)
+```
+
+**And the semantics differ between implementations of the same trait method:**
+
+| behaviour | implementations |
+|---|---|
+| **DRAINS** (destructive — a second caller gets nothing) | `tcp_unified`, `udp_unified`, `http_unified` |
+| **clones** (non-destructive) | `production_http`, `quic_unified` |
+| **always returns empty** | `tcp_simple`, `discovery` |
+
+⚠️ **`tcp_simple::receive_messages` returns `Ok(vec![])` unconditionally, and says so:**
+
+```rust
+// For this simple implementation, we don't maintain persistent listeners
+// This would typically be implemented with a background task
+Ok(vec![])
+```
+
+**That transport can never receive anything.** It is not broken by a bug — it has no receive path at
+all. ⚠️ **And it is the transport `unified_transport_demo` actually starts** ("TCP Simple transport
+started" is the last line before that demo hangs, §2.2).
+
+`discovery` also returns empty unconditionally, but legitimately: it is a service-discovery
+transport, not a message transport, and its comment says so. **Same code shape, opposite
+significance — which is the point.**
+
+**Why this matters to a caller:** two implementations of one trait method, both typed
+`Result<Vec<IncomingMessage>>`, where one is destructive and one is not, and a third can never
+return anything. **A caller who reads `receive_messages` once and assumes it forever will be right
+about one transport and wrong about the others**, and the type signature is identical in every case.
+
+⚠️ **METHOD CAVEAT, AND IT IS A CORRECTION AGAINST MY OWN CLASSIFIER.** I generated the table above
+by reading the 12 lines following each definition and pattern-matching for `drain(` / `.clone()` /
+`Ok(vec![])`. **It produced a false positive: it classified `websocket_unified` as "always returns
+empty" because the first `Ok(Vec::new())` in its body is a circuit-breaker early return.** Reading
+the whole function shows it does call `receive_websocket_messages()` and has a real path.
+`websocket_unified` is **excluded** from the table above rather than reclassified, because I have not
+read every remaining implementation in full. **The rows shown are the ones I read; the others are
+unmeasured, not "other".** A window is not a function, and a heuristic over a window will confidently
+mis-read an early return as the whole body.
+
+#### ⚠️ NO MESSAGE'S SENDER IS EVER AUTHENTICATED, AND THE TYPE SAYS OTHERWISE
+
+Checked because the OverMind lane — which drives non-Claude models through MCP tools behind a
+refusal gate — asked directly whether Synapse carries a sender identity a recipient can verify
+without trusting the relay. **It does not, and the shape of the "no" matters.**
+
+**`SecureMessage.signature: Vec<u8>` is written in exactly one place and read in none.**
+
+```
+writes:  router.rs:88   secure_msg.signature = signature;
+         every other construction sets it empty --
+         email.rs:66 · smtp_server.rs:387 · router.rs:67,211 · router_enhanced.rs:676,700
+reads:   NONE.  `.signature` appears nowhere in src/transport/ at all.
+```
+
+**Control:** the same query finds `.signature` read and verified 12 times in
+`src/synapse/blockchain/` — `consensus.rs:284` calls `public_key.verify(...)` on a vote, and
+`verification.rs:387` on a block. **The crate verifies signatures. It has never verified a
+message's.**
+
+**`from_global_id` is an unauthenticated string.** Across `src/transport/` it is only ever logged
+(`email_simple.rs:78`), embedded in a header (`email_unified.rs:189`), or copied
+(`nat_traversal.rs:570,608`). Nothing compares it to anything.
+
+⚠️ **Measured, not inferred.** Probe D (above) sent `"signature": []` and
+`"from_global_id": "python-agent@openai.example"` from a Python process with no credentials of any
+kind. **The message was delivered and the claimed identity accepted verbatim.**
+
+##### The capability exists and is unwired — and the one function that looks like the answer isn't
+
+`CryptoManager::verify_signature` at `crypto.rs:197` is real, Ed25519, and correct-looking: it
+resolves the sender's public key by `sender_global_id` and calls `public_key.verify(...)`. **Its only
+caller in the entire crate is its own unit test at `crypto.rs:293`.**
+
+And `auth_integration.rs:668` declares exactly what a reader would hope for:
+
+```rust
+pub async fn verify_message_sender(&self, message: &SecureMessage) -> Result<bool>
+```
+
+⚠️ **Two things are wrong with reaching for it.** First, `src/auth_integration.rs` is **orphaned** —
+no `mod` declaration names it (§5.3) — though the **published** crate declared it at `lib.rs:264`,
+so this is another capability the `f0f570c` checkpoint took out of the build.
+
+**Second, and more important: it does not verify anything.** Its body fetches the profile for the
+**claimed** `from_global_id` and returns whether *that profile* is `Verified | Trusted`. It never
+touches `message.signature`. **It asks "is the party this message claims to be from trustworthy?" —
+which is an authorisation check performed on an unauthenticated claim.** An attacker sets
+`from_global_id` to a trusted entity's id and passes.
+
+⚠️ **So even restoring the orphaned module would not give Synapse sender authentication. The function
+whose name promises it is the most dangerous artifact in this area**, because it is exactly what a
+future implementer will find, wire up, and believe.
+
+##### What a consumer needs, recorded from the lane that needs it
+
+Their requirement, which Synapse satisfies none of: a per-message assertion of the sender that a
+recipient can verify **without asking the relay**; **three** distinguishable outcomes rather than two
+— verified / could-not-verify / verified-and-contradicted; and **failure that is never silent** — a
+message that could not be verified must arrive marked unverifiable, not arrive looking ordinary.
+
+**Synapse currently produces a fourth state that lane's spec did not enumerate until this
+measurement: not verified, not marked, indistinguishable from verified.** FAM at least reports
+`sender_vouched: false`; Synapse carries no such field, **so a consumer cannot fail closed on its
+absence without already knowing to look for something that was never there.** It is the only one of
+the four that cannot be detected by reading the message.
+
+That is safe today only because no policy anywhere is per-sender. **The first per-sender
+authorisation rule anyone writes turns `from_global_id` from metadata into an authorisation input,
+and there is no local check that recovers what the transport never carried.**
+
+##### The requirement, stated so it is checkable
+
+Contributed by that lane after this measurement, and worth recording verbatim because it is a design
+constraint rather than a wish: **a recipient must be able to compute, from the message alone plus
+keys obtained independently of the relay, exactly one of — `VERIFIED` / `UNVERIFIABLE` /
+`CONTRADICTED`.**
+
+⚠️ **And the fourth state is eliminated by the field being MANDATORY in the wire format, not
+optional.** A message without it must **fail to parse** rather than arrive looking ordinary. **A
+field a sender may omit is a field a consumer cannot rely on** — an optional `sender_vouched` would
+reproduce precisely the state measured above, because the absence and the negative are then
+indistinguishable at the receiver.
+
+This bears directly on §2.2's finding that the wire format is plain self-describing JSON: **adding
+an optional identity field would be the cheap change and the wrong one.**
+
+**Not fixed here** — signing and verifying messages is a protocol addition and a merge decision, and
+FAM (being rewritten into Synapse) already has a voucher-chain design for it. Recorded so the merge
+inherits the measurement rather than the type's implication.
 
 #### What this means for a non-Rust agent runtime
 
