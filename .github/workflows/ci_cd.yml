@@ -13,6 +13,42 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # A licence-header ratchet. The sweep that put headers on this crate is a
+  # one-off; this is the part that lasts.
+  #
+  # A SWEEP DOES NOT FIX A PROPERTY THAT REGROWS: `fuel` stamped 795 files on
+  # 2026-08-19 and had drifted to 823/833 by 2026-09-10 - nothing was undone,
+  # ten files were added afterwards and nothing was watching.
+  #
+  # A SEPARATE JOB RATHER THAN A STEP IN `build`, DELIBERATELY. `build` stands
+  # up a postgres service and a Rust toolchain before it does anything; a job
+  # that dies in an earlier step asserts nothing about the steps below it while
+  # its name goes on claiming otherwise. This needs neither, runs in seconds,
+  # and stays informative on a run where the toolchain or the service fails.
+  #
+  # Verified against the DEFECT rather than against the fix, on the swept tree:
+  #
+  #   a tracked .rs file with no header       -> exit 1, names the file
+  #   a file declaring a different licence    -> exit 1, refuses to rewrite it
+  #   a file declaring `Apache-2.0 OR MIT`    -> exit 0, the SAME grant
+  #   an EMPTY file                           -> exit 0, nothing to license
+  #   the extension glob matching nothing     -> exit 1, NOT 100% of zero
+  spdx:
+    name: Every source file declares the licence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v3
+
+      # The gate's own controls run FIRST. A checker nobody has watched fail is
+      # a checker nobody has evidence works, and a gate whose parser silently
+      # broke would report a clean tree rather than an error.
+      - name: Self-test the SPDX gate
+        run: python3 .github/spdx_gate.py --self-test
+
+      - name: Every tracked source file declares the licence
+        run: python3 .github/spdx_gate.py
+
   build:
     name: Build and Test
     runs-on: ubuntu-latest
