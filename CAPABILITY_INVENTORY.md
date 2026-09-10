@@ -160,9 +160,49 @@ Should fail with invalid email
 ```
 
 The transport **accepted an invalid email address that the test asserts must be rejected**. This is
-not an infrastructure problem; it is the test doing its job. It took 8.08s, which suggests a network
-timeout path is involved. **Deliberately not fixed** — it is a behaviour question, and the code that
-owns it may not survive the merge.
+not an infrastructure problem; it is the test doing its job.
+
+**Cause, traced.** `ProductionTransportProvider::create_email_transport` builds a
+`SimpleEmailTransport`, whose `test_connectivity` does this and nothing else:
+
+```rust
+// Basic email format validation
+if !email_address.contains('@') { return Ok(ConnectivityResult { connected: false, .. }); }
+
+// Simulate connectivity test (could be enhanced with actual SMTP HELO/EHLO)
+tokio::time::sleep(Duration::from_millis(100)).await;
+
+Ok(ConnectivityResult { connected: true, quality: 0.7, error: None, .. })
+```
+
+⚠️ **`test_connectivity` performs no connectivity test.** It substring-matches for `@`, sleeps
+100 ms, and returns `connected: true`. `"invalid@"` contains an `@`, so it passes the only check
+there is. No SMTP, no socket, no `connect` — grepping `email_simple.rs` for `HELO`/`EHLO`/`connect`
+returns nothing but the field name `connection_timeout`, which §3 already records as never read.
+
+#### ⚠️ Why this must NOT be "fixed", and it is the most important judgement in this document
+
+The obvious repair is to tighten the validation so `"invalid@"` is rejected. **That would make the
+test pass, and it would be strictly worse than leaving it red.**
+
+`test_connectivity` would still return `connected: true` for every well-formed address without
+contacting anything. **Tightening the string check converts a truthful red into a false green and
+destroys the only signal in this repository that the email transport does not work.** The test would
+then assert that a simulation simulates.
+
+**This is the fourth measured instance of one pattern**, and the first where the tempting fix makes
+it worse:
+
+| artifact | promises | does |
+|---|---|---|
+| `DeliveryConfirmation::Received` / `::Acknowledged` | receiver-side acknowledgement | never constructed, anywhere |
+| `verify_message_sender` | authentication | authorisation on an unauthenticated claim |
+| `quic_unified` | `Delivered` | binds nothing, fabricates a 20 ms RTT |
+| `email_simple::test_connectivity` | a connectivity test | `sleep(100ms); connected: true` |
+
+**Deliberately not fixed.** Implementing a real SMTP `HELO`/`EHLO` probe is a feature, not a repair,
+and the email subsystem's fate is a merge decision. ⚠️ **The failing test is currently the most
+honest artifact in the transport layer. It should stay red until the thing it tests exists.**
 
 ### 2.2 ⚠️ END-TO-END ROUND TRIP: MEASURED, AND IT FAILS WHILE REPORTING SUCCESS
 
