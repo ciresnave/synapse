@@ -64,21 +64,51 @@ jobs:
       with:
         version: 'latest'
     
-    - name: Check formatting
-      run: cargo fmt -- --check
-    
-    - name: Clippy
-      run: cargo clippy -- -D warnings
-    
+    # Order and `if: always()` are deliberate.
+    #
+    # This job used to run fmt -> clippy -> build -> test with every step
+    # short-circuiting the next, and across its first 24 pipeline runs the
+    # first-failing step was `Check formatting` 17 times and `Clippy` 6 times.
+    # `Build` and `Run tests` were therefore skipped on 23 of 24 runs.
+    #
+    # The cost was not only that the build went unverified. A gate that is red
+    # on every run cannot announce a regression: PR #11 landed an unformatted
+    # file, its own run reported `Check formatting -> FAILURE`, and that was
+    # indistinguishable from the seventeen runs where the same step failed for
+    # reasons nobody could act on. It was merged, and blocked CI for 5 commits.
+    #
+    # So: `Build` and `Run tests` run first, and `if: always()` makes every
+    # step run and report on every run. A failing step still fails the job --
+    # this is deliberately not `continue-on-error`, which would let the job go
+    # green while style was broken.
+    #
+    # Trade, stated because it is one: a trivial formatting break now waits for
+    # a full build before it is reported.
+
     - name: Build
       run: cargo build --verbose
-    
+
     - name: Run tests
+      if: always()
       run: cargo test --verbose
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
-    
+
+    - name: Check formatting
+      if: always()
+      run: cargo fmt -- --check
+
+    - name: Clippy
+      if: always()
+      run: cargo clippy -- -D warnings
+
+    # NOTE: this step has never executed. There is no `wasm/` directory in this
+    # repository and there never has been -- the only top-level wasm entries are
+    # Cargo-wasm.toml, build-wasm.sh and build-wasm.bat. Left in place and
+    # marked rather than silently deleted or "fixed": whether Synapse ships a
+    # wasm package is a decision, not a typo.
     - name: Build WebAssembly package
+      if: always()
       run: |
         cd wasm
         wasm-pack build --target web
