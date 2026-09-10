@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Browser storage implementation for Synapse data        // Create new browser storage manager
     pub fn new(key_prefix: &str) -> Self {
         Self {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Enhanced Synapse Router with Email Server Integration Demo
 //!
 //! This example demonstrates:

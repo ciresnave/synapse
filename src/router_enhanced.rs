@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! # Enhanced Synapse Router - Your Gateway to Intelligent Communication
 //!
 //! The **Enhanced Synapse Router** is the main interface for all Synapse communication.

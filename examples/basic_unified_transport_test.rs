@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Basic test to verify unified transport abstraction system is working
 
 use synapse::{

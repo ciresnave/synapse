@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! INDEPENDENT confirm-or-refute probe for the TCP send/receive silent-drop.
 //!
 //! Question (from the PM's brief, symptom only — no borrowed diagnosis): does a

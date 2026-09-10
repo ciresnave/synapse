@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! End-to-End Integration Test
 //! This test validates the entire Synapse system from end to end, including:
 //! - Participant registration in the registry

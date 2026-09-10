@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Comprehensive Security Tests for Synapse
 //!
 //! This file validates all security implementations across the codebase,

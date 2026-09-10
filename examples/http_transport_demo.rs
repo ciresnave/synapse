@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! HTTP Transport Demo
 //!
 //! This example demonstrates how the HTTP transport can be used to communicate

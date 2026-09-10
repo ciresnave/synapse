@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! # Identity Management and Name Resolution
 //!
 //! This module provides the core functionality for EMRP's **intuitive identity system** -

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Synapse Router Binary
 //!
 //! A standalone router that can relay messages between entities in the Synapse network.

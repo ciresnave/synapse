@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simple Working Demo
 //!
 //! This example demonstrates the actual working Synapse API structure

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::error::EmailError;
 use crate::types::{MessageType, SecureMessage, SecurityLevel};
 /// Email transport layer for EMRP

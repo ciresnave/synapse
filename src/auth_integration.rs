@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Synapse Authentication Integration - v0.4.0 Enhanced
 //!
 //! This module integrates AuthFramework v0.4.0 to provide enterprise-grade authentication

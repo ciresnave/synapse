@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! QUIC Transport Implementation for Synapse
 //!
 //! Provides modern, high-performance communication using the QUIC protocol

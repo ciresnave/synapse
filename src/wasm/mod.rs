@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WebAssembly support for Synapse Neural Communication Network
 //!
 //! This module provides basic WebAssembly bindings for the Synapse protocol.

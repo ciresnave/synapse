@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Working Basic Chat Example
 //!
 //! This demonstrates simple message exchange using the actual implemented API

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::synapse::blockchain::SynapseBlockchain;
 use crate::synapse::models::trust::TrustCategory;
 use crate::synapse::services::TrustManager;

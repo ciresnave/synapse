@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Enhanced TCP transport implementation with circuit breaker integration
 
 use super::abstraction::{Transport, TransportMetrics};

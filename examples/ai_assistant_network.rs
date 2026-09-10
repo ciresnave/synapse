@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! AI Assistant Network Example
 //!
 //! This example demonstrates how to create a network of AI assistants

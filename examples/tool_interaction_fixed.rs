@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Tool Interaction Example for Synapse
 //!
 //! This example demonstrates how AI entities can call tools and receive responses.

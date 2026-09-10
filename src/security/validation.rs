@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Input validation functions for security-critical operations
 
 use regex::Regex;

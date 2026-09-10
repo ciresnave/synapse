@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::blockchain::serialization::DateTimeWrapper;
 use crate::security::{sanitize_trust_report, validate_trust_evidence};
 use crate::synapse::models::{TrustBalance, TrustCategory};

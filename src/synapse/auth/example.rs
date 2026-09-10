@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Example implementation of auth-framework integration with Synapse
 
 use std::sync::Arc;

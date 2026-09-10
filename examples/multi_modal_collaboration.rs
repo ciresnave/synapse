@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Multi-Modal Collaboration Example
 //!
 //! This example demonstrates how to create multi-modal collaboration

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Multi-Transport Synapse Demo - Simple Version
 //! Demonstrates the intelligent transport selection without async dependencies
 

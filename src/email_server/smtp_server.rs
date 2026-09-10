@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::blockchain::serialization::DateTimeWrapper;
 /// High-performance SMTP server for EMRP
 use crate::error::{Result, SynapseError};

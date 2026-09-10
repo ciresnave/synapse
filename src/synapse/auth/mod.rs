@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Authentication integration for Synapse
 // Integrates auth-framework with Synapse's participant registry and trust system
 

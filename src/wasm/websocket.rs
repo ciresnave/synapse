@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WebSocket transport for browser-based relay communication
 //!
 //! This module provides WebSocket-based communication through relay servers,

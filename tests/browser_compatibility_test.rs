@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Browser Compatibility Test for WebAssembly (WASM)
 //!
 //! GATED 2026-09-10. This file is wasm32-only -- every test is

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Basic Chat Example for Synapse
 //!
 //! This example demonstrates simple message exchange between two entities.

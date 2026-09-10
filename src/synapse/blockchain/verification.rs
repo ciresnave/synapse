@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::synapse::blockchain::block::{StakeTransaction, TrustReport, UnstakeTransaction};
 use crate::synapse::blockchain::{Block, BlockchainConfig, Transaction};
 use crate::synapse::models::trust::TrustBalance;

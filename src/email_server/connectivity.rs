@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! External connectivity detection for email server accessibility
 
 use crate::error::{Result, SynapseError};

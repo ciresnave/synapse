@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Enhanced email transport with SMTP sending capabilities
 
 use super::SecureMessage;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Manual impls for RelationshipType (as discriminant)
 use crate::models::participant::RelationshipType;
 

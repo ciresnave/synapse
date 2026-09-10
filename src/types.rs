@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // # Core Types and Message Structures for Synapse
 //
 // This module defines all the fundamental data types used throughout Synapse. Understanding these types is essential

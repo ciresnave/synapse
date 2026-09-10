@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Network connectivity enhancements for EMRP
 //!
 //! This module provides solutions for entities behind NAT firewalls,

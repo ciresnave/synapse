@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WebRTC transport implementation for browser-to-browser communication
 //! 
 //! This module provides direct peer-to-peer communication using WebRTC

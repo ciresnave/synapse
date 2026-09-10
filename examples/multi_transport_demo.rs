@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simplified multi-transport demonstration
 
 use std::time::{Duration, Instant};

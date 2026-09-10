@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Synapse Email Server Implementation
 //!
 //! High-performance SMTP and IMAP servers optimized for low-latency communication

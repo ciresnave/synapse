@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Connectivity Demo for Synapse
 //!
 //! This example demonstrates basic connectivity concepts and configuration.

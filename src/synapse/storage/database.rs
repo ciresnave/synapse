@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::blockchain::serialization::DateTimeWrapper;
 use crate::synapse::models::ParticipantProfile;
 use crate::synapse::models::TrustBalance;

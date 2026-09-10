@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Input sanitization functions for security-critical operations
 
 /// Sanitize HTML-like content by removing potentially dangerous elements

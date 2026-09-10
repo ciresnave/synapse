@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Authentication middleware for Synapse
 // Provides token validation and role-based authorization for API endpoints
 

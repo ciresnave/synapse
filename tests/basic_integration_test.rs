@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simple integration test to verify basic functionality
 
 use synapse::types::{MessageType, SimpleMessage};

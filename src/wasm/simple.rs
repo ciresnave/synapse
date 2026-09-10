@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simple WebAssembly bindings for Synapse
 //!
 //! This module provides basic WebAssembly functionality for the Synapse protocol.

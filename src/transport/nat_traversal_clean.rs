@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simplified NAT traversal techniques for EMRP
 
 use super::abstraction::{self, Transport};

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Enhanced Synapse Authentication Integration - Latest Auth-Framework
 //!
 //! # ⚠️ ASPIRATIONAL — THIS MODULE HAS NEVER COMPILED AGAINST A REAL auth-framework

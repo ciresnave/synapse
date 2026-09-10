@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Basic Chat Example
 //!
 //! This example demonstrates how to create a simple chat application

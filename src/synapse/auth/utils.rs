@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use std::collections::HashMap;
 // Authentication utilities for Synapse
 // Provides WebCrypto integration, key management, and cryptographic helpers

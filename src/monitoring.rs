@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Enhanced Metrics and Monitoring System for Synapse
 //!
 //! Provides comprehensive monitoring, metrics collection, and health

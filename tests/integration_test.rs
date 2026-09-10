@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use ::synapse::transport::router::MultiTransportRouter;
 use ::synapse::*;
 use anyhow::Result;
