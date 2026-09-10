@@ -173,6 +173,8 @@ impl AiTaskCoordinator {
             temperature: task.temperature,
             system_prompt: task.system_prompt.clone(),
             metadata,
+            top_p: None,
+            stop_sequences: None,
         };
 
         // Execute with timeout
