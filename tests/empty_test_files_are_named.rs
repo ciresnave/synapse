@@ -71,11 +71,7 @@ fn documented_empty_set(doc: &str) -> Option<BTreeSet<String>> {
         .filter(|s| s.contains('_') && s.len() > 4)
         .map(|s| s.to_string())
         .collect();
-    if names.is_empty() {
-        None
-    } else {
-        Some(names)
-    }
+    if names.is_empty() { None } else { Some(names) }
 }
 
 #[test]
