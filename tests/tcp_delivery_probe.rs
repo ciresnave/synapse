@@ -54,7 +54,10 @@ async fn a_receipted_tcp_message_actually_arrives() {
     let receiver = TcpTransportImpl::new(&cfg(port))
         .await
         .expect("construct receiver");
-    receiver.start().await.expect("receiver.start() should succeed");
+    receiver
+        .start()
+        .await
+        .expect("receiver.start() should succeed");
     assert!(
         matches!(receiver.status().await, TransportStatus::Running),
         "receiver should report Running after start()"
@@ -74,7 +77,9 @@ async fn a_receipted_tcp_message_actually_arrives() {
     drop(raw);
 
     // Sender: client-only (no listener of its own).
-    let sender = TcpTransportImpl::new(&cfg(0)).await.expect("construct sender");
+    let sender = TcpTransportImpl::new(&cfg(0))
+        .await
+        .expect("construct sender");
 
     let payload = b"fuel1-probe-PAYLOAD-42".to_vec();
     let msg = SecureMessage::new(
