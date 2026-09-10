@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Synapse Neural Communication Network
 // Core module for federated identity and blockchain trust system
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Web Worker implementation for background Synapse tasks
 //! 
 //! This module provides Web Worker support for running Synapse operations

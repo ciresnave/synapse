@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! AuthFramework v0.4.0 Integration Example for Synapse
 //!
 //! This module demonstrates how to integrate AuthFramework v0.4.0's powerful new features

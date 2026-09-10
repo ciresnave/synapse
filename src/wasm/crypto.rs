@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WebAssembly-compatible cryptography using Web Crypto API
 //! 
 //! This module provides cryptographic operations that work in browser

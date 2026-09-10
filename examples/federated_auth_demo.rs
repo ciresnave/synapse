@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Example: Enterprise Federated Authentication with Synapse
 //!
 //! This example demonstrates how to use Synapse's enterprise authentication

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Browser-specific Synapse implementation for WebAssembly
 //! 
 //! This module provides a full-featured Synapse node that runs in web browsers,

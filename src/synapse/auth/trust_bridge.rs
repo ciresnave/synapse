@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Auth bridge for Synapse - Links auth-framework with Synapse's trust system
 // This module handles events from the auth framework and updates trust ratings
 // Based on authentication events, it will enhance trust ratings automatically

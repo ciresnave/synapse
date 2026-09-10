@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! HTTP/HTTPS Transport implementation for Synapse
 //!
 //! This transport uses HTTP/HTTPS requests to send messages, making it useful

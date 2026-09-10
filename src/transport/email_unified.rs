@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Email Transport implementation conforming to the unified Transport trait
 
 use super::abstraction::*;

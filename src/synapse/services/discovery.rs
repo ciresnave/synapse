@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::storage::Database;
 use crate::synapse::models::DiscoverabilityLevel;
 use crate::synapse::models::ParticipantProfile;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! UDP Transport Implementation for Synapse
 //!
 //! Provides low-latency, connectionless transport for local networks

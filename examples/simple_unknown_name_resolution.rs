@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simple Message Sending Example
 //!
 //! This example demonstrates basic message sending patterns using the Enhanced Synapse Router.

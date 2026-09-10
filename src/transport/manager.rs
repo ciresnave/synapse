@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Transport Manager - Unified abstraction layer for all transport mechanisms
 //!
 //! The TransportManager provides a single interface for applications to send/receive

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! AI Assistant Stub Example
 //!
 //! This example demonstrates how to create a simple AI assistant stub

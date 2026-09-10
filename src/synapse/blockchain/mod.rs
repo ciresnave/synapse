@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Synapse Blockchain for Trust Verification
 
 pub mod block;

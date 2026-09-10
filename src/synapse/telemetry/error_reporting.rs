@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #[macro_export]
 macro_rules! report_error {
     ($telemetry:expr, $source:expr, $severity:expr, $message:expr) => {

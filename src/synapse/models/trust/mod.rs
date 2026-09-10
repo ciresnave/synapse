@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Synapse Trust System - Models for dual trust architecture
 
 use dashmap::DashMap;

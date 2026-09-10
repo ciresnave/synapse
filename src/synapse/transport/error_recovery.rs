@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Error recovery and circuit breaker implementation for transport layer
 
 use anyhow::Result;

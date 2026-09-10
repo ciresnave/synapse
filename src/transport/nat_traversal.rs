@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Real NAT traversal techniques for EMRP with functional STUN and network operations
 
 use super::abstraction::{self, Transport};

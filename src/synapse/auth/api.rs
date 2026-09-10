@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Authentication API endpoints for Synapse
 // Exposes auth-framework functionality through HTTP and WebSocket interfaces
 

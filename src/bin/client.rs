@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Synapse Client Binary
 //!
 //! A command-line client for interacting with the Synapse network.

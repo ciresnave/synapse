@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Comprehensive Example Test Suite
 //!
 //! This example runs multiple working examples to ensure they all function correctly.

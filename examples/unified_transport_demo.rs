@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Demo of the unified transport manager with multiple transport types
 //!
 //! This example shows how to:

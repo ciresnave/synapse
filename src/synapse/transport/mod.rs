@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Synapse transport layer module
 //!
 //! This module contains the transport layer components for Synapse, including

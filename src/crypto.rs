@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 /// Cryptographic operations for EMRP using Ring with Ed25519 signatures and AES-GCM encryption
 use crate::error::{CryptoError, Result};
 use crate::synapse::blockchain::serialization::UuidWrapper;

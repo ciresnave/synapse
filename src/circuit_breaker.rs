@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Circuit Breaker Infrastructure for Synapse
 //!
 //! This module provides sophisticated circuit breaking capabilities that can be

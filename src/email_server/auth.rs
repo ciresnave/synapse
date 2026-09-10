@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Authorization and authentication for EMRP email server
 
 use crate::email_server::smtp_server::AuthHandler;

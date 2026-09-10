@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Concurrent Registry Access Tests
 //!
 //! Tests concurrent access to registry services and thread-safety

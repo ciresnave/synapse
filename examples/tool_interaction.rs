@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Tool Interaction Example
 //! This example demonstrates how to create tool interactions
 //! using the synapse library for AI-tool communication.

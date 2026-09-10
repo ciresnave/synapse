@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! LLM Discovery and Connection Manager for Synapse
 //!
 //! This module provides specialized discovery and connection capabilities

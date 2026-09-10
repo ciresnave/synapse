@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 /// Manager for streaming sessions
 pub struct StreamManager {
     pub router: Arc<SynapseRouter>,

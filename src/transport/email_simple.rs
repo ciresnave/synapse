@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simplified Email Transport implementation avoiding complex TLS issues
 
 use super::{abstraction::*, router::ConnectionOffer};

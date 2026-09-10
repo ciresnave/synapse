@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // Synapse Participant Registry - Core Data Models
 use crate::synapse::TrustRatings;
 use dashmap::DashMap;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Enterprise Service Mesh Example
 //! This example demonstrates how to create an enterprise-grade service mesh
 //! using the synapse library for distributed service communication.

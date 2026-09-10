@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 

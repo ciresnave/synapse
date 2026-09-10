@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Unified Transport Abstraction Layer for Synapse
 //!
 //! This module provides a unified interface that sits above all transport mechanisms,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Participant API implementation
 
 use crate::synapse::api::errors::{ApiError, ApiResponse};

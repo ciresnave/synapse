@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Enhanced mDNS implementation with full Zeroconf/Bonjour support
 //!
 //! This module provides comprehensive multicast DNS service discovery

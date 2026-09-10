@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WebSocket Transport Implementation for Synapse
 //!
 //! Provides real-time bidirectional communication over WebSocket protocol,

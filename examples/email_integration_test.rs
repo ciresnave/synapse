@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simple Email Server Integration Test
 //!
 //! A minimal test to verify the enhanced router with email server integration

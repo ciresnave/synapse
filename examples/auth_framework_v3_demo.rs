@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 🚀 Enhanced Auth-Framework Integration Example for Synapse
 //!
 //! This example demonstrates the latest auth-framework features including:

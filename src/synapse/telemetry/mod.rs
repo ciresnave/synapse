@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Telemetry module for Synapse
 //!
 //! This module provides telemetry, monitoring, and error reporting capabilities

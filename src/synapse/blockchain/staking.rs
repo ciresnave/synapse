@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 impl StakingManager {
     /// Synchronous constructor for StakingManager
     pub fn new(config: super::StakingRequirements, chain: Arc<RwLock<Vec<Block>>>) -> Self {

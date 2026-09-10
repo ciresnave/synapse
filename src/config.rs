@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Configuration management for EMRP
 
 use crate::error::{ConfigError, Result};

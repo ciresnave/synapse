@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use std::io::Error as IoError;
 use std::net::AddrParseError;
 use thiserror::Error;

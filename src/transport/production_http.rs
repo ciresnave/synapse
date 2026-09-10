@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Simple production-grade HTTP transport implementation
 //!
 //! This provides a basic but production-ready HTTP transport that aligns with

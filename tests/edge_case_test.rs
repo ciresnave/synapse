@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Edge Case Tests
 //!
 //! Tests edge cases and boundary conditions in the synapse library

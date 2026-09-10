@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Production Readiness Validation
 //!
 //! This comprehensive test validates that Synapse is production-ready
