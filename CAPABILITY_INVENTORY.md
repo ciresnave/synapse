@@ -289,6 +289,53 @@ Two further observations, recorded because they mislead:
 **Limits: single process, loopback, one message, one direction.** UDP is also inherently lossy and
 capped at 65507 bytes (`max_message_size` default). **This is a working link, not a reliable one.**
 
+#### ⚠️ EVERY DELIVERY CONFIRMATION SYNAPSE PRODUCES IS SENDER-SIDE
+
+Checked because the FAM lane, whose fabric is being rewritten into Synapse, handed over a measured
+requirement — *"the ack must belong to the receiver"* — after their own system marked a message
+delivered on the **pushing** side and a client silently destroyed its own backlog. **Synapse has the
+same defect, and one detail makes it worse.**
+
+`DeliveryConfirmation` declares four variants. Only two are ever constructed:
+
+```
+DeliveryConfirmation::Sent          14 occurrences
+DeliveryConfirmation::Delivered      4
+DeliveryConfirmation::Received       0   <- never constructed, anywhere
+DeliveryConfirmation::Acknowledged   0   <- never constructed, anywhere
+```
+
+**Control:** the same query finds `Delivered` at `mdns_enhanced.rs:576`, `providers.rs:270`,
+`quic_unified.rs:415`, so it discriminates. `Received` and `Acknowledged` appear **nowhere in
+`src/`, `tests/` or `examples/` outside the enum definition itself.**
+
+⚠️ **The two variants that would mean "the recipient got it" exist in the public type and are never
+produced.** A caller matching on `DeliveryConfirmation::Received` has written a branch that can
+never be taken, and nothing — not the compiler, not a test, not the docs — says so. **The type
+advertises a guarantee the implementation has never been able to make.**
+
+**And no confirmation is derived from the far end.** Every one is constructed immediately after a
+local write:
+
+```rust
+tcp_unified.rs:270   confirmation: DeliveryConfirmation::Sent,
+udp_unified.rs:207   confirmation: DeliveryConfirmation::Sent,   // UDP is best-effort
+```
+
+⚠️ **This is exactly what made the TCP silent drop unobservable (§2.2): `send_message` returned
+`Ok(confirmation: Sent)` with a sub-millisecond delivery time for a message that never arrived,
+because `Sent` only ever meant "written to a socket".** The receipt was accurate; the reader's
+interpretation of it could not be.
+
+⚠️ **And the strongest delivery claim in the codebase is made by the transport that does no
+networking at all.** `quic_unified.rs:415` constructs `Delivered` — a stronger assertion than TCP's
+`Sent` — with the comment *"QUIC provides delivery confirmation"*, in a module that binds nothing and
+fabricates its connections (§2.2). **The simulation out-claims every real transport.**
+
+**Not fixed here.** A receiver-derived acknowledgement is a protocol addition, not a repair, and it
+is precisely the kind of decision the pending merge should make deliberately. **Recorded because it
+is cheap to design in now and, in the FAM lane's words from having lived it, unfixable later.**
+
 #### What this means for a non-Rust agent runtime
 
 | direction | status |
