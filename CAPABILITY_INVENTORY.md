@@ -336,6 +336,60 @@ fabricates its connections (§2.2). **The simulation out-claims every real trans
 is precisely the kind of decision the pending merge should make deliberately. **Recorded because it
 is cheap to design in now and, in the FAM lane's words from having lived it, unfixable later.**
 
+#### ⚠️ `receive_messages` IS 26 DIFFERENT FUNCTIONS WITH FOUR RETURN TYPES AND THREE SEMANTICS
+
+Found because the FAM lane tried to verify a claim of mine — *"`receive_messages()` drains"* — and
+**could not**, correctly. Their first hit was `src/email.rs:157`, an IMAP simulation whose body is a
+comment describing what a real implementation would do. **Same name, different module, different
+thing.** My claim was true of the one I had read and unverifiable as stated.
+
+```
+26 definitions across 25 files.  Return types:
+    Vec<IncomingMessage>      the Transport trait's
+    Vec<SecureMessage>        transport/mod.rs, providers.rs, tcp_enhanced.rs, udp.rs
+    Vec<SimpleMessage>        router.rs
+    Vec<SynapseEmailMessage>  email.rs (x2)
+```
+
+**And the semantics differ between implementations of the same trait method:**
+
+| behaviour | implementations |
+|---|---|
+| **DRAINS** (destructive — a second caller gets nothing) | `tcp_unified`, `udp_unified`, `http_unified` |
+| **clones** (non-destructive) | `production_http`, `quic_unified` |
+| **always returns empty** | `tcp_simple`, `discovery` |
+
+⚠️ **`tcp_simple::receive_messages` returns `Ok(vec![])` unconditionally, and says so:**
+
+```rust
+// For this simple implementation, we don't maintain persistent listeners
+// This would typically be implemented with a background task
+Ok(vec![])
+```
+
+**That transport can never receive anything.** It is not broken by a bug — it has no receive path at
+all. ⚠️ **And it is the transport `unified_transport_demo` actually starts** ("TCP Simple transport
+started" is the last line before that demo hangs, §2.2).
+
+`discovery` also returns empty unconditionally, but legitimately: it is a service-discovery
+transport, not a message transport, and its comment says so. **Same code shape, opposite
+significance — which is the point.**
+
+**Why this matters to a caller:** two implementations of one trait method, both typed
+`Result<Vec<IncomingMessage>>`, where one is destructive and one is not, and a third can never
+return anything. **A caller who reads `receive_messages` once and assumes it forever will be right
+about one transport and wrong about the others**, and the type signature is identical in every case.
+
+⚠️ **METHOD CAVEAT, AND IT IS A CORRECTION AGAINST MY OWN CLASSIFIER.** I generated the table above
+by reading the 12 lines following each definition and pattern-matching for `drain(` / `.clone()` /
+`Ok(vec![])`. **It produced a false positive: it classified `websocket_unified` as "always returns
+empty" because the first `Ok(Vec::new())` in its body is a circuit-breaker early return.** Reading
+the whole function shows it does call `receive_websocket_messages()` and has a real path.
+`websocket_unified` is **excluded** from the table above rather than reclassified, because I have not
+read every remaining implementation in full. **The rows shown are the ones I read; the others are
+unmeasured, not "other".** A window is not a function, and a heuristic over a window will confidently
+mis-read an early return as the whole body.
+
 #### What this means for a non-Rust agent runtime
 
 | direction | status |
