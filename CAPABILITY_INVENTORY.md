@@ -22,7 +22,7 @@ compiler. Two defects caused this; both are now fixed, and the library builds an
 | | at `f0f570c` | now |
 |---|---|---|
 | `cargo check --lib` (default features) | **fails at dependency resolution** | **EXIT 0** |
-| `cargo test` | **fails at dependency resolution** | **102 tests, 101 pass, 1 fail** |
+| `cargo test` | **fails at dependency resolution** | **106 tests, 105 pass, 1 fail** (and now runs in CI) |
 | feature configurations that resolve | **0 of 10** | 10 of 10 |
 | feature configurations that compile | **0 of 10** | **1 of 10** (`native` only — see §3) |
 
@@ -116,7 +116,24 @@ override was added for did not reproduce.
 
 ## 2. Verified working — measured by execution
 
-`cargo test` on the default (`native`) feature set. **102 tests, 101 passed, 1 failed, 0 ignored.**
+`cargo test` on the default (`native`) feature set. **106 tests, 105 passed, 1 failed, 0 ignored**,
+across 21 test binaries.
+
+⚠️ **And as of PR #18 + #24 this is CI-verified, not only local.** Until 2026-09-10 no test had ever
+executed in this repository's CI — the pipeline died at a style check before reaching `Run tests`
+(§2.4). It now runs, and **CI's result is identical to the local one, checked figure by figure
+rather than by conclusion:**
+
+```
+                binaries  passed  failed  total   failing test              assertion
+local                 21     105       1    106   test_transport_error_..   "Should fail with invalid email"
+CI (run 34517609451)  21     105       1    106   test_transport_error_..   "Should fail with invalid email"
+```
+
+**Same count, same test, same assertion.** ⚠️ Worth stating explicitly because a local run and a
+containerised CI run differ in ways that can produce genuinely different failures under the same
+test name — **agreement on the name is not agreement on the failure**, so the message was compared
+too.
 
 | target | tests | result |
 |---|---:|---|
