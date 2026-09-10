@@ -64,21 +64,40 @@ jobs:
       with:
         version: 'latest'
     
-    - name: Check formatting
-      run: cargo fmt -- --check
-    
-    - name: Clippy
-      run: cargo clippy -- -D warnings
-    
+    # Order and `if: always()` are deliberate. Previously this job ran
+    # fmt -> clippy -> build -> test, with every step short-circuiting the next.
+    # It failed at `cargo fmt` on its very first run and never once reached
+    # `Build` or `Run tests` in this repository's history, so a red here has
+    # never meant "the code is broken" -- it meant the pipeline stopped before
+    # finding out. `if: always()` makes every step run and report every time;
+    # a failing step still fails the job, so no gate is weakened.
+    # Trade, stated because it is one: a trivial formatting break now waits for
+    # a full build before it is reported.
+
     - name: Build
       run: cargo build --verbose
-    
+
     - name: Run tests
+      if: always()
       run: cargo test --verbose
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
-    
+
+    - name: Check formatting
+      if: always()
+      run: cargo fmt -- --check
+
+    - name: Clippy
+      if: always()
+      run: cargo clippy -- -D warnings
+
+    # NOTE: this step has never executed. There is no `wasm/` directory in this
+    # repository and there never has been -- the only top-level wasm entries are
+    # Cargo-wasm.toml, build-wasm.sh and build-wasm.bat. Left in place and
+    # marked rather than silently deleted or "fixed": whether Synapse ships a
+    # wasm package is a decision, not a typo.
     - name: Build WebAssembly package
+      if: always()
       run: |
         cd wasm
         wasm-pack build --target web
