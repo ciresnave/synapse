@@ -64,13 +64,24 @@ jobs:
       with:
         version: 'latest'
     
-    # Order and `if: always()` are deliberate. Previously this job ran
-    # fmt -> clippy -> build -> test, with every step short-circuiting the next.
-    # It failed at `cargo fmt` on its very first run and never once reached
-    # `Build` or `Run tests` in this repository's history, so a red here has
-    # never meant "the code is broken" -- it meant the pipeline stopped before
-    # finding out. `if: always()` makes every step run and report every time;
-    # a failing step still fails the job, so no gate is weakened.
+    # Order and `if: always()` are deliberate.
+    #
+    # This job used to run fmt -> clippy -> build -> test with every step
+    # short-circuiting the next, and across its first 24 pipeline runs the
+    # first-failing step was `Check formatting` 17 times and `Clippy` 6 times.
+    # `Build` and `Run tests` were therefore skipped on 23 of 24 runs.
+    #
+    # The cost was not only that the build went unverified. A gate that is red
+    # on every run cannot announce a regression: PR #11 landed an unformatted
+    # file, its own run reported `Check formatting -> FAILURE`, and that was
+    # indistinguishable from the seventeen runs where the same step failed for
+    # reasons nobody could act on. It was merged, and blocked CI for 5 commits.
+    #
+    # So: `Build` and `Run tests` run first, and `if: always()` makes every
+    # step run and report on every run. A failing step still fails the job --
+    # this is deliberately not `continue-on-error`, which would let the job go
+    # green while style was broken.
+    #
     # Trade, stated because it is one: a trivial formatting break now waits for
     # a full build before it is reported.
 
