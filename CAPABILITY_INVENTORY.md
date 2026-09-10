@@ -316,9 +316,52 @@ format observed off a raw socket in Probe B. **Receiver:** Synapse, UDP, via
 [inbound] RESULT: FOREIGN -> SYNAPSE SUCCEEDED
 ```
 
-**Payload, sender identity, recipient and security level all survived the crossing.** The
-`encrypted_content` field was sent as a JSON array of byte integers — the encoding observed in Probe
-B, not base64 — and deserialised correctly.
+**Payload, sender identity, recipient and security level all survived the crossing.**
+
+##### ⚠️ The encoding detail a foreign client author will get wrong first
+
+Stated as a finding rather than left as an implementation detail of the probe, because **it is
+invisible from the Rust side and it is the first thing an independent client implementation would get
+wrong.**
+
+**`encrypted_content` and `signature` are JSON ARRAYS OF BYTE INTEGERS, not base64 strings.**
+
+```json
+"encrypted_content": [72, 69, 76, 76, 79, 45, 70, 82, 79, 77, ...]   // correct
+"encrypted_content": "SEVMTE8tRlJPTS4uLg=="                          // WRONG -- will not deserialise
+```
+
+**Why it is invisible from inside the crate:** `SecureMessage` declares these fields as `Vec<u8>` and
+serde's default JSON representation of `Vec<u8>` is an array of numbers. Nobody chose it; nobody
+wrote it down; it does not appear in any type signature a reader would consult. **A Rust author
+reading `Vec<u8>` and a Python author reaching for `base64.b64encode()` will produce incompatible
+wire formats and neither will see anything wrong in their own code.**
+
+⚠️ **It is also the expensive convention on the wire, and here the measured numbers differ from the
+obvious estimate — so these are measured, not reasoned:**
+
+```
+payload  1024 bytes -> json-array  4695   base64  1368     4.58x raw   3.43x base64
+payload  8192 bytes -> json-array 37508   base64 10924     4.58x raw   3.43x base64
+```
+
+**The array form is ~4.6× raw and ~3.4× base64**, stable across sizes. **Against UDP's 65507-byte
+datagram cap, the largest payload whose encoded form alone fits is 14,328 bytes of random data
+(14.0 KB) — 15,291 bytes (14.9 KB) for ASCII text**, measured by binary search, and that is *before*
+the rest of the envelope (ids, addresses, timestamp, metadata).
+
+⚠️ **So the practical maximum message payload over UDP is about 14 KB, not the 65 KB the
+`max_message_size` default (65507) implies.** That is an operational limit produced entirely by an
+unrecorded serialisation default, and `max_message_size` measures the wrong thing — it bounds the
+datagram, not the payload a caller can pass.
+
+*(I first wrote "roughly 4× larger than base64" here from intuition. Measured, it is 3.43× base64 and
+4.58× raw, and the cap is 14 KB rather than the 16 KB I estimated. Corrected in place.)*
+
+**Neither of these is a defect to fix in this pass** — changing the encoding is a wire-compatibility
+decision, and the crate is published. They are recorded because **an implementer needs both, and
+neither is discoverable from the source without doing what this probe did: reading the bytes off a
+live socket.**
 
 ⚠️ **What this establishes, precisely:** a process written in any language, running under any model
 provider, can both **send to** and **receive from** this fabric using nothing but a UDP socket and a
