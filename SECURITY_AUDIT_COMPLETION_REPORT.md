@@ -1,5 +1,18 @@
 # Security Audit Completion Report
 
+> ⚠️ **CORRECTION — 2026-09-09. THE QUANTIFIER BELOW IS FALSE, AND `CRITICAL_SECURITY_FIXES.md` IN THIS SAME DIRECTORY SAYS SO.**
+>
+> Measured at `f0f570c` (this commit): **31 occurrences of `"In a real implementation"` remain across 19 files** in `src/`. *(Controls: the same query shape for `"In a ZzUnreal implementation"` returns 0, so it discriminates; the count was 46 at `7b80ca4`, so 15 genuinely were replaced and the audit's work was real.)*
+>
+> **Survivors sit inside the subsystems this report declares complete:** `src/transport/nat_traversal.rs` and `nat_traversal_clean.rs` (§44–48 STUN/TURN/ICE), `src/transport/quic.rs` (§56–60 QUIC/TLS), `src/email.rs` ×2 (§68–72 SMTP/IMAP). Largest concentrations: `src/connectivity.rs` (6), `src/transport/production_http.rs` (5).
+>
+> ⚠️ **AND THE PRECONDITION THIS REPORT'S OWN SIBLING SETS WAS NEVER MET.** `CRITICAL_SECURITY_FIXES.md` states *"Next Steps … 5. **Full security audit after all 'In a real' implementations completed**"*, and records **37 outstanding** — a figure that matches this commit exactly and no other commit in the history *(43 at the four earliest, 56 at three, 37 only here)*. **That document is accurate and current. This one asserts a milestone whose stated precondition is unmet.**
+>
+> **The conclusions in this report about what WAS fixed are not disturbed by this note.** What is corrected is the word **"All"**, and the completion framing that rests on it.
+>
+> **The original text is kept below rather than rewritten**, because what was claimed and when is the record.
+
+
 ## Executive Summary
 
 Following the discovery of critical security vulnerabilities through the search for "In a real" comments, we have successfully completed a comprehensive security audit and implemented production-ready security measures across the Synapse codebase.

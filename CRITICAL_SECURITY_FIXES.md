@@ -73,6 +73,12 @@ Multiple **CRITICAL SECURITY VULNERABILITIES** were discovered and fixed in the 
 - `src/synapse/auth/api.rs` - Real TOTP implementation (identified for fixing)
 
 ## Remaining Work
+> ⚠️ **This document is the accurate one, and `SECURITY_AUDIT_COMPLETION_REPORT.md` contradicts it.**
+> That report claims *"All 'In a real implementation' placeholders have been replaced"* and describes the audit as complete. **The precondition stated below — "Full security audit after all 'In a real' implementations completed" — has not been met:** 31 exact-phrase occurrences remain in `src/` at this commit, and the **37** recorded below matches this commit and no other in the history.
+>
+> **The cross-reference exists in both directions now.** Previously neither document mentioned the other, so a reader met whichever they opened first — and the one whose title says "COMPLETION REPORT" is the one a reader checking security posture opens.
+
+
 
 The initial investigation revealed **37 "In a real" comments** indicating incomplete implementations. The cryptographic core has been secured, but additional transport and service layer implementations need completion.
 
