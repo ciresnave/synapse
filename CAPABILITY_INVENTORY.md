@@ -390,6 +390,76 @@ read every remaining implementation in full. **The rows shown are the ones I rea
 unmeasured, not "other".** A window is not a function, and a heuristic over a window will confidently
 mis-read an early return as the whole body.
 
+#### ⚠️ NO MESSAGE'S SENDER IS EVER AUTHENTICATED, AND THE TYPE SAYS OTHERWISE
+
+Checked because the OverMind lane — which drives non-Claude models through MCP tools behind a
+refusal gate — asked directly whether Synapse carries a sender identity a recipient can verify
+without trusting the relay. **It does not, and the shape of the "no" matters.**
+
+**`SecureMessage.signature: Vec<u8>` is written in exactly one place and read in none.**
+
+```
+writes:  router.rs:88   secure_msg.signature = signature;
+         every other construction sets it empty --
+         email.rs:66 · smtp_server.rs:387 · router.rs:67,211 · router_enhanced.rs:676,700
+reads:   NONE.  `.signature` appears nowhere in src/transport/ at all.
+```
+
+**Control:** the same query finds `.signature` read and verified 12 times in
+`src/synapse/blockchain/` — `consensus.rs:284` calls `public_key.verify(...)` on a vote, and
+`verification.rs:387` on a block. **The crate verifies signatures. It has never verified a
+message's.**
+
+**`from_global_id` is an unauthenticated string.** Across `src/transport/` it is only ever logged
+(`email_simple.rs:78`), embedded in a header (`email_unified.rs:189`), or copied
+(`nat_traversal.rs:570,608`). Nothing compares it to anything.
+
+⚠️ **Measured, not inferred.** Probe D (above) sent `"signature": []` and
+`"from_global_id": "python-agent@openai.example"` from a Python process with no credentials of any
+kind. **The message was delivered and the claimed identity accepted verbatim.**
+
+##### The capability exists and is unwired — and the one function that looks like the answer isn't
+
+`CryptoManager::verify_signature` at `crypto.rs:197` is real, Ed25519, and correct-looking: it
+resolves the sender's public key by `sender_global_id` and calls `public_key.verify(...)`. **Its only
+caller in the entire crate is its own unit test at `crypto.rs:293`.**
+
+And `auth_integration.rs:668` declares exactly what a reader would hope for:
+
+```rust
+pub async fn verify_message_sender(&self, message: &SecureMessage) -> Result<bool>
+```
+
+⚠️ **Two things are wrong with reaching for it.** First, `src/auth_integration.rs` is **orphaned** —
+no `mod` declaration names it (§5.3) — though the **published** crate declared it at `lib.rs:264`,
+so this is another capability the `f0f570c` checkpoint took out of the build.
+
+**Second, and more important: it does not verify anything.** Its body fetches the profile for the
+**claimed** `from_global_id` and returns whether *that profile* is `Verified | Trusted`. It never
+touches `message.signature`. **It asks "is the party this message claims to be from trustworthy?" —
+which is an authorisation check performed on an unauthenticated claim.** An attacker sets
+`from_global_id` to a trusted entity's id and passes.
+
+⚠️ **So even restoring the orphaned module would not give Synapse sender authentication. The function
+whose name promises it is the most dangerous artifact in this area**, because it is exactly what a
+future implementer will find, wire up, and believe.
+
+##### What a consumer needs, recorded from the lane that needs it
+
+Their requirement, which Synapse satisfies none of: a per-message assertion of the sender that a
+recipient can verify **without asking the relay**; **three** distinguishable outcomes rather than two
+— verified / could-not-verify / verified-and-contradicted; and **failure that is never silent** — a
+message that could not be verified must arrive marked unverifiable, not arrive looking ordinary.
+
+**Synapse currently produces the fourth state: not verified, not marked, indistinguishable from
+verified.** That is safe today only because no policy anywhere is per-sender. **The first per-sender
+authorisation rule anyone writes turns `from_global_id` from metadata into an authorisation input,
+and there is no local check that recovers what the transport never carried.**
+
+**Not fixed here** — signing and verifying messages is a protocol addition and a merge decision, and
+FAM (being rewritten into Synapse) already has a voucher-chain design for it. Recorded so the merge
+inherits the measurement rather than the type's implication.
+
 #### What this means for a non-Rust agent runtime
 
 | direction | status |
