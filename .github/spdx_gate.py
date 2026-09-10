@@ -52,24 +52,30 @@ HEADER_WINDOW = 10
 
 MINIMUM_FILES = 120
 
-#: ⚠️ Paths this gate must NOT require a header on, each with the reason it is
-#: here. Empty today, and that is a measurement rather than a default:
-#:
-#:     git grep -l -i copyright -- ':!*.md' ':!*LICEN[SC]E*' ':!*.txt'   -> 0
-#:     the same query with the licence exclusion dropped                -> 8
-#:
-#: ⚠️ THE SECOND LINE IS THE POINT. "I searched and found nothing" is not a
-#: finding until the query is shown capable of finding something, in the same
-#: run - and the first version of that query used `:!LICENSE*`, which matches
-#: only at the ROOT and left six per-crate licence files in the results.
-#:
-#: ⚠️ AND UNSCOPED IS DELIBERATE. The portfolio's prescribed detector was
-#: `git grep -l -i copyright -- '*.rs'`, and that pathspec is exactly what hid
-#: `Copyright (c) 2024 Apple Inc.` in three of `fuel`'s .metal kernels.
-#:
-#: An entry here that matches no file is an ERROR below: a holdout that protects
-#: nothing reads exactly like one with nothing to protect, right up until the
-#: file it named is renamed and then stamped.
+#: Paths this gate must NOT require a header on, each with the reason it is here.
+#: Empty, and the numbers below are THIS repository's - measured here, not
+#: carried over from the repo this file was first written for:
+#:
+#:     git grep -l -i copyright                                  -> 3 files
+#:     git grep -l -i copyright -- ':!*.md' ':!*LICEN[SC]E*'      -> 1 file
+#:       and that one file is THIS SCRIPT, whose comments discuss copyright.
+#:
+#: ⚠️ THE DETECTOR COUNTED ITSELF. Third time in this project: an SPDX checker
+#: once reported 2/42 where the truth was 0/42 because it matched its own string
+#: constant, and a spelling census reported a Python test fixture as a licence.
+#: A TOOL THAT SEARCHES FOR A WORD IS A FILE CONTAINING THAT WORD.
+#:
+#: ⚠️ AND THIS COMMENT FIRST SHIPPED WITH ANOTHER REPO'S FIGURES IN IT - `-> 0`
+#: and a control of `-> 8`, which are kiss-ref's. The conclusion was the same
+#: and the evidence was somebody else's. A MEASUREMENT COPIED BETWEEN ARTIFACTS
+#: KEEPS ITS SHAPE AND LOSES ITS SUBJECT.
+#:
+#: So: no file in this workspace carries a third-party copyright notice, and
+#: `.xml`, `.toml` and `.md` are not in EXTENSIONS and are never scanned.
+#:
+#: An entry here that matches no file is an ERROR below -- a holdout that
+#: protects nothing reads exactly like one with nothing to protect, right up
+#: until the file it named is renamed and then stamped.
 HOLDOUT: dict[str, str] = {}
 
 MARKER = "SPDX-License-Identifier:"
