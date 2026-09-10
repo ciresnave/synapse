@@ -1,5 +1,36 @@
 # Test Validation Audit Report
 
+> ⚠️ **CORRECTION — 2026-09-10. THIS REPORT WAS ACCURATE WHEN WRITTEN AND WAS FALSIFIED BY THE COMMIT THAT PUBLISHED IT.**
+>
+> **It names three test files as EMPTY. Measured at `7b80ca4`, two of the three genuinely were 0 bytes — so the report described that tree correctly.** It was committed at `f0f570c`, eleven months later, **and that same commit refilled two of them and emptied a third.**
+>
+> **State at this commit, measured by CONTENT rather than byte count:**
+>
+> ```
+> named EMPTY by this report:
+>   tests/security_test.rs                       12,821 non-whitespace chars   NOT empty
+>   tests/comprehensive_feature_test.rs          14,878 non-whitespace chars   NOT empty
+>   tests/webrtc_transport_integration_test.rs        0                        empty ✓
+>
+> genuinely empty and NOT named here:
+>   tests/high_load_test_new.rs · tests/multi_transport_integration_new.rs
+>   tests/registry_integration_test_new.rs
+>
+> the current empty set is exactly: high_load_test_new, multi_transport_integration_new,
+> registry_integration_test_new, webrtc_transport_integration_test    (4 of 21)
+> ```
+>
+> ⚠️ **This is neither a stale document nor a false one, and neither standard remedy fits.** A supersession banner implies it was current and drifted — it never was current in this repository, not for one commit. A correction implies it was wrong on arrival — it was not; it was right about the tree it was written against.
+>
+> **What it is missing is its REF.** It says *"several test files are empty"* where it should say *"at `7b80ca4`, these files were empty."* **A measurement without the ref it was taken at becomes a claim about the present the moment it is repeated — and committing it is repeating it.**
+>
+> ## What this report gets RIGHT, and it should not be discarded
+>
+> **The tautology finding is real and still true.** `tests/integration_test.rs:24` asserts `!x.is_empty() || x.is_empty()` — `A || !A`. ⚠️ **This document is the only artifact in the repository that says so**, and deleting it as "stale" would destroy a live, correct finding.
+>
+> **The original text is kept below rather than rewritten.** `tests/empty_test_files_are_named.rs` now reddens if the set named above and the set on disk disagree.
+
+
 ## Executive Summary
 
 Following a comprehensive review of the test suite, I have identified critical issues with test validity. Many tests either don't test what they claim to test, are completely empty, or use meaningless assertions. This represents a significant risk to system reliability and security validation.
