@@ -58,3 +58,8 @@ Cargo.lock
 # gate's own notice survey - measured on kiss-ref.
 __pycache__/
 *.pyc
+
+# Local developer tool, not part of this crate. Ignored in fuel, vulkane and
+# mlmf (3 of 3 sampled) and it should have been here too -- its absence is why
+# a `git add -A` swept a 539 KB binary onto main in PR #24.
+supertool
