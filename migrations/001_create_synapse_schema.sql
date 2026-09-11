@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: MIT OR Apache-2.0
 -- Synapse Participant Registry Schema
 -- Migration: 001_create_participants_table
 
