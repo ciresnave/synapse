@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Synapse WebAssembly Build Script
 # This script builds the Synapse library for WebAssembly targets

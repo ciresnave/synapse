@@ -52,3 +52,9 @@ Cargo.lock
 # Test artifacts
 /test-results/
 /coverage/
+
+# Python bytecode from `.github/spdx_gate.py`, which CI runs directly.
+# A .pyc embeds its source string constants, so a tracked one trips the
+# gate's own notice survey - measured on kiss-ref.
+__pycache__/
+*.pyc
