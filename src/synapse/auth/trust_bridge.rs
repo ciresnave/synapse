@@ -95,23 +95,21 @@ impl AuthEventListener for AuthTrustBridge {
                                     Some(VerificationMethod::CryptographicProof);
                             }
                         }
-                        "password" => {
+                        "password"
                             if profile_unwrapped
                                 .trust_ratings
                                 .identity_verification
                                 .verification_level
-                                < VerificationLevel::Basic
-                            {
-                                profile_unwrapped
-                                    .trust_ratings
-                                    .identity_verification
-                                    .verification_level = VerificationLevel::Basic;
-                                profile_unwrapped
-                                    .trust_ratings
-                                    .identity_verification
-                                    .verification_method =
-                                    Some(VerificationMethod::CryptographicProof);
-                            }
+                                < VerificationLevel::Basic =>
+                        {
+                            profile_unwrapped
+                                .trust_ratings
+                                .identity_verification
+                                .verification_level = VerificationLevel::Basic;
+                            profile_unwrapped
+                                .trust_ratings
+                                .identity_verification
+                                .verification_method = Some(VerificationMethod::CryptographicProof);
                         }
                         _ => {}
                     }

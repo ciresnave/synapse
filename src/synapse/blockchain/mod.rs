@@ -236,11 +236,7 @@ impl SynapseBlockchain {
             .unwrap_or(0);
 
         // Nonce must be exactly one more than current
-        if nonce != current + 1 {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(nonce == current + 1)
     }
 
     /// Submit a trust report to the blockchain with nonce for replay protection

@@ -60,11 +60,11 @@ impl StakingManager {
                     {
                         total_points = total_points.saturating_sub(transfer.amount);
                     }
-                    Transaction::TrustReport(report) if report.subject_id == participant_id => {
-                        if report.score > 0 {
-                            let awarded = (report.score as u32 * report.stake_amount) / 100;
-                            total_points += awarded;
-                        }
+                    Transaction::TrustReport(report)
+                        if report.subject_id == participant_id && report.score > 0 =>
+                    {
+                        let awarded = (report.score as u32 * report.stake_amount) / 100;
+                        total_points += awarded;
                     }
                     _ => {}
                 }
@@ -216,7 +216,7 @@ impl StakingManager {
         }
 
         // Sort validators by stake amount in descending order (highest stake first)
-        validators_with_stake.sort_by(|a, b| b.1.cmp(&a.1));
+        validators_with_stake.sort_by_key(|v| std::cmp::Reverse(v.1));
 
         // Extract just the validator IDs
         let validators = validators_with_stake

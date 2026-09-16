@@ -3,7 +3,6 @@
 
 use super::abstraction::*;
 use crate::{
-    blockchain::serialization::{DateTimeWrapper, UuidWrapper},
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
     error::Result,
     types::SecureMessage,
@@ -25,6 +24,10 @@ use tracing::{debug, error, info, warn};
 /// TCP Transport implementation
 pub struct TcpTransportImpl {
     /// Local listening port
+    #[expect(
+        dead_code,
+        reason = "stored and never read; the bound socket in `listener` is the source of truth"
+    )]
     listen_port: u16,
     /// TCP listener (if acting as server). `Arc` so the accept loop spawned by
     /// `start_server` serves THIS listener instead of binding a second one.
@@ -38,6 +41,10 @@ pub struct TcpTransportImpl {
     /// Performance metrics
     metrics: Arc<RwLock<TransportMetrics>>,
     /// Circuit breaker for reliability
+    #[expect(
+        dead_code,
+        reason = "constructed and never consulted -- the TCP path has no circuit breaking; see CAPABILITY_INVENTORY.md"
+    )]
     circuit_breaker: Arc<CircuitBreaker>,
 }
 
@@ -70,8 +77,10 @@ impl TcpTransportImpl {
             None
         };
 
-        let mut metrics = TransportMetrics::default();
-        metrics.transport_type = TransportType::Tcp;
+        let metrics = TransportMetrics {
+            transport_type: TransportType::Tcp,
+            ..Default::default()
+        };
 
         Ok(Self {
             listen_port,
@@ -322,15 +331,14 @@ impl Transport for TcpTransportImpl {
         // Try to parse the target address
         if let Ok((host, port)) = self.parse_target_address(target) {
             // Attempt a quick connection test
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                TcpStream::connect(format!("{}:{}", host, port)),
+            matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    TcpStream::connect(format!("{}:{}", host, port)),
+                )
+                .await,
+                Ok(Ok(_))
             )
-            .await
-            {
-                Ok(Ok(_)) => true,
-                _ => false,
-            }
         } else {
             false
         }
@@ -341,15 +349,14 @@ impl Transport for TcpTransportImpl {
 
         // Perform a quick connection test to estimate metrics
         let start = Instant::now();
-        let can_connect = match tokio::time::timeout(
-            Duration::from_secs(3),
-            TcpStream::connect(format!("{}:{}", host, port)),
-        )
-        .await
-        {
-            Ok(Ok(_)) => true,
-            _ => false,
-        };
+        let can_connect = matches!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                TcpStream::connect(format!("{}:{}", host, port)),
+            )
+            .await,
+            Ok(Ok(_))
+        );
         let rtt = start.elapsed();
 
         Ok(TransportEstimate {
@@ -504,22 +511,22 @@ impl TransportFactory for TcpTransportFactory {
     }
 
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(port_str) = config.get("listen_port") {
-            if port_str.parse::<u16>().is_err() {
-                return Err(crate::error::SynapseError::TransportError(format!(
-                    "Invalid listen_port: {}",
-                    port_str
-                )));
-            }
+        if let Some(port_str) = config.get("listen_port")
+            && port_str.parse::<u16>().is_err()
+        {
+            return Err(crate::error::SynapseError::TransportError(format!(
+                "Invalid listen_port: {}",
+                port_str
+            )));
         }
 
-        if let Some(timeout_str) = config.get("connection_timeout_ms") {
-            if timeout_str.parse::<u64>().is_err() {
-                return Err(crate::error::SynapseError::TransportError(format!(
-                    "Invalid connection_timeout_ms: {}",
-                    timeout_str
-                )));
-            }
+        if let Some(timeout_str) = config.get("connection_timeout_ms")
+            && timeout_str.parse::<u64>().is_err()
+        {
+            return Err(crate::error::SynapseError::TransportError(format!(
+                "Invalid connection_timeout_ms: {}",
+                timeout_str
+            )));
         }
 
         Ok(())

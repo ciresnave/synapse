@@ -203,17 +203,17 @@ impl NatTraversalTransport {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-                >> (8 % 256)) as u8,
+                >> 8) as u8,
             (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-                >> (16 % 256)) as u8,
+                >> 16) as u8,
             (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-                >> (24 % 256)) as u8,
+                >> 24) as u8,
             0x01,
             0x23,
             0x45,
@@ -269,14 +269,14 @@ impl NatTraversalTransport {
             );
 
             // Check for XOR-MAPPED-ADDRESS (0x0020) or MAPPED-ADDRESS (0x0001)
-            if attr_type == 0x0020 || attr_type == 0x0001 {
-                if let Some(addr) = self.parse_stun_address_attribute(
+            if (attr_type == 0x0020 || attr_type == 0x0001)
+                && let Some(addr) = self.parse_stun_address_attribute(
                     &data[offset + 4..],
                     attr_length,
                     attr_type == 0x0020,
-                ) {
-                    return Some(addr);
-                }
+                )
+            {
+                return Some(addr);
             }
 
             // Move to next attribute (padded to 4-byte boundary)
@@ -399,13 +399,12 @@ impl NatTraversalTransport {
         })?;
 
         // SSDP M-SEARCH request for UPnP IGD
-        let ssdp_request = format!(
-            "M-SEARCH * HTTP/1.1\r\n\
+        let ssdp_request = "M-SEARCH * HTTP/1.1\r\n\
              HOST: 239.255.255.250:1900\r\n\
              MAN: \"ssdp:discover\"\r\n\
              ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\
              MX: 3\r\n\r\n"
-        );
+            .to_string();
 
         // Send to SSDP multicast address
         let ssdp_addr = "239.255.255.250:1900";
@@ -502,12 +501,11 @@ impl NatTraversalTransport {
         )));
 
         // Try to bind to discover actual local address
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await {
-            if let Ok(local_addr) = socket.local_addr() {
-                if !interfaces.contains(&local_addr) {
-                    interfaces.push(local_addr);
-                }
-            }
+        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await
+            && let Ok(local_addr) = socket.local_addr()
+            && !interfaces.contains(&local_addr)
+        {
+            interfaces.push(local_addr);
         }
 
         Ok(interfaces)

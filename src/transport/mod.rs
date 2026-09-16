@@ -35,7 +35,6 @@ pub use discovery::DiscoveryTransport;
 // pub mod manager; // Commented out to avoid duplicate
 
 // Discovery system
-#[cfg(not(target_arch = "wasm32"))]
 // pub mod discovery; // Commented out to avoid duplicate
 
 // Simple, working transport implementation (template)
