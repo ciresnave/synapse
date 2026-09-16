@@ -9,9 +9,9 @@ cites the measurement behind it, mostly in `CAPABILITY_INVENTORY.md`.
 
 **Owner:** Synapse. FAM is being retired into it, so this is where the protocol lives.
 
-⚠️ **Section 9 is incomplete by design.** The latent-mode technique depends on a survey of 17
-papers that the OverMind lane is summarising with non-Claude models. Everything else here stands
-without it.
+**Literature:** §4.3 and §9 draw on the OverMind lane's summaries of 17 papers
+(`OverMind/research/ai-to-ai-communication-papers.md`, OverMind#28). The papers' figures are relayed
+from those summaries, not reproduced here.
 
 ---
 
@@ -100,7 +100,7 @@ the one below it.
 |---|---|---|---|---|
 | **L0** | natural language | everyone | any reader | Always available. Findings are carried here, or in L1 with their predicate and ref (§7.4). |
 | **L1** | compact structured | any model that can emit a schema | a deterministic decoder | Versioned schemas. Includes **negotiated languages** (§4.2). |
-| **L2** | latent | both parties on Fuel, with access to internal layers | a party outside the coupled group | The coupled models count as one agent. Requires a binary frame (§2). Technique pending §9. |
+| **L2** | latent | both parties on Fuel, with access to internal layers | a party outside the coupled group | The coupled models count as one agent. Needs a binary frame and compatible latent spaces (§9). |
 
 ### 4.1 L1 is a family, not one format
 
@@ -118,6 +118,36 @@ identifier and a version, like any other L1 schema.
 ⚠️ **Meaning drifts between two parties, and a third reader can misread a private language with
 confidence.** The filed spec is what an auditor holds the exchange against. If the spec and the
 usage disagree, the usage is wrong.
+
+### 4.3 What the literature says about L1
+
+From the same summaries as §9, with the same caveat: the papers' own figures, relayed, not reproduced.
+
+- **Agora (#1) is the closest existing design to §4.2 and §5.** Agents negotiate plain-text protocol
+  documents identified by a **hash**, generate code routines that process structured JSON **without
+  calling an LLM**, and fall back to natural language. It reports about **5×** lower cost than natural
+  language in a 100-agent network. Negotiating costs about twice one natural-language query (0.043 vs
+  0.020 USD), so it **pays off after about three uses**.
+  - ⚠️ **Two cautions for this design.** First, Agora's routines are **written by the negotiating
+    model**. A generated decoder is a program, but it is **not independent** of its author until someone
+    else checks it against the spec. Second, Agora reports **duplicate protocols** emerging in partly
+    isolated networks — an argument for one shared registry of specs (§11, question 2).
+- **CLSR (#9):** agents evolve Language Symbolism Frameworks — textual lexicons, grammars and usage
+  constraints. Those are **filed specs** in this design's sense. It reports **3–6×** fewer completion
+  tokens than chain-of-thought, and notes the output is harder for humans to read.
+- ⚠️ **BabelTele (#13) is NOT L1 under this design.** It is compact non-standard text written by one
+  model and read back by another, with **no spec and no program decoder** — its only decoder is a model.
+  It reports text at **27.9%** of original length, but also a quality drop of **10.75–14.95 points** on
+  QuALITY.
+- **GlossoGen (#5):** emergent shorthand appeared only when agents had a deliberation channel, and the
+  open-weight models tested (Qwen3-32B, Llama-3.3-70B-Instruct) **did not form one at all**. The
+  portfolio's non-Claude fleet leans on open-weight models, so **prefer designed schemas over emergent
+  languages** for it.
+- **AutoForm (#17):** letting models choose structured non-prose formats cut multi-agent tokens by up to
+  **72.7%** (GPT-4 with GPT-3.5, HotpotQA). Weaker models sometimes produced over-compressed or
+  hallucinated output.
+- **#2:** emergent languages drifted toward longer messages and degenerate vocabularies — more support for
+  requiring a filed spec.
 
 ---
 
@@ -193,7 +223,9 @@ The decoder is a **program**. It renders any L1 message to L0 deterministically,
 alone. The same input always produces the same text, and the decoder cannot "interpret". A message
 the decoder cannot render is invalid, and the receiver rejects it rather than guessing.
 
-For negotiated languages (§4.2) the decoder is generated from, or checked against, the filed spec.
+For negotiated languages (§4.2) the decoder may be generated from the filed spec, but ⚠️ **a decoder
+written by one of the negotiating parties is not independent of them** (§4.3, Agora). It must be
+checked against the spec by someone outside the negotiation before it counts as the auditor.
 
 ### 6.3 L2: coupled models are one agent
 
@@ -228,70 +260,84 @@ exists to prevent.
 
 ## 7. Near-term: `MESSAGE-FORMATS` v1 is L1's first schema
 
-**It already exists and is in use.** `C:\Projects\MESSAGE-FORMATS.md` (v1, 2026-09-16) defines
-one-line `[TYPE] <subject> key=value ...` headers for routine messages and `set_summary`, with prose
-only on `note:` lines. It was introduced to cut token spend after the 2026-09-16 budget outage.
-**This design builds on it rather than defining a second format.**
+**It exists and is in use.** `C:\Projects\MESSAGE-FORMATS.md` defines one-line `[TYPE] <subject>
+key=value ...` headers for routine messages and `set_summary`, with prose only on `note:` lines. It was
+introduced to cut token spend after the 2026-09-16 budget outage. **This design builds on it rather than
+defining a second format.**
 
-v1 is already readable by any person, so its L0 auditor exists. What L1 adds is the second auditor —
-a **program** — and that needs three things v1 does not yet have.
+v1 is already readable by any person, so its L0 auditor exists. L1 adds a second auditor that is a
+**program**. That needs a grammar, a version on each message, and a decoder.
 
-### 7.1 A formal grammar
+### 7.1 Already adopted (2026-09-16)
 
-v1 is specified in prose. Reading it as a parser would, these are the points a decoder has to guess
-at today (all taken from the text of v1):
+Re-read from the current `MESSAGE-FORMATS.md`, not from the proposal:
 
-| where | the ambiguity |
+- **Version tag:** `[READY v2]`; an untagged header is v1.
+- **`<x|y>` in a template means "one of"**, and a real value never contains `|`. `[ASK]` options are
+  now comma-separated.
+- **A `[FINDING]` type:** `[FINDING] <topic> ref=<sha> by=<lane> status=<open|fixed|retracted>`, with
+  the finding itself on `note:` lines.
+
+⚠️ **One gap remains, stated as an observation.** The adopted `[FINDING]` records *who* found
+something and its *lifecycle*, but not whether the claim was **measured, inferred or relayed**, nor the
+instrument. Those live in the `note:` prose. The portfolio rule *"relay a measurement with its predicate
+and ref"* therefore still rests on discipline for the predicate half. An optional key would close it,
+for example `basis=<measured|inferred|relayed>`. That is the portfolio PM's call.
+
+### 7.2 Grammar
+
+For the PM to link from `MESSAGE-FORMATS.md`. It settles the points the prose leaves to a reader.
+
+```abnf
+message    = header *( LF note-line )
+header     = "[" type [ SP version ] "]" [ SP subject ] *( SP pair )
+type       = 1*( %x41-5A )                 ; A-Z
+version    = "v" 1*DIGIT                   ; absent => v1
+subject    = token                         ; the first token, only if it contains no "="
+pair       = key "=" value                 ; split on the FIRST "=" only
+key        = 1*( ALPHA / DIGIT / "-" )
+value      = "-" / token                   ; "-" means none
+token      = 1*( %x21-7E )                 ; visible ASCII, no space
+note-line  = "note: " text
+```
+
+Rules the grammar cannot express:
+
+1. **Subject.** `[STATUS]` has none. For every other type, the first token after the tag is the subject
+   if and only if it contains no `=`.
+2. **`=` inside a value** is allowed; only the first `=` in a pair splits it.
+3. **`|` inside a value is invalid.** A decoder rejects it (adopted rule).
+4. **Sub-structure is defined per key, never globally:**
+
+| key | sub-structure |
 |---|---|
-| `[TYPE] <subject> key=value` | `[STATUS]` has no subject; the other types do. A subject is presumably the first token without `=`, but that rule is unstated. |
-| list separators | The rules say lists use `,`, but `[ASK]` writes `options=ship-wasm\|drop-step` with `\|`. |
-| templates vs values | Templates use `\|` to mean "one of" (`board=<open PRs\|0>`), while `[ASK]` values use it as a separator. A reader of a template cannot tell which. |
-| `=` inside a value | Unstated. "Split on the first `=`" is the obvious rule, but it is not written down. |
-| sub-structure | `waiting=<who:what>` and `id-from=worktree:…` use `:`; nothing says whether `:` is structural. |
-| `-` | Means "none". Unambiguous only while no real value is `-`. |
+| `board`, `red`, `files`, `options`, `why` | a `,`-separated list |
+| `waiting`, `need` | `who:what`, with a list of pairs `,`-separated |
+| `affects` | `repo:files`, with `files` a `,`-separated list |
+| `checks` | `pass/total`, two integers |
+| every other key | an opaque token: `;`, `+`, `:`, `/` inside it are literal text |
 
-**Proposal:** add a short grammar to `MESSAGE-FORMATS.md` that settles each row, and make a value's
-sub-structure part of each key's definition rather than a general rule.
+The last row is deliberate. v1 examples use `;` (`action=…Err;use-…`) and `+`
+(`need=FUEL3:fix+answer-threads`) as prose-like joiners. Parsing them would invent structure the authors did not declare.
 
-### 7.2 A version on every message
+5. **Required keys** are the ones in each type's template, in template order. Extra keys may follow them.
 
-v1 is versioned as a document, but a message does not say which version it follows. Once v2 exists, a
-decoder cannot tell which grammar applies. By principle 4 the version must be carried, not assumed.
-
-**Proposal:** `[STATUS/2] …` carries its version in the tag. **An untagged header means v1**, so every
-message already sent stays valid.
-
-### 7.3 A deterministic decoder
+### 7.3 The decoder
 
 A program that, for each message:
 
-1. parses the header by the grammar (§7.1);
-2. **rejects** a message with an unknown type, an unknown version, or a missing required key, rather
-   than guessing;
-3. renders it to a sentence of L0 by fixed rules — same input, same text, every time.
+1. parses the header by §7.2;
+2. **rejects** a message with an unknown type, an unknown version, a missing required key, or a `|` in a
+   value, rather than guessing;
+3. renders it to L0 by fixed rules: one sentence per header, keys in template order, `-` rendered as
+   "none". The same input always produces the same text.
 
-The decoder is the L1 auditor. Because it is a program, it cannot share an author's misreading.
+Because it is a program, it cannot share an author's misreading. That is what makes it the L1 auditor.
 
-### 7.4 A candidate v2 type: `[FINDING]`
+### 7.4 Out of scope here
 
-v1 carries findings as prose on `note:` lines. That is fine for reasoning, but it leaves the
-portfolio's rule *"relay a measurement with its predicate and its ref"* to discipline. `[FIX]` already
-does the equivalent for retractions structurally (`reached=`, `fixed-in=`). A matching type would do
-it for claims:
-
-    [FINDING] <topic> claim=<what> ref=<sha> by=<instrument> result=<value> status=<measured|inferred|relayed> from=<lane, when relayed>
-
-    [FINDING] synapse-clippy claim=main-passes-clippy ref=1e6898bd by=cargo-clippy--D-warnings result=exit-0 status=measured
-
-⚠️ **`status=inferred` is allowed and must be stated.** An inference written in a measurement's
-grammar is the failure this key exists to prevent. `from=` is required when `status=relayed`.
-
-This is a **candidate**, not a change. `MESSAGE-FORMATS.md` belongs to the portfolio PM.
-
-### 7.5 What stays out of scope here
-
-No size saving is claimed for any of this. Token counts depend on the tokenizer, so any claim should be
-measured with the consuming models' tokenizers first.
+No size saving is claimed. Token counts depend on the tokenizer, so measure with the consuming models'
+tokenizers before claiming one.
 
 ---
 
@@ -309,20 +355,104 @@ measured with the consuming models' tokenizers first.
 
 ---
 
-## 9. ⚠️ PENDING: latent-mode technique
+## 9. Latent mode (L2)
 
-**Waiting on the OverMind lane's summaries of 17 papers.** This section is deliberately empty rather
-than guessed.
+**Source.** The OverMind lane's summaries of 17 papers, `OverMind/research/ai-to-ai-communication-papers.md`
+(OverMind#28, head `f8483a23`). They were written by non-Claude models, and each quoted figure was checked
+mechanically against the paper text. ⚠️ **Every number below is the paper's own claim, relayed through
+that summary. None was reproduced here.** Paper numbers (#N) follow that file.
 
-What the negotiation already requires of any L2 technique, independent of the papers:
+### 9.1 What gets exchanged
 
-- a **space identifier**, so two parties can tell whether their latent spaces are compatible;
-- the **frame**: binary, with the dtype and dimensions stated;
-- the **coupling record** (§6.3), so the coupled models can be treated as one agent;
-- **authenticated peers only** (§5.5).
+| representation | papers | what crosses the wire | access needed |
+|---|---|---|---|
+| hidden states | #7 LMNet, #15 RecursiveMAS | dense vectors from internal layers | internals, plus **training** of per-pair adapters |
+| state deltas alongside tokens | #10 SDE | natural-language tokens **plus** a per-token difference between adjacent hidden states at chosen layers | internals; same base model |
+| KV cache | #16 DroidSpeak | KV cache for non-critical layers, embedding cache at transition layers | internals; **same foundation model** |
+| (survey of the above, plus input embeddings) | #14 Beyond Tokens | — | — |
 
-To be filled from the summaries: which layers are exchanged, whether spaces must match exactly or
-can be bridged, what a "space identifier" concretely is, and what the measured gains are.
+### 9.2 The deciding constraint: are the two latent spaces compatible?
+
+- **Same base model:** training-free (#14). #16 says outright that it does not work across different
+  foundation models. #10 assumes agents share a base model.
+- **Different models:** need a **trained adapter for each pair** — #7's trainable edges, #15's
+  RecursiveLink per pair of agents, #14's learned projections.
+
+So L2 has two sub-modes:
+
+| sub-mode | requires | notes |
+|---|---|---|
+| **L2-same** | both parties run the same base weights, with internal access | This is what CireSnave's *"access to those deeper layers"* enables. |
+| **L2-bridged** | a trained adapter for the pair | Also needs **training** capability. The adapter is trained on both models, so it belongs to the coupled group (§6.3). |
+
+### 9.3 The space identifier, concretely
+
+Negotiation must name enough for both sides to check compatibility before exchanging anything:
+
+- **base weights**, by content hash — the same idea as Agora's protocol hash (#1);
+- **representation kind:** hidden state, state delta, KV cache or embedding;
+- **layer set** (§9.4);
+- **dtype and dimensions**;
+- **tokenizer**, by content hash, since #10 aligns deltas to tokens;
+- for L2-bridged, the **adapter**, by content hash and version.
+
+Two parties whose identifiers differ in any field do not use L2 with each other.
+
+### 9.4 Layer selection is part of the mode
+
+- #10: injecting deltas into **all** layers degrades generation, so layers must be chosen.
+- #16: on average only **11%** of layers are "critical" and must be recomputed. Quality degrades when real
+  data drifts from the offline profiling data.
+
+So the layer set is **negotiated and versioned**, and the profile it came from has a version too. A
+profile invalidated by drift is a reason to renegotiate, and the downgrade is marked (§5.4).
+
+### 9.5 Transport
+
+- #14 reports high transport cost for full KV caches; #10 reports added bandwidth.
+- Synapse today: byte fields cost **4.58×** raw as JSON, and a UDP payload caps near **14 KB** (§2).
+
+So L2 needs the **binary frame** (§8) and a **stream transport with receiver acknowledgement**. UDP does
+not fit L2 payloads. QUIC cannot be the L2 transport while it remains a simulation (§2).
+
+### 9.6 Integrity
+
+#14 lists tampered or untrusted latent states as a security risk. ⚠️ **A latent payload is injected
+into the receiver's forward pass**, so tampering manipulates the receiving model directly, more directly
+than text can. Therefore:
+
+- L2 is limited to **authenticated peers** (§5.5);
+- every L2 payload is **integrity-checked before injection**, and rejected otherwise.
+
+#12 (LACP) is one existing signed-envelope design: a JWS envelope with transaction IDs for idempotency. Its
+reported cost is **+30%** payload size on realistic messages and **up to +500%** on tiny ones such as
+heartbeats.
+
+### 9.7 Audit
+
+The coupled-agent rule (§6.3) applies unchanged. #10 is worth noting: SDE keeps the natural-language
+tokens alongside the deltas, so the coupled group's token stream exists. That helps debugging. **It is
+still not an audit** of what the deltas carried.
+
+### 9.8 Reported gains
+
+Relayed from the summaries, not reproduced:
+
+| paper | reported gain | compared with | conditions |
+|---|---|---|---|
+| #16 DroidSpeak | up to **4×** throughput; about **3.1×** faster prefill | no cross-model sharing | same foundation model, eight model pairs |
+| #15 RecursiveMAS | **1.2–2.4×** end-to-end speed-up; **34.6–75.6%** fewer tokens; **+8.3%** accuracy | recursive LMs and multi-agent baselines | 9 benchmarks; trained RecursiveLink |
+| #10 SDE | **+0.3–17.3%**, by task family | the best of natural language or CIPHER | same base model |
+| #7 LMNet | **+30.5%** relative | prompting | Qwen2.5-0.5B; trained |
+| #14 | e.g. up to 24× speed-up (Interlat) | — | ⚠️ **a survey: these are other papers' results, second-hand** |
+
+### 9.9 Not yet known
+
+- **Whether any of this works on the models Fuel will run.** No paper here used them.
+- **Hosted API models cannot take part in L2 at all.** #7, #10 and #15 each say so. The free-tier
+  providers the portfolio routes routine work to are API-only.
+- **Gibberlink (#8) was not fetched**, and #4's ID resolves to an unrelated survey. Both are on
+  CireSnave's board.
 
 ---
 
@@ -346,8 +476,11 @@ From FAM's handover and Synapse's inventory, restated as constraints on the impl
 1. **Authentication first?** §5.5 proposes that negotiated languages and L2 require authenticated
    peers, which makes sender authentication a prerequisite for them. Is that the right order?
 2. **Who may file a negotiated-language spec, and where?** A spec must be readable by an outside
-   auditor; it needs a home that neither negotiating party controls.
+   auditor, so it needs a home neither negotiating party controls. Agora (#1) also reports duplicate
+   protocols emerging without one shared registry.
 3. **When does a coupling stop counting?** §6.3 treats coupled models as one agent. If two models
    were coupled and later work separately, when — if ever — are they independent again for review?
-4. **Extend `MESSAGE-FORMATS`?** §7 proposes a grammar, a version tag and a `[FINDING]` type. None
-   needs a Synapse change; the file is the portfolio PM's.
+4. **Close the `[FINDING]` predicate gap?** §7.1 notes the adopted type does not record whether a
+   claim was measured, inferred or relayed. The file is the portfolio PM's.
+5. **Is training in scope for Fuel?** L2 between *different* models needs a trained adapter for each
+   pair (§9.2). L2 between identical models does not. Which should Synapse plan for first?
