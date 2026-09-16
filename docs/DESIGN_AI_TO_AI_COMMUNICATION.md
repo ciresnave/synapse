@@ -275,14 +275,13 @@ Re-read from the current `MESSAGE-FORMATS.md`, not from the proposal:
 - **Version tag:** `[READY v2]`; an untagged header is v1.
 - **`<x|y>` in a template means "one of"**, and a real value never contains `|`. `[ASK]` options are
   now comma-separated.
-- **A `[FINDING]` type:** `[FINDING] <topic> ref=<sha> by=<lane> status=<open|fixed|retracted>`, with
-  the finding itself on `note:` lines.
+- **A `[FINDING]` type:** `[FINDING] <topic> ref=<sha> by=<lane> status=<open|fixed|retracted>
+  basis=<measured|inferred|relayed>`, with the finding itself on `note:` lines.
 
-⚠️ **One gap remains, stated as an observation.** The adopted `[FINDING]` records *who* found
-something and its *lifecycle*, but not whether the claim was **measured, inferred or relayed**, nor the
-instrument. Those live in the `note:` prose. The portfolio rule *"relay a measurement with its predicate
-and ref"* therefore still rests on discipline for the predicate half. An optional key would close it,
-for example `basis=<measured|inferred|relayed>`. That is the portfolio PM's call.
+`basis=` was added after this section first noted its absence. With it, a finding's header carries its
+ref *and* whether it was measured, inferred or relayed — the portfolio rule *"relay a measurement with
+its predicate and ref"* is structural rather than a matter of discipline. The instrument itself still
+lives in the `note:` prose.
 
 ### 7.2 Grammar
 
@@ -480,7 +479,5 @@ From FAM's handover and Synapse's inventory, restated as constraints on the impl
    protocols emerging without one shared registry.
 3. **When does a coupling stop counting?** §6.3 treats coupled models as one agent. If two models
    were coupled and later work separately, when — if ever — are they independent again for review?
-4. **Close the `[FINDING]` predicate gap?** §7.1 notes the adopted type does not record whether a
-   claim was measured, inferred or relayed. The file is the portfolio PM's.
-5. **Is training in scope for Fuel?** L2 between *different* models needs a trained adapter for each
+4. **Is training in scope for Fuel?** L2 between *different* models needs a trained adapter for each
    pair (§9.2). L2 between identical models does not. Which should Synapse plan for first?
