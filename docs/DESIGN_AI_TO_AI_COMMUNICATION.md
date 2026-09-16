@@ -46,7 +46,7 @@ an auditor that does not share the author's method:
 | natural language | any reader |
 | compact structured | a **program**: a versioned spec plus a deterministic decoder, which cannot misread |
 | negotiated / invented language | an **outside auditor** holding a written spec the negotiation was required to produce |
-| latent | **nothing can decode it afterwards**, so a readable rendering is logged at send time, and the receiver's reading is logged too (§6.3) |
+| latent | a party **outside the coupled group**, auditing the group's outputs. Latent state has no independent decoder, so the coupled models count as **one agent** (§6.3). |
 
 ---
 
@@ -100,7 +100,7 @@ the one below it.
 |---|---|---|---|---|
 | **L0** | natural language | everyone | any reader | Always available. Findings are carried here, or in L1 with their predicate and ref (§7.4). |
 | **L1** | compact structured | any model that can emit a schema | a deterministic decoder | Versioned schemas. Includes **negotiated languages** (§4.2). |
-| **L2** | latent | both parties on Fuel, with access to internal layers | none after the fact; logged renderings at send and receipt | Requires a binary frame (§2). Technique pending §9. |
+| **L2** | latent | both parties on Fuel, with access to internal layers | a party outside the coupled group | The coupled models count as one agent. Requires a binary frame (§2). Technique pending §9. |
 
 ### 4.1 L1 is a family, not one format
 
@@ -195,27 +195,32 @@ the decoder cannot render is invalid, and the receiver rejects it rather than gu
 
 For negotiated languages (§4.2) the decoder is generated from, or checked against, the filed spec.
 
-### 6.3 L2
+### 6.3 L2: coupled models are one agent
 
-Nothing can reliably decode activations after the fact. So:
+Latent state has no independent decoder. A readable rendering of it would be a lossy translation
+produced by a model — the same kind of author-shared reading §1.3 rules out — so **a rendering is not
+an audit.** Instead:
 
-1. **At send**, the sender logs a readable rendering of what it meant.
-2. **At receipt**, the receiver logs a readable rendering of what it understood.
-3. Both renderings are keyed to the same `message_id`.
+1. **Log the coupling.** Every L2 exchange records which models were coupled, when the coupling
+   started and ended, and in which mode. That record is what makes it visible which outputs came from
+   a combined agent.
+2. **Audit the combined agent's outputs**, exactly as any single agent's outputs are audited.
+3. ⚠️ **A coupled group counts as ONE agent for independence.** Its members must never review each
+   other's work, because they are not independent of each other.
 
-⚠️ **Both renderings are claims, not decodings**, and the log labels them as such: *"sender's
-rendering"* and *"receiver's rendering"*, never *"content"*. Neither is independent of the exchange.
-What the pair gives an auditor is **disagreement made visible**: if the two renderings diverge, the
-exchange misfired, and that is detectable without decoding anything. Agreement is not proof that
-either is right.
+A readable rendering of latent state remains **allowed as a debugging aid**, stored separately and
+labelled as not an audit.
 
-A latent message that arrives without a sender's rendering is **rejected** (principle 4).
+An L2 exchange with no coupling record is **rejected** (principle 4): without it, a combined agent's
+output is indistinguishable from an independent one's, which is exactly the confusion this rule
+exists to prevent.
 
 ### 6.4 The log
 
 - Append-only, one entry per exchange, keyed by `message_id`.
-- Each entry states which mode was used, and whether its readable text is a **decoding** (L0, L1) or
-  a **claimed rendering** (L2).
+- Each entry states which mode was used. For L0 and L1 the readable text is a **decoding**. For L2 the
+  entry is the **coupling record** (§6.3); any debugging rendering lives elsewhere and is labelled as
+  not an audit.
 - Downgrades and rejections are entries too.
 - A missing rendering is an entry that says so. It is never an absent row.
 
@@ -313,7 +318,7 @@ What the negotiation already requires of any L2 technique, independent of the pa
 
 - a **space identifier**, so two parties can tell whether their latent spaces are compatible;
 - the **frame**: binary, with the dtype and dimensions stated;
-- the **rendering-at-send** requirement (§6.3);
+- the **coupling record** (§6.3), so the coupled models can be treated as one agent;
 - **authenticated peers only** (§5.5).
 
 To be filled from the summaries: which layers are exchanged, whether spaces must match exactly or
@@ -342,7 +347,7 @@ From FAM's handover and Synapse's inventory, restated as constraints on the impl
    peers, which makes sender authentication a prerequisite for them. Is that the right order?
 2. **Who may file a negotiated-language spec, and where?** A spec must be readable by an outside
    auditor; it needs a home that neither negotiating party controls.
-3. **Is a pair of claimed renderings enough for L2?** §6.3 makes disagreement visible but cannot
-   prove agreement is correct. Is that an acceptable audit standard for latent exchanges?
+3. **When does a coupling stop counting?** §6.3 treats coupled models as one agent. If two models
+   were coupled and later work separately, when — if ever — are they independent again for review?
 4. **Extend `MESSAGE-FORMATS`?** §7 proposes a grammar, a version tag and a `[FINDING]` type. None
    needs a Synapse change; the file is the portfolio PM's.
