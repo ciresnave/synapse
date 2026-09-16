@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 #[cfg(feature = "mdns")]
 use auto_discovery::{DiscoveryConfig, ProtocolType, ServiceDiscovery, ServiceInfo, ServiceType};
@@ -84,6 +84,7 @@ pub struct DiscoveryTransport {
     discovery: Arc<Mutex<Option<ServiceDiscovery>>>,
     discovered_services: Arc<RwLock<HashMap<String, DiscoveredService>>>,
     metrics: Arc<RwLock<TransportMetrics>>,
+    #[expect(dead_code, reason = "initialised and never read or updated")]
     last_discovery: Arc<RwLock<Instant>>,
     running: Arc<RwLock<bool>>,
 }
@@ -159,6 +160,10 @@ impl DiscoveryTransport {
         Ok(())
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller; the background loop in start() calls the auto-discovery crate directly"
+    )]
     async fn discover_services(&self) -> Result<()> {
         #[cfg(feature = "mdns")]
         {
@@ -264,7 +269,7 @@ impl Transport for DiscoveryTransport {
                     || service
                         .txt_records
                         .get("protocols")
-                        .map_or(false, |p| p.contains(cap))
+                        .is_some_and(|p| p.contains(cap))
             }) {
                 return true;
             }
@@ -286,7 +291,7 @@ impl Transport for DiscoveryTransport {
                         || service
                             .txt_records
                             .get("protocols")
-                            .map_or(false, |p| p.contains(cap))
+                            .is_some_and(|p| p.contains(cap))
                 })
             })
         };
@@ -339,27 +344,25 @@ impl Transport for DiscoveryTransport {
             while *running.read().await {
                 #[cfg(feature = "mdns")]
                 {
-                    if let Some(disco) = discovery.lock().await.as_ref() {
-                        if let Ok(services) =
+                    if let Some(disco) = discovery.lock().await.as_ref()
+                        && let Ok(services) =
                             disco.discover_services(Some(ProtocolType::Mdns)).await
-                        {
-                            let mut discovered = discovered_services.write().await;
-                            let now = Instant::now();
+                    {
+                        let mut discovered = discovered_services.write().await;
+                        let now = Instant::now();
 
-                            for service in services {
-                                let discovered_service = DiscoveredService {
-                                    name: service.name().to_string(),
-                                    service_type: service.service_type().to_string(),
-                                    host: service.address().to_string(),
-                                    port: service.port(),
-                                    addresses: vec![service.address()],
-                                    txt_records: HashMap::new(),
-                                    last_seen: now,
-                                };
+                        for service in services {
+                            let discovered_service = DiscoveredService {
+                                name: service.name().to_string(),
+                                service_type: service.service_type().to_string(),
+                                host: service.address().to_string(),
+                                port: service.port(),
+                                addresses: vec![service.address()],
+                                txt_records: HashMap::new(),
+                                last_seen: now,
+                            };
 
-                                discovered
-                                    .insert(discovered_service.name.clone(), discovered_service);
-                            }
+                            discovered.insert(discovered_service.name.clone(), discovered_service);
                         }
                     }
                 }
@@ -387,7 +390,7 @@ impl Transport for DiscoveryTransport {
     }
     async fn send_message(
         &self,
-        target: &TransportTarget,
+        _target: &TransportTarget,
         message: &SecureMessage,
     ) -> Result<DeliveryReceipt> {
         // Discovery transport doesn't send messages directly - it's used for finding other transports

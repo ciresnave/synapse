@@ -916,9 +916,8 @@ impl TransportManager {
                     }
                 }
 
-                if transport_count > 0 {
-                    metrics_guard.average_latency =
-                        Duration::from_millis(total_latency_ms / transport_count);
+                if let Some(avg) = total_latency_ms.checked_div(transport_count) {
+                    metrics_guard.average_latency = Duration::from_millis(avg);
                 }
 
                 metrics_guard.touch();

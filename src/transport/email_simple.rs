@@ -21,6 +21,10 @@ pub struct SimpleEmailTransport {
     /// Email configuration
     config: EmailConfig,
     /// Connection timeout
+    #[expect(
+        dead_code,
+        reason = "set to 30s and never applied to any connection; see CAPABILITY_INVENTORY.md"
+    )]
     connection_timeout: Duration,
     /// Circuit breaker for reliability
     circuit_breaker: Arc<CircuitBreaker>,
@@ -75,7 +79,7 @@ impl SimpleEmailTransport {
             self.config.smtp.username,
             to_address,
             subject,
-            message.message_id.to_string(),
+            message.message_id,
             message.from_global_id
         );
 
@@ -134,7 +138,7 @@ impl SimpleEmailTransport {
         if success {
             metrics.reliability_score = (metrics.reliability_score * 0.9) + 0.1;
         } else {
-            metrics.reliability_score = metrics.reliability_score * 0.9;
+            metrics.reliability_score *= 0.9;
         }
 
         // Update timestamp
@@ -346,7 +350,7 @@ impl Transport for SimpleEmailTransport {
         }
     }
 
-    async fn send_connection_offer(&self, target: &str, offer: ConnectionOffer) -> Result<String> {
+    async fn send_connection_offer(&self, target: &str, _offer: ConnectionOffer) -> Result<String> {
         // Email doesn't support real-time connection offers, but we can send an email
         info!("Sending connection offer via email to: {}", target);
         Ok(format!("email_offer_{}", uuid::Uuid::new_v4()))
