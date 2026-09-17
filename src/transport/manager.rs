@@ -6,6 +6,9 @@
 //! automatic failover, and unified metrics.
 
 use super::abstraction::*;
+use crate::crypto::CryptoManager;
+use crate::delivery_ack;
+use crate::error::SynapseError;
 use crate::sender_auth::{SenderVerdict, TrustStore};
 use crate::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
@@ -143,6 +146,13 @@ pub struct ReceivedMessage {
     pub sender: SenderVerdict,
 }
 
+/// A sent message that asked for an ack (P2 slice b).
+struct Outbound {
+    to_global_id: String,
+    digest: String,
+    status: DeliveryConfirmation,
+}
+
 /// Main TransportManager that provides unified transport abstraction
 pub struct TransportManager {
     /// Configuration
@@ -165,6 +175,8 @@ pub struct TransportManager {
     failed_transports: TokioRwLock<HashMap<TransportType, Instant>>,
     /// Pinned sender keys; see `crate::sender_auth`.
     trust_store: TokioRwLock<TrustStore>,
+    /// Messages sent with `request_ack`, by message id. Grows until slice e bounds it.
+    outbound: TokioRwLock<HashMap<String, Outbound>>,
 }
 
 /// Unified metrics across all transports
@@ -252,6 +264,7 @@ impl TransportManager {
             round_robin_index: Arc::new(Mutex::new(0)),
             failed_transports: TokioRwLock::new(HashMap::new()),
             trust_store: TokioRwLock::new(TrustStore::default()),
+            outbound: TokioRwLock::new(HashMap::new()),
         }
     }
 
@@ -435,6 +448,7 @@ impl TransportManager {
                     self.record_success(transport_type).await;
                     self.update_transport_metrics(transport_type, true, receipt.delivery_time)
                         .await;
+                    self.track_if_ack_requested(message).await;
                     return Ok(receipt);
                 }
                 Err(e) => {
@@ -454,6 +468,105 @@ impl TransportManager {
         Err(crate::error::SynapseError::TransportError(
             "All transports failed".to_string(),
         ))
+    }
+
+    /// Acknowledge a message the application has processed (P2 slice b, spec §5). Refuses, sending
+    /// nothing, unless the sender was verified (anti-reflector rule), the message asked for an ack,
+    /// and it is not itself an ack. Calling it again sends another ack; the sender treats the
+    /// duplicate as a no-op.
+    pub async fn acknowledge(
+        &self,
+        received: &ReceivedMessage,
+        signer: &CryptoManager,
+    ) -> Result<DeliveryReceipt> {
+        let original = &received.incoming.message;
+        if !received.sender.is_verified() {
+            return Err(SynapseError::AuthenticationError(format!(
+                "refusing to acknowledge {}: sender verdict is {:?}",
+                original.message_id, received.sender
+            )));
+        }
+        if delivery_ack::is_ack(original) {
+            return Err(SynapseError::InvalidMessageFormat(format!(
+                "{} is an ack; acks are never acknowledged",
+                original.message_id
+            )));
+        }
+        let Some(reply_to) = delivery_ack::reply_to(original) else {
+            return Err(SynapseError::InvalidMessageFormat(format!(
+                "{} did not request an ack (no {})",
+                original.message_id,
+                delivery_ack::REPLY_TO_KEY
+            )));
+        };
+        let ack = delivery_ack::build_ack(original, signer)?;
+        let target = TransportTarget::new(original.from_global_id.clone())
+            .with_address(reply_to.to_string());
+        self.send_message(&target, &ack).await
+    }
+
+    /// Delivery status of a message sent with `request_ack`; `None` if it was not tracked.
+    ///
+    /// Acks are applied inside `receive_messages` and the manager has no background receive loop,
+    /// so a status only advances while the application keeps calling `receive_messages`.
+    pub async fn delivery_status(&self, message_id: &str) -> Option<DeliveryConfirmation> {
+        self.outbound.read().await.get(message_id).map(|o| o.status)
+    }
+
+    async fn track_if_ack_requested(&self, message: &SecureMessage) {
+        if delivery_ack::reply_to(message).is_none() {
+            return;
+        }
+        let entry = Outbound {
+            to_global_id: message.to_global_id.clone(),
+            digest: delivery_ack::message_digest(message),
+            status: DeliveryConfirmation::Sent,
+        };
+        // or_insert: resending a message must never downgrade an Acknowledged entry.
+        self.outbound
+            .write()
+            .await
+            .entry(message.message_id.0.to_string())
+            .or_insert(entry);
+    }
+
+    /// Spec §6: upgrade to Acknowledged only for a verified ack, for a tracked message, from its
+    /// addressee, with a matching digest. Anything else is dropped.
+    async fn apply_ack(&self, ack: &SecureMessage, verdict: &SenderVerdict) {
+        if !verdict.is_verified() {
+            debug!(
+                "dropping ack {}: sender verdict {:?}",
+                ack.message_id, verdict
+            );
+            return;
+        }
+        let Some(fields) = delivery_ack::ack_fields(ack) else {
+            debug!("dropping ack {}: missing ack fields", ack.message_id);
+            return;
+        };
+        let mut outbound = self.outbound.write().await;
+        let Some(entry) = outbound.get_mut(fields.for_message_id) else {
+            debug!(
+                "dropping ack {}: no tracked message {}",
+                ack.message_id, fields.for_message_id
+            );
+            return;
+        };
+        if ack.from_global_id != entry.to_global_id {
+            debug!(
+                "dropping ack {}: from {} but the message was to {}",
+                ack.message_id, ack.from_global_id, entry.to_global_id
+            );
+            return;
+        }
+        if fields.digest != entry.digest {
+            debug!(
+                "dropping ack {}: digest does not match what was sent",
+                ack.message_id
+            );
+            return;
+        }
+        entry.status = DeliveryConfirmation::Acknowledged;
     }
 
     /// A snapshot of the pinned sender keys.
@@ -493,13 +606,17 @@ impl TransportManager {
         }
 
         let store = self.trust_store.read().await;
-        Ok(all_messages
-            .into_iter()
-            .map(|incoming| {
-                let sender = store.verify(&incoming.message);
-                ReceivedMessage { incoming, sender }
-            })
-            .collect())
+        let mut delivered = Vec::with_capacity(all_messages.len());
+        for incoming in all_messages {
+            let sender = store.verify(&incoming.message);
+            // Acks are control traffic: applied here, never handed to the application.
+            if delivery_ack::is_ack(&incoming.message) {
+                self.apply_ack(&incoming.message, &sender).await;
+                continue;
+            }
+            delivered.push(ReceivedMessage { incoming, sender });
+        }
+        Ok(delivered)
     }
 
     /// Get status of all transports

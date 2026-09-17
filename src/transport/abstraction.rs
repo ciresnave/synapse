@@ -220,9 +220,8 @@ pub enum DeliveryConfirmation {
     Sent,
     /// Message was delivered to target network
     Delivered,
-    /// Message was received by target application
-    Received,
-    /// Message was acknowledged by target
+    /// The receiving application acknowledged the message with a verified, signed ack whose
+    /// digest matches what was sent (P2 slice b).
     Acknowledged,
 }
 
