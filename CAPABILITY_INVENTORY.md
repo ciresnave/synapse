@@ -40,6 +40,10 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 undocumented construction requirements.** That single fact matters more for planning than everything
 else in this document.
 
+🔴 **Added 2026-09-17: on `main`, "encrypted" messages can be read by anyone who has the bytes.**
+`encrypt_message` stores the AES key inside its own output. This is not in any published release
+(§2.2, "ENCRYPTION ON `main` IS NOT CONFIDENTIAL").
+
 ---
 
 ## 1. What was blocking the build
@@ -497,6 +501,39 @@ an optional identity field would be the cheap change and the wrong one.**
 **Not fixed here** — signing and verifying messages is a protocol addition and a merge decision, and
 FAM (being rewritten into Synapse) already has a voucher-chain design for it. Recorded so the merge
 inherits the measurement rather than the type's implication.
+
+#### 🔴 ENCRYPTION ON `main` IS NOT CONFIDENTIAL — the key travels inside the ciphertext
+
+*Added 2026-09-17. Measured at `8edce9c1`.*
+
+`CryptoManager::encrypt_message` (`crypto.rs:121`) never uses the recipient's key; it only checks
+that one is on file. `encrypt_with_aes` generates a random AES-256-GCM key and returns
+`key(32) ‖ nonce(12) ‖ ciphertext`. `decrypt_message` (`crypto.rs:161`) reads the key back out of
+those bytes and never touches a private key.
+
+**Measured by running it.** A throwaway test (not committed) did three things:
+- created a sender and a recipient;
+- encrypted `"the secret"` for the recipient;
+- decrypted the result with a `CryptoManager::new()` that holds **no keys at all**.
+
+It returned `Ok("the secret")`. **Control:** the ciphertext does not contain the plaintext bytes, so
+the result is not a plaintext passthrough.
+
+⚠️ **So `SecurityLevel::Secure` gives no confidentiality.** Anyone who can read the bytes (a relay, a
+mail server, a packet capture) can read the message. The router encrypts this way on its send
+path (`router.rs:79`) and in `convert_to_secure_message` (`router.rs:223`).
+
+**When it arrived:** `git log -S` finds the key-in-output line was introduced by `f0f570c` (the
+2026-06-12 checkpoint). That commit replaced RSA with Ed25519, which can only sign and cannot
+encrypt. **The published 1.1.0 crate does not have this flaw:** its `crypto.rs`, read from the
+registry copy and from `7b80ca4`, encrypts to the recipient's RSA public key with PKCS#1 v1.5.
+That older scheme carries its own advisory, RUSTSEC-2023-0071 (already in the audit list). **No
+crates.io consumer has ever received the self-decrypting version.**
+
+**Not fixed here.** The fix is real recipient-key sealing (X25519/HPKE) with a key that is **never**
+derived from an Ed25519 key; that derivation produces ciphertext the recipient cannot open
+(OverMind MEASUREMENTS §20). It is scheduled as its own slice. **Publishing 2.0.0 is blocked until it
+lands** (the PM recorded this on CireSnave's board, 2026-09-17).
 
 #### What this means for a non-Rust agent runtime
 
