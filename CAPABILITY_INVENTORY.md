@@ -945,6 +945,22 @@ project's name.**
 - **`src/streaming.rs`, `src/monitoring.rs`, `src/circuit_breaker.rs`** — compile; `circuit_breaker`
   has a demo example but no test target.
 
+#### ⚠️ The discovery TXT key `version` means two different things
+
+*Added 2026-09-17, read at `1e6898bd`. Nothing was run.*
+
+- `transport/discovery.rs:133` advertises the **crate** version under `version`. It said `1.1.0`
+  until 2.0.0 and now reads `CARGO_PKG_VERSION`.
+- `transport/mdns_enhanced.rs:456` and `:1456` advertise `1.0` under the same key, and `:1494` reads
+  that key back as `protocol_version`.
+- So an `mdns_enhanced` reader that sees a `discovery.rs` advertisement would record a crate version
+  as a protocol version. **Nothing compares `protocol_version` today.** Its three hits in `src/` are
+  the field, the read and the struct literal. Control: the same query also matches
+  `with_protocol_versions` in `quic.rs`. The mix-up is harmless until someone adds a compatibility
+  check that reads it.
+- It only goes one way: `discovery.rs` never reads TXT records back (`txt_records: HashMap::new()`).
+  Not fixed here. The merge decides what the key should mean.
+
 ---
 
 ## 5. Aspirational — does not compile, is unreachable, or is not in the build at all

@@ -130,7 +130,7 @@ impl DiscoveryTransport {
             self.config.port,
             Some(vec![
                 ("synapse", "true"),
-                ("version", "1.1.0"),
+                ("version", env!("CARGO_PKG_VERSION")),
                 ("protocols", &self.config.protocols.join(",")),
             ]),
         )

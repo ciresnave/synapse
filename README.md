@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-2021%2B-brightgreen.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Version](https://img.shields.io/badge/version-1.1.0-orange.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-2.0.0-orange.svg)](Cargo.toml)
 [![Enterprise Ready](https://img.shields.io/badge/enterprise-ready-gold.svg)](docs/ENTERPRISE_AI_PLATFORM.md)
 [![AI Native](https://img.shields.io/badge/ai-native-purple.svg)](examples/enterprise_ai_auth_platform.rs)
 [![Military Grade Security](https://img.shields.io/badge/security-military%20grade-red.svg)](docs/ENTERPRISE_AI_PLATFORM.md)
