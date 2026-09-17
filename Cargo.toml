@@ -74,6 +74,9 @@ base64 = { version = "0.22", optional = true }
 # Configuration - optional
 toml = { version = "0.9.2", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
+# MCP stdio surface (P2 slice c): src/mcp_server.rs and the synapse-mcp binary.
+rmcp = { version = "3.4.0", features = ["server", "macros", "transport-io", "schemars"], optional = true }
+schemars = { version = "1.2.2", optional = true }
 clap = { version = "4.5.41", features = ["derive"], optional = true }
 config = { version = "0.15.13", optional = true }
 
@@ -162,6 +165,8 @@ wasm-logger = { version = "0.2", optional = true }
 tokio-test = "0.4"
 pretty_assertions = "1.0"
 tempfile = "3.0"
+# The synapse-mcp process test drives the binary as a real MCP client.
+rmcp = { version = "3.4.0", features = ["client", "transport-child-process"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 
 # WASM-specific dev dependencies
@@ -349,6 +354,8 @@ mdns = ["dep:auto-discovery", "dep:socket2"] # Using auto-discovery crate now
 auto_discovery = ["dep:auto-discovery", "mdns"]
 cache = ["dep:redis"]
 telemetry = ["dep:tracing-subscriber"]
+# MCP stdio surface for agents (P2 slice c).
+mcp = ["dep:rmcp", "dep:schemars", "dep:toml", "dep:tokio"]
 
 # Networking feature (adds network transport capabilities)
 networking = ["core", "http", "mdns", "dep:futures-util"]
@@ -383,6 +390,7 @@ auth = ["core", "auth-framework"]
 # Full native platform support (the original working config but with updated deps)
 native = [
     "core",
+    "mcp",
     "networking",
     "nat_traversal",
     "email",

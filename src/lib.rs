@@ -202,6 +202,8 @@ pub mod delivery_ack;
 pub mod email;
 pub mod email_server;
 pub mod identity;
+#[cfg(feature = "mcp")]
+pub mod mcp_server;
 pub mod monitoring;
 pub mod network_scope;
 pub mod router;
