@@ -18,6 +18,7 @@ use synapse::types::{SecureMessage, SecurityLevel};
 const ALICE: &str = "alice@synapse.test";
 const BOB: &str = "bob@synapse.test";
 const CAROL: &str = "carol@synapse.test";
+const CANARY: &str = "canary@synapse.test";
 
 struct Identity {
     crypto: CryptoManager,
@@ -69,12 +70,26 @@ async fn server_with(
     peers: &[(&str, &Identity, u16)],
     unsealed: &[&str],
 ) -> (SynapseMcpServer, String) {
+    server_with_config(dir, id, port, me, peers, unsealed, "").await
+}
+
+/// As `server_with`, but `extra_config` is spliced into the top-level TOML (before any
+/// `[[peers]]` table, per TOML's rules) so a test can set the new replay/gate/tracking keys.
+async fn server_with_config(
+    dir: &Path,
+    id: &str,
+    port: u16,
+    me: &Identity,
+    peers: &[(&str, &Identity, u16)],
+    unsealed: &[&str],
+    extra_config: &str,
+) -> (SynapseMcpServer, String) {
     let key_path = dir.join(format!("{}.pem", id.replace('@', "_")));
     std::fs::write(&key_path, &me.private_pem).unwrap();
     let sealing_path = dir.join(format!("{}-sealing.pem", id.replace('@', "_")));
     std::fs::write(&sealing_path, me.sealing.to_pkcs8_pem()).unwrap();
     let mut toml = format!(
-        "global_id = \"{id}\"\nprivate_key_pem_path = \"{}\"\nsealing_key_path = \"{}\"\nudp_bind_port = {port}\n",
+        "global_id = \"{id}\"\nprivate_key_pem_path = \"{}\"\nsealing_key_path = \"{}\"\nudp_bind_port = {port}\n{extra_config}",
         slash(&key_path),
         slash(&sealing_path)
     );
@@ -243,17 +258,20 @@ fn send_raw(port: u16, message: &SecureMessage) {
 
 /// Send a canary to `port` and poll until it arrives (slice b §9). Returns the status of
 /// `message_id` in the poll that returned the canary.
+///
+/// The canary must be signed and its key configured as a peer under `CANARY` on the receiving
+/// server (default-deny would otherwise drop the canary itself as `Unverifiable`, hanging the
+/// test — see task-5-report.md), so `canary_signer` is the `CryptoManager` whose public key that
+/// server's config already pins.
 async fn status_after_canary(
     server: &SynapseMcpServer,
     port: u16,
     message_id: &str,
+    canary_signer: &CryptoManager,
 ) -> Option<String> {
-    let canary = SecureMessage::new(
-        "whoever",
-        "canary@synapse.test",
-        b"canary".to_vec(),
-        SecurityLevel::Public,
-    );
+    let mut canary =
+        SecureMessage::new("whoever", CANARY, b"canary".to_vec(), SecurityLevel::Public);
+    canary_signer.sign_secure_message(&mut canary).unwrap();
     let canary_id = canary.message_id.0.to_string();
     send_raw(port, &canary);
     for _ in 0..30 {
@@ -299,23 +317,45 @@ async fn send_poll_ack_round_trip() {
 // §7 test 2 — the PM's requirement: poll alone never acknowledges.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_polled_message_is_not_acknowledged_until_ack_is_called() {
-    let p = pair().await;
-    let id = sent_id(&p.alice, BOB, "read me", true).await;
-    let message = poll_one(&p.bob).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (alice_id, bob_id, canary_id) = (identity(), identity(), identity());
+    let (alice_port, bob_port) = (free_udp_port(), free_udp_port());
+    // Alice pins the canary (used below) as a configured peer with no sealing key: the gate's
+    // default-deny needs a verified sender, and nothing is ever sent TO the canary.
+    let (alice, _) = server_with(
+        dir.path(),
+        ALICE,
+        alice_port,
+        &alice_id,
+        &[(BOB, &bob_id, bob_port), (CANARY, &canary_id, 0)],
+        &[CANARY],
+    )
+    .await;
+    let (bob, _) = server(
+        dir.path(),
+        BOB,
+        bob_port,
+        &bob_id,
+        &[(ALICE, &alice_id, alice_port)],
+    )
+    .await;
+
+    let id = sent_id(&alice, BOB, "read me", true).await;
+    let message = poll_one(&bob).await;
     assert_eq!(message["message_id"], id.as_str());
 
     // Bob has polled but not acked. Anything Bob sent would arrive before this canary.
     assert_eq!(
-        status_after_canary(&p.alice, p.alice_port, &id)
+        status_after_canary(&alice, alice_port, &id, &canary_id.crypto)
             .await
             .as_deref(),
         Some("Sent")
     );
 
     // Control: the explicit ack does reach Alice.
-    ok_json(ack(&p.bob, &id).await);
+    ok_json(ack(&bob, &id).await);
     assert_eq!(
-        poll_until_acknowledged(&p.alice, &id).await.as_deref(),
+        poll_until_acknowledged(&alice, &id).await.as_deref(),
         Some("Acknowledged")
     );
 }
@@ -323,18 +363,36 @@ async fn a_polled_message_is_not_acknowledged_until_ack_is_called() {
 // §7 test 3
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unconfigured_sender_is_shown_unverifiable_and_cannot_be_acked() {
-    let p = pair().await;
+    // This test's subject IS the unverifiable-sender path (verdict shown, ack refused), which
+    // now requires `accept_unverified` to even reach the application: the gate's own default-deny
+    // behaviour is exercised by tests/replay_suppression.rs, not here. Same reasoning as
+    // `an_unverified_message_is_never_acknowledged_and_nothing_is_sent` in
+    // tests/receiver_acknowledgement.rs.
+    let dir = tempfile::tempdir().unwrap();
+    let bob_id = identity();
+    let bob_port = free_udp_port();
+    let victim_port = free_udp_port();
+    let (bob, _) = server_with_config(
+        dir.path(),
+        BOB,
+        bob_port,
+        &bob_id,
+        &[],
+        &[],
+        "accept_unverified = true\n",
+    )
+    .await;
     let carol = identity();
     let mut m = SecureMessage::new(BOB, CAROL, b"hi".to_vec(), SecurityLevel::Authenticated);
-    m.request_ack(format!("127.0.0.1:{}", p.alice_port));
+    m.request_ack(format!("127.0.0.1:{victim_port}"));
     carol.crypto.sign_secure_message(&mut m).unwrap();
-    send_raw(p.bob_port, &m);
+    send_raw(bob_port, &m);
 
-    let message = poll_one(&p.bob).await;
+    let message = poll_one(&bob).await;
     assert_eq!(message["from"], CAROL);
     assert_eq!(message["sender"]["verdict"], "unverifiable");
     assert_eq!(message["sender"]["reason"], "unknown_sender");
-    let err = refusal(ack(&p.bob, message["message_id"].as_str().unwrap()).await);
+    let err = refusal(ack(&bob, message["message_id"].as_str().unwrap()).await);
     assert!(err.contains("verdict"), "{err}");
 }
 
@@ -346,7 +404,7 @@ async fn refusals() {
     assert!(err.contains("unknown peer"), "{err}");
 
     let err = refusal(ack(&p.bob, "00000000-0000-0000-0000-000000000000").await);
-    assert!(err.contains("unknown message_id"), "{err}");
+    assert!(err.contains("no longer held"), "{err}");
 
     let id = sent_id(&p.alice, BOB, "no ack wanted", false).await;
     let message = poll_one(&p.bob).await;
@@ -496,4 +554,144 @@ async fn the_wire_carries_ciphertext_not_plaintext() {
         synapse::sealing::open(&captured, Some(&bob_id.sealing)),
         synapse::sealing::Payload::Opened(secret.as_bytes().to_vec())
     );
+}
+
+// Replay suppression surfaced through MCP (P2 slice e).
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poll_reports_freshness_and_drop_counts() {
+    let p = pair().await;
+    let id = sent_id(&p.alice, BOB, "hi", true).await;
+
+    let mut output = poll(&p.bob).await;
+    for _ in 0..20 {
+        if !output["messages"].as_array().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        output = poll(&p.bob).await;
+    }
+    let messages = output["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{output}");
+    assert_eq!(messages[0]["message_id"], id.as_str());
+    assert_eq!(messages[0]["freshness"], "fresh");
+    assert_eq!(output["dropped"]["contradicted"], 0);
+    assert_eq!(output["dropped"]["unverifiable"], 0);
+    assert_eq!(output["dropped"]["replay"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_reports_who_was_refused() {
+    let p = pair().await;
+    // An unsigned SecureMessage, claiming an unpinned sender: the gate drops it as unverifiable.
+    let m = SecureMessage::new(
+        BOB,
+        "mallory@synapse.test",
+        b"hi".to_vec(),
+        SecurityLevel::Authenticated,
+    );
+    send_raw(p.bob_port, &m);
+
+    let mut output = poll(&p.bob).await;
+    for _ in 0..20 {
+        if output["dropped"]["unverifiable"].as_u64() == Some(1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        output = poll(&p.bob).await;
+    }
+    assert!(
+        output["messages"].as_array().unwrap().is_empty(),
+        "{output}"
+    );
+    assert_eq!(output["dropped"]["unverifiable"], 1, "{output}");
+
+    let listed = ok_json(p.bob.list().await.unwrap());
+    let knocking = listed["knocking"].as_array().unwrap();
+    assert_eq!(knocking.len(), 1, "{listed}");
+    assert_eq!(knocking[0]["claimed_global_id"], "mallory@synapse.test");
+    assert_eq!(knocking[0]["reason"], "unsigned");
+    assert_eq!(knocking[0]["key_id"], "unsigned");
+    // Control: the configured peer is still listed under peers, distinct from knocking.
+    assert_eq!(
+        listed["peers"],
+        serde_json::json!([{
+            "global_id": ALICE,
+            "address": format!("127.0.0.1:{}", p.alice_port),
+            "key_id": p.alice_id.key_id,
+            "sealing_key_id": p.alice_id.sealing.public_key().key_id(),
+        }])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ack_refuses_a_message_that_is_no_longer_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let (alice_id, bob_id) = (identity(), identity());
+    let (alice_port, bob_port) = (free_udp_port(), free_udp_port());
+    let (alice, _) = server(
+        dir.path(),
+        ALICE,
+        alice_port,
+        &alice_id,
+        &[(BOB, &bob_id, bob_port)],
+    )
+    .await;
+    // tracking_ttl_seconds = 0 means `kept` evicts an entry as soon as any time passes.
+    let (bob, _) = server_with_config(
+        dir.path(),
+        BOB,
+        bob_port,
+        &bob_id,
+        &[(ALICE, &alice_id, alice_port)],
+        &[],
+        "tracking_ttl_seconds = 0\n",
+    )
+    .await;
+
+    let id = sent_id(&alice, BOB, "expires fast", true).await;
+    let message = poll_one(&bob).await;
+    assert_eq!(message["message_id"], id.as_str());
+
+    let err = refusal(ack(&bob, &id).await);
+    assert!(err.contains("no longer held"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retention_shorter_than_the_window_is_refused_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = identity();
+    let key_path = dir.path().join("alice.pem");
+    std::fs::write(&key_path, &id.private_pem).unwrap();
+    let sealing_path = dir.path().join("alice-sealing.pem");
+    std::fs::write(&sealing_path, id.sealing.to_pkcs8_pem()).unwrap();
+    let key_path_text = slash(&key_path);
+    let sealing_path_text = slash(&sealing_path);
+
+    let port = free_udp_port();
+    let toml = format!(
+        "global_id = \"alice@synapse.test\"\n\
+         private_key_pem_path = \"{key_path_text}\"\n\
+         sealing_key_path = \"{sealing_path_text}\"\n\
+         udp_bind_port = {port}\n\
+         replay_retention_seconds = 10\n"
+    );
+    let config = McpConfig::from_toml(&toml).expect("valid TOML");
+    let err = match SynapseMcpServer::start(config).await {
+        Ok(_) => panic!("a server started with too short a retention"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("retention"), "{err}");
+    assert!(!err.contains(&key_path_text), "{err}");
+
+    // Control: the same config, with the default retention, starts.
+    let port2 = free_udp_port();
+    let control_toml = format!(
+        "global_id = \"alice2@synapse.test\"\n\
+         private_key_pem_path = \"{key_path_text}\"\n\
+         sealing_key_path = \"{sealing_path_text}\"\n\
+         udp_bind_port = {port2}\n"
+    );
+    let control_config = McpConfig::from_toml(&control_toml).expect("valid TOML");
+    assert!(SynapseMcpServer::start(control_config).await.is_ok());
 }
