@@ -350,3 +350,143 @@ fn the_self_decrypting_encryption_is_gone() {
     );
     assert!(found.is_empty(), "{found:#?}");
 }
+
+fn free_udp_port() -> u16 {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
+    socket.local_addr().expect("local_addr").port()
+}
+
+async fn udp_node(
+    store: TrustStore,
+    sealing_key: Option<SealingKeyPair>,
+) -> (synapse::transport::TransportManager, u16) {
+    use synapse::transport::{TransportManagerBuilder, TransportType, UdpTransportFactory};
+    let port = free_udp_port();
+    let mut udp = std::collections::HashMap::new();
+    udp.insert("bind_port".to_string(), port.to_string());
+    let mut builder = TransportManagerBuilder::new()
+        .disable_transport(TransportType::Tcp)
+        .disable_transport(TransportType::Http)
+        .disable_transport(TransportType::Email)
+        .disable_transport(TransportType::AutoDiscovery)
+        .transport_config(TransportType::Udp, udp)
+        .trust_store(store);
+    if let Some(key) = sealing_key {
+        builder = builder.sealing_key(key);
+    }
+    let manager = builder.build();
+    manager
+        .register_factory(Box::new(UdpTransportFactory))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), manager.start())
+        .await
+        .expect("start() returns")
+        .expect("start() succeeds");
+    (manager, port)
+}
+
+fn send_raw(port: u16, message: &SecureMessage) {
+    let raw = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    raw.send_to(&serde_json::to_vec(message).unwrap(), ("127.0.0.1", port))
+        .unwrap();
+}
+
+async fn receive_one(
+    manager: &synapse::transport::TransportManager,
+) -> synapse::transport::ReceivedMessage {
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut batch = manager.receive_messages().await.expect("receive");
+        if let Some(first) = batch.pop() {
+            assert!(batch.is_empty(), "expected exactly one message");
+            return first;
+        }
+    }
+    panic!("no message arrived within 2 s");
+}
+
+// §8 test 1, and test 7 through a manager
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sealed_message_opens_at_its_recipient_over_udp() {
+    let alice = signer();
+    let bob_key = SealingKeyPair::generate();
+    let (sender, _) = udp_node(TrustStore::new(), None).await;
+    let (bob, bob_port) = udp_node(store_for(&alice), Some(bob_key.clone())).await;
+    let (keyless, keyless_port) = udp_node(store_for(&alice), None).await;
+
+    let m = sealed_signed(&alice, bob_key.public_key(), b"over udp");
+    for port in [bob_port, keyless_port] {
+        let target = synapse::transport::TransportTarget::new(BOB.to_string())
+            .with_address(format!("127.0.0.1:{port}"));
+        sender.send_message(&target, &m).await.expect("send");
+    }
+
+    let got = receive_one(&bob).await;
+    assert!(got.sender.is_verified(), "{:?}", got.sender);
+    assert_eq!(got.payload, opened(b"over udp"));
+    // Control: what travelled was the sealed body, not the plaintext.
+    assert!(
+        !got.incoming
+            .message
+            .encrypted_content
+            .windows(8)
+            .any(|w| w == b"over udp")
+    );
+
+    let got = receive_one(&keyless).await;
+    assert!(got.sender.is_verified());
+    assert_eq!(got.payload, Payload::CouldNotOpen(OpenError::NoSealingKey));
+}
+
+// §8 test 8
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_that_could_not_be_opened_is_never_acknowledged() {
+    use synapse::error::SynapseError;
+    let alice = signer();
+    let bob_key = SealingKeyPair::generate();
+    let mut bob_signer = CryptoManager::new();
+    bob_signer.generate_keypair().unwrap();
+    let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let reply_port = listener.local_addr().unwrap().port();
+    let (keyless, keyless_port) = udp_node(store_for(&alice), None).await;
+    let (keyed, keyed_port) = udp_node(store_for(&alice), Some(bob_key.clone())).await;
+    let mut buf = vec![0u8; 65536];
+
+    let request = |text: &[u8]| {
+        let mut m = SecureMessage::new(BOB, ALICE, text.to_vec(), SecurityLevel::Secure);
+        m.request_ack(format!("127.0.0.1:{reply_port}"));
+        sealing::seal(&mut m, bob_key.public_key()).unwrap();
+        alice.sign_secure_message(&mut m).unwrap();
+        m
+    };
+
+    send_raw(keyless_port, &request(b"unopenable here"));
+    let got = receive_one(&keyless).await;
+    assert!(got.sender.is_verified());
+    assert_eq!(got.payload, Payload::CouldNotOpen(OpenError::NoSealingKey));
+    let err = keyless.acknowledge(&got, &bob_signer).await.unwrap_err();
+    assert!(
+        matches!(err, SynapseError::InvalidMessageFormat(_)),
+        "{err:?}"
+    );
+    let nothing = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        listener.recv_from(&mut buf),
+    )
+    .await;
+    assert!(nothing.is_err(), "a refused acknowledge must send nothing");
+
+    // Control, same listener: an opened message is acknowledged.
+    send_raw(keyed_port, &request(b"opens here"));
+    let got = receive_one(&keyed).await;
+    assert_eq!(got.payload, opened(b"opens here"));
+    keyed.acknowledge(&got, &bob_signer).await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        listener.recv_from(&mut buf),
+    )
+    .await
+    .expect("the control ack arrives")
+    .unwrap();
+}
