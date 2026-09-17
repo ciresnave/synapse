@@ -460,7 +460,9 @@ throwaway test. (Why: ring's `from_pkcs8` needs v2, which Python's `cryptography
 - [ ] **Step 2: Compute the test vector independently, in Python.** In the scratchpad (not committed),
 write `vector.py`. It must:
   - take the 32-byte seed from ALICE_PEM's DER at offset 16, after asserting that the 16-byte prefix is
-    `302e020100300506032b657004220420` **or** ring's v2 prefix `3053020101300506032b657004220420`;
+    ring's v2 prefix `3051020101300506032b657004220420`. (Corrected during execution: an earlier draft
+    said `3053…`, but the keys ring actually generated begin `3051…`.) Also check that the public key
+    after the `812100` tag matches the one derived from the seed;
   - build canonical input v1 **from the spec text alone**, for the vector message in Step 3;
   - print `canonical_hex` and `sig_hex` using
     `cryptography.hazmat.primitives.asymmetric.ed25519.Ed25519PrivateKey.from_private_bytes(seed).sign(...)`;

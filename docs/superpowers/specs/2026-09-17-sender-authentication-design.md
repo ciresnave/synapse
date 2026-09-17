@@ -1,7 +1,9 @@
 # Sender authentication for `SecureMessage` — design (P2 slice a)
 
-**Status:** design for review. Written 2026-09-17 against `main` `8edce9c1`. The PR that implements
-it is held until CireSnave answers #33 §11 question 1 or reviews #33 (the PM's ruling, 2026-09-17).
+**Status:** approved by the PM on 2026-09-17 and implemented on branch `feat/sender-authentication`
+(plan: `docs/superpowers/plans/2026-09-17-sender-authentication.md`). Written against `main`
+`8edce9c1`. The PR is held until CireSnave answers #33 §11 question 1 or reviews #33 (the PM's
+ruling, 2026-09-17).
 
 **Decisions already made by the PM (2026-09-17):**
 - keys come from a pinned trust store;
