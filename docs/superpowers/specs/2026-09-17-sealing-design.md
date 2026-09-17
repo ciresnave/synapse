@@ -70,8 +70,13 @@ canonical input:
 | `Private` | **sealed** | optional |
 | `Secure` | **sealed** | yes |
 
-A receiver treats a sealed level whose body doesn't parse as sealed, or a plaintext level whose body
-starts with the sealed format, exactly as it treats any other body it can't open (§5).
+**How a receiver knows a body is sealed.** `seal` also adds a signed metadata marker,
+`synapse.sealed = "v1"`. The receiver decides from the marker, never by looking at the body's first
+byte, because a legitimate plaintext body can start with `0x01`. A relay can't remove the marker
+without breaking the signature. A sealed level with no marker, or a marker on a plaintext level, is
+treated like any other body that can't be opened (§6).
+
+*Changed during planning, 2026-09-17: this spec originally had the receiver sniff the version byte.*
 
 ## 4. Order of operations (sender)
 
