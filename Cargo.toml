@@ -260,6 +260,11 @@ name = "http_transport_demo"
 path = "examples/http_transport_demo.rs"
 required-features = ["minimal", "http"]
 
+[[bin]]
+name = "synapse-mcp"
+path = "src/bin/synapse_mcp.rs"
+required-features = ["mcp"]
+
 # REMOVED 2026-09-10: examples/multi_transport_circuit_breaker_demo.rs imported
 # EnhancedTcpTransport and EmailEnhancedTransport, whose modules are commented out in
 # src/transport/mod.rs:55 and :65 ("Temporarily disabled due to compilation issues").
