@@ -2,13 +2,16 @@
 //! Sender authentication for [`SecureMessage`](crate::types::SecureMessage).
 //!
 //! Every message carries a mandatory [`SenderProof`]. A receiver turns the proof plus keys it
-//! pinned itself into exactly one verdict; the verdict is never read from the wire.
+//! pinned itself into exactly one [`SenderVerdict`]; the verdict is never read from the wire.
 //! Design: `docs/superpowers/specs/2026-09-17-sender-authentication-design.md`.
 
+use crate::error::{CryptoError, Result};
 use crate::types::{SecureMessage, SecurityLevel};
 use chrono::Timelike;
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 /// The signature algorithm a sender used. Any other value fails to parse.
 #[derive(
@@ -127,6 +130,111 @@ pub fn truncate_timestamp_to_micros(message: &mut SecureMessage) {
 
 pub(crate) fn has_sub_micro_digits(message: &SecureMessage) -> bool {
     !message.timestamp.0.nanosecond().is_multiple_of(1_000)
+}
+
+/// What a receiver concluded about a message's sender. Computed locally; never read from the wire.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SenderVerdict {
+    Verified { key_id: String },
+    Unverifiable { reason: UnverifiableReason },
+    Contradicted { reason: ContradictedReason },
+}
+
+impl SenderVerdict {
+    pub fn is_verified(&self) -> bool {
+        matches!(self, SenderVerdict::Verified { .. })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnverifiableReason {
+    /// The sender declared `alg: none`.
+    Unsigned,
+    /// No key is pinned for `from_global_id`.
+    UnknownSender,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContradictedReason {
+    /// The timestamp has sub-microsecond digits, which v1 never signs.
+    NonCanonicalTimestamp,
+    /// The proof names a key other than the one pinned for this sender.
+    KeyMismatch,
+    /// The signature is malformed or does not verify against the pinned key.
+    BadSignature,
+}
+
+/// Ed25519 public keys pinned out of band, by global id. Nothing in a received message can add or
+/// change an entry.
+#[derive(Debug, Clone, Default)]
+pub struct TrustStore {
+    keys: HashMap<String, [u8; 32]>,
+}
+
+impl TrustStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn pin(&mut self, global_id: impl Into<String>, public_key: [u8; 32]) {
+        self.keys.insert(global_id.into(), public_key);
+    }
+
+    /// Pin a key in the PEM form `CryptoManager::get_public_key_pem` produces.
+    pub fn pin_pem(&mut self, global_id: &str, pem: &str) -> Result<()> {
+        let block = pem::parse(pem).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        let key: [u8; 32] = block.contents().try_into().map_err(|_| {
+            CryptoError::InvalidKey("Ed25519 public key must be exactly 32 bytes".to_string())
+        })?;
+        self.pin(global_id, key);
+        Ok(())
+    }
+
+    pub fn is_pinned(&self, global_id: &str) -> bool {
+        self.keys.contains_key(global_id)
+    }
+
+    /// Spec §5: the rules apply in order and the first match wins.
+    pub fn verify(&self, message: &SecureMessage) -> SenderVerdict {
+        let proof = &message.sender_proof;
+        match proof.alg {
+            ProofAlg::None => {
+                return SenderVerdict::Unverifiable {
+                    reason: UnverifiableReason::Unsigned,
+                };
+            }
+            ProofAlg::Ed25519 => {}
+        }
+        let Some(pinned) = self.keys.get(&message.from_global_id) else {
+            return SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::UnknownSender,
+            };
+        };
+        if has_sub_micro_digits(message) {
+            return SenderVerdict::Contradicted {
+                reason: ContradictedReason::NonCanonicalTimestamp,
+            };
+        }
+        let pinned_id = key_id(pinned);
+        if proof.key_id != pinned_id {
+            return SenderVerdict::Contradicted {
+                reason: ContradictedReason::KeyMismatch,
+            };
+        }
+        if proof.sig.len() != 64 {
+            return SenderVerdict::Contradicted {
+                reason: ContradictedReason::BadSignature,
+            };
+        }
+        match UnparsedPublicKey::new(&ED25519, pinned).verify(&canonical_input(message), &proof.sig)
+        {
+            Ok(()) => SenderVerdict::Verified { key_id: pinned_id },
+            Err(_) => SenderVerdict::Contradicted {
+                reason: ContradictedReason::BadSignature,
+            },
+        }
+    }
 }
 
 #[cfg(test)]

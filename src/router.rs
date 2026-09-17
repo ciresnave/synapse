@@ -81,6 +81,15 @@ impl SynapseRouter {
                 secure_msg.encrypted_content = encrypted;
             }
         }
+        // Sign as the sender, after encryption so the signature covers the bytes that are sent.
+        // Without a key pair the message goes out explicitly unsigned (alg "none"), which
+        // receivers mark Unverifiable — never silently.
+        {
+            let crypto = self.crypto.read().await;
+            if let Err(e) = crypto.sign_secure_message(&mut secure_msg) {
+                warn!("Sending {} unsigned: {}", secure_msg.message_id, e);
+            }
+        }
         {
             let email_transport = self.email.read().await;
             let simple_message = SimpleMessage {

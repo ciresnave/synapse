@@ -213,6 +213,7 @@ pub mod transport;
 // Re-export commonly used types
 pub use crypto::CryptoManager;
 pub use email::EmailTransport;
+pub use sender_auth::{SenderProof, SenderVerdict, TrustStore};
 
 // Re-export transport types needed for tests
 pub use config::Config;
