@@ -1214,7 +1214,10 @@ impl TransportManagerBuilder {
         self
     }
 
-    /// Replay window and record size (P2 slice e).
+    /// Replay window and record size (P2 slice e). An invalid config (see
+    /// [`crate::replay::ReplayConfig::validate`]) is not used: `build()` logs a warning naming the
+    /// reason and falls back to [`crate::replay::ReplayConfig::default`] instead, so replay
+    /// suppression is never silently disabled.
     pub fn replay_config(mut self, config: crate::replay::ReplayConfig) -> Self {
         self.replay = config;
         self
@@ -1230,8 +1233,18 @@ impl TransportManagerBuilder {
         let mut manager = TransportManager::new(self.config);
         manager.trust_store = TokioRwLock::new(self.trust_store);
         manager.sealing_key = TokioRwLock::new(self.sealing_key);
+        let replay = match self.replay.validate() {
+            Ok(()) => self.replay,
+            Err(reason) => {
+                warn!(
+                    "invalid replay_config ({reason}); using ReplayConfig::default() instead so \
+                     replay suppression is not silently disabled"
+                );
+                crate::replay::ReplayConfig::default()
+            }
+        };
         manager.inbound = TokioRwLock::new(crate::replay::InboundState::new(
-            self.replay,
+            replay,
             self.gate,
             chrono::Utc::now(),
         ));
@@ -1242,5 +1255,117 @@ impl TransportManagerBuilder {
 impl Default for TransportManagerBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::CryptoManager;
+    use crate::delivery_ack;
+    use crate::sender_auth::{ContradictedReason, UnverifiableReason};
+    use crate::types::SecurityLevel;
+
+    fn signer() -> CryptoManager {
+        let mut crypto = CryptoManager::new();
+        crypto.generate_keypair().unwrap();
+        crypto
+    }
+
+    /// A manager with no transports, and one message tracked as if `request_ack` had been sent
+    /// (P2 slice b), so `apply_ack` has an entry to act on.
+    async fn manager_with_tracked_ack() -> (TransportManager, SecureMessage) {
+        let manager = TransportManager::new(TransportManagerConfig::default());
+        let mut original = SecureMessage::new(
+            "bob@t",
+            "alice@t",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        original.request_ack("127.0.0.1:1");
+        manager.track_if_ack_requested(&original).await;
+        (manager, original)
+    }
+
+    // P2e review finding 1: `apply_ack`'s verdict guard (src/transport/manager.rs, "if
+    // !verdict.is_verified()") had lost its only caller once the gate started rejecting
+    // `Contradicted`/`Unverifiable` senders before they ever reach `apply_ack`. This exercises the
+    // guard directly, with a control that proves the same ack DOES apply once it is `Verified`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn apply_ack_ignores_an_unverified_or_contradicted_verdict() {
+        let (manager, original) = manager_with_tracked_ack().await;
+        let bob = signer();
+        let ack = delivery_ack::build_ack(&original, &bob).expect("build ack");
+        let message_id = original.message_id.0.to_string();
+
+        manager
+            .apply_ack(
+                &ack,
+                &SenderVerdict::Unverifiable {
+                    reason: UnverifiableReason::Unsigned,
+                },
+            )
+            .await;
+        assert_eq!(
+            manager.delivery_status(&message_id).await,
+            Some(DeliveryConfirmation::Sent),
+            "an Unverifiable verdict must not apply the ack"
+        );
+
+        manager
+            .apply_ack(
+                &ack,
+                &SenderVerdict::Contradicted {
+                    reason: ContradictedReason::BadSignature,
+                },
+            )
+            .await;
+        assert_eq!(
+            manager.delivery_status(&message_id).await,
+            Some(DeliveryConfirmation::Sent),
+            "a Contradicted verdict must not apply the ack"
+        );
+
+        // Control: the identical ack, now with a Verified verdict, DOES apply — distinguishing the
+        // guard above from a no-op.
+        manager
+            .apply_ack(
+                &ack,
+                &SenderVerdict::Verified {
+                    key_id: "irrelevant".to_string(),
+                },
+            )
+            .await;
+        assert_eq!(
+            manager.delivery_status(&message_id).await,
+            Some(DeliveryConfirmation::Acknowledged)
+        );
+    }
+
+    // P2e review finding 2: an invalid `ReplayConfig` (e.g. `capacity: 0`) must not silently
+    // disable replay suppression for a direct library consumer who bypasses the MCP config
+    // boundary. `build()` falls back to `ReplayConfig::default()` and logs why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_invalid_replay_config_falls_back_to_default_instead_of_disabling_suppression() {
+        let invalid = crate::replay::ReplayConfig {
+            capacity: 0,
+            ..crate::replay::ReplayConfig::default()
+        };
+        assert!(invalid.validate().is_err(), "the fixture must be invalid");
+
+        let manager = TransportManagerBuilder::new()
+            .replay_config(invalid)
+            .build();
+        let now = chrono::Utc::now();
+        let mut inbound = manager.inbound.write().await;
+        assert!(matches!(
+            inbound.check("k", "m", now, now),
+            crate::replay::Decision::Deliver(_)
+        ));
+        assert_eq!(
+            inbound.check("k", "m", now, now),
+            crate::replay::Decision::Drop,
+            "a repeat must still be dropped, so capacity: 0 did not disable suppression"
+        );
     }
 }
