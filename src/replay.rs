@@ -4,6 +4,7 @@
 //! Every entry point takes `now`, so this module has no clock, no I/O and no locks: the caller owns
 //! all three. See `docs/superpowers/specs/2026-09-17-replay-suppression-design.md`.
 
+use crate::sender_auth::{ContradictedReason, SenderVerdict, UnverifiableReason};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 
@@ -278,6 +279,193 @@ impl<V> Bounded<V> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GateConfig {
+    /// Deliver `Unverifiable` messages instead of dropping them. Default: false.
+    pub accept_unverified: bool,
+    /// How many distinct (claimed id, key id) pairs the knock record holds. Default: 256.
+    pub knock_capacity: usize,
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        Self {
+            accept_unverified: false,
+            knock_capacity: 256,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// Verified: its id goes in the replay record under this key id.
+    Admit {
+        key_id: String,
+    },
+    /// Unverified but accepted by configuration: delivered `NotChecked`, never recorded.
+    AdmitUnverified,
+    Reject,
+}
+
+/// Someone who tried to reach this node and was kept out. Grants nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Knock {
+    pub claimed_global_id: String,
+    pub key_id: String,
+    pub reason: &'static str,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InboundCounters {
+    pub admitted: u64,
+    pub dropped_contradicted: u64,
+    pub dropped_unverifiable: u64,
+    pub dropped_replay: u64,
+    pub delivered_stale: u64,
+    pub delivered_ahead: u64,
+    pub delivered_unchecked: u64,
+    pub delivered_not_checked: u64,
+}
+
+#[must_use]
+pub fn verdict_reason(verdict: &SenderVerdict) -> &'static str {
+    match verdict {
+        SenderVerdict::Verified { .. } => "verified",
+        SenderVerdict::Unverifiable { reason } => match reason {
+            UnverifiableReason::Unsigned => "unsigned",
+            UnverifiableReason::UnknownSender => "unknown_sender",
+        },
+        SenderVerdict::Contradicted { reason } => match reason {
+            ContradictedReason::NonCanonicalTimestamp => "non_canonical_timestamp",
+            ContradictedReason::KeyMismatch => "key_mismatch",
+            ContradictedReason::BadSignature => "bad_signature",
+        },
+    }
+}
+
+/// The gate and the guard together: what a receiver needs to decide about an inbound message.
+#[derive(Debug)]
+pub struct InboundState {
+    gate: GateConfig,
+    guard: ReplayGuard,
+    knocks: HashMap<(String, String), Knock>,
+    counters: InboundCounters,
+}
+
+impl InboundState {
+    #[must_use]
+    pub fn new(replay: ReplayConfig, gate: GateConfig, started: DateTime<Utc>) -> Self {
+        Self {
+            gate,
+            guard: ReplayGuard::new(replay, started),
+            knocks: HashMap::new(),
+            counters: InboundCounters::default(),
+        }
+    }
+
+    pub fn admit(
+        &mut self,
+        verdict: &SenderVerdict,
+        claimed_global_id: &str,
+        proof_key_id: &str,
+        now: DateTime<Utc>,
+    ) -> Admission {
+        match verdict {
+            SenderVerdict::Verified { key_id } => {
+                self.counters.admitted += 1;
+                Admission::Admit {
+                    key_id: key_id.clone(),
+                }
+            }
+            SenderVerdict::Contradicted { .. } => {
+                self.counters.dropped_contradicted += 1;
+                self.record_knock(verdict, claimed_global_id, proof_key_id, now);
+                Admission::Reject
+            }
+            SenderVerdict::Unverifiable { .. } => {
+                if self.gate.accept_unverified {
+                    self.counters.delivered_not_checked += 1;
+                    return Admission::AdmitUnverified;
+                }
+                self.counters.dropped_unverifiable += 1;
+                self.record_knock(verdict, claimed_global_id, proof_key_id, now);
+                Admission::Reject
+            }
+        }
+    }
+
+    pub fn check(
+        &mut self,
+        key_id: &str,
+        message_id: &str,
+        signed: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Decision {
+        let decision = self.guard.check(key_id, message_id, signed, now);
+        match decision {
+            Decision::Drop => self.counters.dropped_replay += 1,
+            Decision::Deliver(Freshness::Stale) => self.counters.delivered_stale += 1,
+            Decision::Deliver(Freshness::Ahead) => self.counters.delivered_ahead += 1,
+            Decision::Deliver(Freshness::Unchecked) => self.counters.delivered_unchecked += 1,
+            Decision::Deliver(Freshness::Fresh | Freshness::NotChecked) => {}
+        }
+        decision
+    }
+
+    #[must_use]
+    pub fn counters(&self) -> InboundCounters {
+        self.counters
+    }
+
+    /// The knock record, newest `last_seen` first.
+    #[must_use]
+    pub fn knocks(&self) -> Vec<Knock> {
+        let mut knocks: Vec<Knock> = self.knocks.values().cloned().collect();
+        knocks.sort_by_key(|k| std::cmp::Reverse(k.last_seen));
+        knocks
+    }
+
+    fn record_knock(
+        &mut self,
+        verdict: &SenderVerdict,
+        claimed_global_id: &str,
+        proof_key_id: &str,
+        now: DateTime<Utc>,
+    ) {
+        let key_id = if proof_key_id.is_empty() {
+            "unsigned".to_string()
+        } else {
+            proof_key_id.to_string()
+        };
+        let key = (claimed_global_id.to_string(), key_id.clone());
+        let entry = self.knocks.entry(key).or_insert_with(|| Knock {
+            claimed_global_id: claimed_global_id.to_string(),
+            key_id,
+            reason: verdict_reason(verdict),
+            first_seen: now,
+            last_seen: now,
+            count: 0,
+        });
+        entry.last_seen = now;
+        entry.reason = verdict_reason(verdict);
+        entry.count += 1;
+        while self.knocks.len() > self.gate.knock_capacity {
+            let Some(oldest) = self
+                .knocks
+                .iter()
+                .min_by_key(|(_, knock)| knock.last_seen)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.knocks.remove(&oldest);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +643,120 @@ mod tests {
         // age_of is how the caller tells an expired entry from a live one.
         assert_eq!(b.age_of("d", t(130)), Some(Duration::seconds(30)));
         assert_eq!(b.age_of("nope", t(130)), None);
+    }
+
+    use crate::sender_auth::{ContradictedReason, SenderVerdict, UnverifiableReason};
+
+    fn verified() -> SenderVerdict {
+        SenderVerdict::Verified {
+            key_id: "k1".to_string(),
+        }
+    }
+
+    fn unsigned() -> SenderVerdict {
+        SenderVerdict::Unverifiable {
+            reason: UnverifiableReason::Unsigned,
+        }
+    }
+
+    fn bad_signature() -> SenderVerdict {
+        SenderVerdict::Contradicted {
+            reason: ContradictedReason::BadSignature,
+        }
+    }
+
+    fn state(accept_unverified: bool) -> InboundState {
+        InboundState::new(
+            ReplayConfig::default(),
+            GateConfig {
+                accept_unverified,
+                knock_capacity: 4,
+            },
+            t(0),
+        )
+    }
+
+    #[test]
+    fn a_verified_sender_is_admitted_with_its_key_id() {
+        let mut s = state(false);
+        assert_eq!(
+            s.admit(&verified(), "alice@x", "k1", t(10)),
+            Admission::Admit {
+                key_id: "k1".to_string()
+            }
+        );
+        assert_eq!(s.counters().admitted, 1);
+        assert!(s.knocks().is_empty());
+    }
+
+    #[test]
+    fn unverified_is_rejected_by_default_and_recorded_as_a_knock() {
+        let mut s = state(false);
+        assert_eq!(s.admit(&unsigned(), "bob@x", "", t(10)), Admission::Reject);
+        assert_eq!(s.admit(&unsigned(), "bob@x", "", t(20)), Admission::Reject);
+        let counters = s.counters();
+        assert_eq!(counters.dropped_unverifiable, 2);
+        assert_eq!(counters.admitted, 0);
+        let knocks = s.knocks();
+        assert_eq!(knocks.len(), 1, "the same pair is one knock, counted twice");
+        assert_eq!(knocks[0].claimed_global_id, "bob@x");
+        assert_eq!(knocks[0].key_id, "unsigned");
+        assert_eq!(knocks[0].reason, "unsigned");
+        assert_eq!(knocks[0].first_seen, t(10));
+        assert_eq!(knocks[0].last_seen, t(20));
+        assert_eq!(knocks[0].count, 2);
+    }
+
+    #[test]
+    fn unverified_is_admitted_unchecked_when_the_setting_is_on() {
+        let mut s = state(true);
+        assert_eq!(
+            s.admit(&unsigned(), "bob@x", "", t(10)),
+            Admission::AdmitUnverified
+        );
+        assert_eq!(s.counters().dropped_unverifiable, 0);
+    }
+
+    #[test]
+    fn contradicted_is_rejected_under_both_settings() {
+        for accept in [false, true] {
+            let mut s = state(accept);
+            assert_eq!(
+                s.admit(&bad_signature(), "mallory@x", "k9", t(10)),
+                Admission::Reject
+            );
+            assert_eq!(s.counters().dropped_contradicted, 1);
+            assert_eq!(s.knocks()[0].reason, "bad_signature");
+        }
+    }
+
+    #[test]
+    fn the_knock_record_is_bounded_and_drops_the_least_recently_seen() {
+        let mut s = state(false);
+        for (i, id) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            s.admit(&unsigned(), id, "", t(10 + i as i64));
+        }
+        let knocks = s.knocks();
+        assert_eq!(knocks.len(), 4, "knock_capacity is 4");
+        assert!(!knocks.iter().any(|k| k.claimed_global_id == "a"));
+        assert_eq!(knocks[0].claimed_global_id, "e", "newest last_seen first");
+    }
+
+    #[test]
+    fn the_counters_follow_the_freshness_of_what_is_delivered() {
+        let mut s = state(false);
+        assert_eq!(
+            s.check("k", "m1", t(10), t(10)),
+            Decision::Deliver(Freshness::Fresh)
+        );
+        assert_eq!(s.check("k", "m1", t(10), t(11)), Decision::Drop);
+        assert_eq!(
+            s.check("k", "m2", t(10), t(400)),
+            Decision::Deliver(Freshness::Stale)
+        );
+        let counters = s.counters();
+        assert_eq!(counters.dropped_replay, 1);
+        assert_eq!(counters.delivered_stale, 1);
+        assert_eq!(counters.delivered_ahead, 0);
     }
 }
