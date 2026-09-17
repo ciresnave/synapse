@@ -265,11 +265,19 @@ router's email path is unauthenticated before this slice and remains so after it
 ## 9. Not in this slice
 
 - **Automatic peer discovery and trust on first use.** Decided 2026-09-17: its own slice, **after**
-  slice f (key rotation), because a legitimate key change must be distinguishable from an impostor
-  before first-contact identity can be durable. When it is designed: an unknown-but-continuous peer
-  will be able to **send messages only**; tools, commands and anything acted on automatically will
-  need an explicit grant. The knock record in §4 is the raw material it will build on, and it is
-  deliberately in-memory and authority-free until then.
+  the widened slice f below. An unknown-but-continuous peer will be able to **send messages only**;
+  tools, commands and anything acted on automatically will need an explicit grant. The knock record
+  in §4 is the raw material it will build on, and it is deliberately in-memory and authority-free
+  until then.
+- **Account keys and agent certificates.** Decided 2026-09-17: **slice f is widened** from "key
+  rotation and revocation" to *account keys, agent certificates, rotation and revocation*, because
+  rotation is a certificate re-signing and building the narrow half first would be rebuilt. An
+  account holder keeps one long-lived account key and signs a statement binding an agent's signing
+  and sealing keys, a label, a validity window, **coarse named permissions** and a serial. Receivers
+  pin one key per account holder, not per agent. The permissions are what a consumer authorizes an
+  action against — OverMind asked for exactly this on 2026-09-17 — while what each named permission
+  may do stays the receiver's local policy. Revocation is a statement signed by the account key,
+  with short validity windows rather than a fetched revocation list.
 - **Persistent state of any kind.** The horizon covers restarts instead.
 - **Rate limiting.** A flood of distinct verified messages is not a replay; bounding that is a
   transport concern, and the record's capacity plus the horizon keeps the memory cost fixed.
