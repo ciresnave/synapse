@@ -284,6 +284,17 @@ fn free_udp_port() -> u16 {
 }
 
 async fn udp_manager(port: u16, store: TrustStore) -> TransportManager {
+    udp_manager_with_gate(port, store, synapse::replay::GateConfig::default()).await
+}
+
+/// Like `udp_manager`, but with an explicit gate config (P2 slice e). Used only where a test's
+/// point is independent of the gate's default-deny behaviour, which
+/// `tests/replay_suppression.rs` covers.
+async fn udp_manager_with_gate(
+    port: u16,
+    store: TrustStore,
+    gate: synapse::replay::GateConfig,
+) -> TransportManager {
     let mut udp = HashMap::new();
     udp.insert("bind_port".to_string(), port.to_string());
     let manager = TransportManagerBuilder::new()
@@ -293,6 +304,7 @@ async fn udp_manager(port: u16, store: TrustStore) -> TransportManager {
         .disable_transport(TransportType::AutoDiscovery)
         .transport_config(TransportType::Udp, udp)
         .trust_store(store)
+        .gate_config(gate)
         .build();
     manager
         .register_factory(Box::new(UdpTransportFactory))
@@ -325,7 +337,18 @@ async fn verdicts_survive_a_real_udp_hop() {
         (free_udp_port(), free_udp_port(), free_udp_port());
     let sender = udp_manager(sender_port, TrustStore::new()).await;
     let trusting = udp_manager(trusting_port, store_with_alice()).await;
-    let empty = udp_manager(empty_port, TrustStore::new()).await;
+    // accept_unverified: this assertion is about the SenderVerdict computed for an unknown
+    // sender surviving a real UDP hop, not about the gate's default-deny admission (which
+    // tests/replay_suppression.rs covers); without it the message never reaches receive_messages.
+    let empty = udp_manager_with_gate(
+        empty_port,
+        TrustStore::new(),
+        synapse::replay::GateConfig {
+            accept_unverified: true,
+            ..synapse::replay::GateConfig::default()
+        },
+    )
+    .await;
 
     let message = signed_by(ALICE_PEM);
     for port in [trusting_port, empty_port] {
@@ -352,17 +375,31 @@ async fn verdicts_survive_a_real_udp_hop() {
         }
     );
 
-    // A forged datagram: a correctly shaped proof whose signature bytes were altered.
+    // A forged datagram: a correctly shaped proof whose signature bytes were altered. The gate
+    // (P2 slice e) always rejects `Contradicted` senders — see
+    // `tests/replay_suppression.rs::a_contradicted_message_is_dropped_under_both_settings` — so
+    // this can no longer be observed through `trusting.receive_messages()`; instead it is read off
+    // a raw loopback listener (still a real UDP hop) and verified against `trusting`'s trust store
+    // directly, which is what the gate itself calls internally.
     let mut forged = signed_by(ALICE_PEM);
     forged.sender_proof.sig[0] ^= 1;
+    let raw_listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let raw_listener_port = raw_listener.local_addr().unwrap().port();
     let raw = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     raw.send_to(
         &serde_json::to_vec(&forged).unwrap(),
-        ("127.0.0.1", trusting_port),
+        ("127.0.0.1", raw_listener_port),
     )
     .unwrap();
+    let mut buf = vec![0u8; 65536];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), raw_listener.recv_from(&mut buf))
+        .await
+        .expect("the forged datagram arrives")
+        .unwrap();
+    let received: SecureMessage = serde_json::from_slice(&buf[..len]).unwrap();
+    let trusting_store = trusting.trust_store().await;
     assert_eq!(
-        receive_one(&trusting).await.sender,
+        trusting_store.verify(&received),
         SenderVerdict::Contradicted {
             reason: ContradictedReason::BadSignature
         }

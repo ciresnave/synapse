@@ -19,6 +19,7 @@ use synapse::types::{SecureMessage, SecurityLevel};
 const ALICE: &str = "alice@synapse.test";
 const BOB: &str = "bob@synapse.test";
 const CAROL: &str = "carol@synapse.test";
+const CANARY: &str = "canary@synapse.test";
 
 fn identity() -> CryptoManager {
     let mut crypto = CryptoManager::new();
@@ -40,6 +41,15 @@ fn free_udp_port() -> u16 {
 }
 
 async fn node(store: TrustStore) -> (TransportManager, u16) {
+    node_with_gate(store, synapse::replay::GateConfig::default()).await
+}
+
+/// Like `node`, but with an explicit gate config (P2 slice e). Used only where a test's point is
+/// independent of the gate's default-deny behaviour, which `tests/replay_suppression.rs` covers.
+async fn node_with_gate(
+    store: TrustStore,
+    gate: synapse::replay::GateConfig,
+) -> (TransportManager, u16) {
     let port = free_udp_port();
     let mut udp = HashMap::new();
     udp.insert("bind_port".to_string(), port.to_string());
@@ -50,6 +60,7 @@ async fn node(store: TrustStore) -> (TransportManager, u16) {
         .disable_transport(TransportType::AutoDiscovery)
         .transport_config(TransportType::Udp, udp)
         .trust_store(store)
+        .gate_config(gate)
         .build();
     manager
         .register_factory(Box::new(UdpTransportFactory))
@@ -114,13 +125,17 @@ async fn receive_one(manager: &TransportManager) -> ReceivedMessage {
 
 /// Send a canary to `port` and pump `manager` until it reaches the application (up to 3 s).
 /// Returns the OTHER application messages seen meanwhile.
-async fn pump_past_canary(manager: &TransportManager, port: u16) -> Vec<ReceivedMessage> {
-    let canary = SecureMessage::new(
-        ALICE,
-        "canary@synapse.test",
-        b"canary".to_vec(),
-        SecurityLevel::Public,
-    );
+///
+/// The canary must be signed and its key pinned under `CANARY` wherever this is called
+/// (default-deny would otherwise drop the canary itself as `Unverifiable`, hanging the test), so
+/// `canary_signer` is a `CryptoManager` whose key the receiving node's trust store already pins.
+async fn pump_past_canary(
+    manager: &TransportManager,
+    port: u16,
+    canary_signer: &CryptoManager,
+) -> Vec<ReceivedMessage> {
+    let mut canary = SecureMessage::new(ALICE, CANARY, b"canary".to_vec(), SecurityLevel::Public);
+    canary_signer.sign_secure_message(&mut canary).unwrap();
     let canary_id = id_of(&canary);
     send_raw(port, &canary);
     let mut others = Vec::new();
@@ -157,21 +172,30 @@ struct Pair {
     alice_c: CryptoManager,
     bob_c: CryptoManager,
     carol_c: CryptoManager,
+    /// Signs `pump_past_canary`'s canary; pinned at `alice`'s trust store under `CANARY` so the
+    /// default-deny gate does not drop it (see ruling 6 / task-3-report.md).
+    canary_c: CryptoManager,
     alice: TransportManager,
     alice_port: u16,
     bob: TransportManager,
     bob_port: u16,
 }
 
-/// Alice pins Bob and Carol; Bob pins Alice.
+/// Alice pins Bob, Carol and the canary; Bob pins Alice.
 async fn pair() -> Pair {
-    let (alice_c, bob_c, carol_c) = (identity(), identity(), identity());
-    let (alice, alice_port) = node(pinned(&[(BOB, &bob_c), (CAROL, &carol_c)])).await;
+    let (alice_c, bob_c, carol_c, canary_c) = (identity(), identity(), identity(), identity());
+    let (alice, alice_port) = node(pinned(&[
+        (BOB, &bob_c),
+        (CAROL, &carol_c),
+        (CANARY, &canary_c),
+    ]))
+    .await;
     let (bob, bob_port) = node(pinned(&[(ALICE, &alice_c)])).await;
     Pair {
         alice_c,
         bob_c,
         carol_c,
+        canary_c,
         alice,
         alice_port,
         bob,
@@ -205,7 +229,7 @@ async fn assert_genuine_ack_is_accepted(p: &Pair, m: &SecureMessage) {
 /// the genuine-ack control.
 async fn assert_rejected(p: &Pair, m: &SecureMessage, bad: &SecureMessage) {
     send_raw(p.alice_port, bad);
-    let app = pump_past_canary(&p.alice, p.alice_port).await;
+    let app = pump_past_canary(&p.alice, p.alice_port, &p.canary_c).await;
     assert!(app.is_empty(), "an ack must never reach the application");
     assert_eq!(
         p.alice.delivery_status(&id_of(m)).await,
@@ -257,7 +281,11 @@ async fn acknowledging_twice_is_idempotent() {
         .send_message(&target(BOB, p.bob_port), &m)
         .await
         .unwrap();
-    assert!(pump_past_canary(&p.alice, p.alice_port).await.is_empty());
+    assert!(
+        pump_past_canary(&p.alice, p.alice_port, &p.canary_c)
+            .await
+            .is_empty()
+    );
     assert_eq!(
         p.alice.delivery_status(&id_of(&m)).await,
         Some(DeliveryConfirmation::Acknowledged)
@@ -270,7 +298,17 @@ async fn an_unverified_message_is_never_acknowledged_and_nothing_is_sent() {
     let (alice_c, bob_c) = (identity(), identity());
     let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let victim_port = listener.local_addr().unwrap().port();
-    let (bob_unpinned, bob_unpinned_port) = node(TrustStore::new()).await;
+    // `accept_unverified` so the unverified message still reaches the application here: this test
+    // is about `acknowledge()`'s own anti-reflector refusal, not about the gate (which defaults to
+    // deny and is covered by tests/replay_suppression.rs).
+    let (bob_unpinned, bob_unpinned_port) = node_with_gate(
+        TrustStore::new(),
+        synapse::replay::GateConfig {
+            accept_unverified: true,
+            ..synapse::replay::GateConfig::default()
+        },
+    )
+    .await;
     let (bob_pinned, bob_pinned_port) = node(pinned(&[(ALICE, &alice_c)])).await;
     let mut buf = vec![0u8; 65536];
 
@@ -379,6 +417,7 @@ async fn acknowledge_refuses_without_reply_to_and_refuses_acks() {
             key_id: "irrelevant".to_string(),
         },
         payload: synapse::sealing::Payload::Plain(Vec::new()),
+        freshness: synapse::replay::Freshness::Fresh,
     };
     let err = p.alice.acknowledge(&by_hand, &p.alice_c).await.unwrap_err();
     assert!(

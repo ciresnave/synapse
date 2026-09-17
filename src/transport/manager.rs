@@ -146,6 +146,8 @@ pub struct ReceivedMessage {
     pub sender: SenderVerdict,
     /// The body as this node could read it (P2 slice d): plain, opened, or marked unopenable.
     pub payload: crate::sealing::Payload,
+    /// Whether the signed timestamp could be checked, and what it said (P2 slice e).
+    pub freshness: crate::replay::Freshness,
 }
 
 /// A sent message that asked for an ack (P2 slice b).
@@ -181,6 +183,8 @@ pub struct TransportManager {
     outbound: TokioRwLock<HashMap<String, Outbound>>,
     /// This node's X25519 sealing key; sealed bodies are opened with it.
     sealing_key: TokioRwLock<Option<crate::sealing::SealingKeyPair>>,
+    /// The delivery gate and the replay record (P2 slice e).
+    inbound: TokioRwLock<crate::replay::InboundState>,
 }
 
 /// Unified metrics across all transports
@@ -270,6 +274,11 @@ impl TransportManager {
             trust_store: TokioRwLock::new(TrustStore::default()),
             outbound: TokioRwLock::new(HashMap::new()),
             sealing_key: TokioRwLock::new(None),
+            inbound: TokioRwLock::new(crate::replay::InboundState::new(
+                crate::replay::ReplayConfig::default(),
+                crate::replay::GateConfig::default(),
+                chrono::Utc::now(),
+            )),
         }
     }
 
@@ -623,22 +632,58 @@ impl TransportManager {
 
         let store = self.trust_store.read().await;
         let sealing_key = self.sealing_key.read().await;
+        let mut inbound = self.inbound.write().await;
+        let now = chrono::Utc::now();
         let mut delivered = Vec::with_capacity(all_messages.len());
         for incoming in all_messages {
-            let sender = store.verify(&incoming.message);
-            // Acks are control traffic: applied here, never handed to the application.
-            if delivery_ack::is_ack(&incoming.message) {
-                self.apply_ack(&incoming.message, &sender).await;
+            let message = &incoming.message;
+            let verdict = store.verify(message);
+            let admission = inbound.admit(
+                &verdict,
+                &message.from_global_id,
+                &message.sender_proof.key_id,
+                now,
+            );
+            let freshness = match admission {
+                crate::replay::Admission::Reject => continue,
+                crate::replay::Admission::AdmitUnverified => crate::replay::Freshness::NotChecked,
+                crate::replay::Admission::Admit { key_id } => {
+                    match inbound.check(
+                        &key_id,
+                        &message.message_id.0.to_string(),
+                        message.timestamp.0,
+                        now,
+                    ) {
+                        crate::replay::Decision::Drop => continue,
+                        crate::replay::Decision::Deliver(freshness) => freshness,
+                    }
+                }
+            };
+            // Acks are control traffic: applied here, never handed to the application. `apply_ack`
+            // locks only `outbound`, so holding `inbound`'s write guard here does not double-lock.
+            if delivery_ack::is_ack(message) {
+                self.apply_ack(message, &verdict).await;
                 continue;
             }
-            let payload = crate::sealing::open(&incoming.message, sealing_key.as_ref());
+            let payload = crate::sealing::open(message, sealing_key.as_ref());
             delivered.push(ReceivedMessage {
                 incoming,
-                sender,
+                sender: verdict,
                 payload,
+                freshness,
             });
         }
         Ok(delivered)
+    }
+
+    /// Counts of what was admitted, dropped and marked (P2 slice e).
+    pub async fn inbound_counters(&self) -> crate::replay::InboundCounters {
+        self.inbound.read().await.counters()
+    }
+
+    /// Who tried to reach this node and was kept out. Grants nothing.
+    pub async fn knocks(&self) -> Vec<crate::replay::Knock> {
+        self.inbound.read().await.knocks()
     }
 
     /// Get status of all transports
@@ -1105,6 +1150,8 @@ pub struct TransportManagerBuilder {
     config: TransportManagerConfig,
     trust_store: TrustStore,
     sealing_key: Option<crate::sealing::SealingKeyPair>,
+    replay: crate::replay::ReplayConfig,
+    gate: crate::replay::GateConfig,
 }
 
 impl TransportManagerBuilder {
@@ -1113,6 +1160,8 @@ impl TransportManagerBuilder {
             config: TransportManagerConfig::default(),
             trust_store: TrustStore::default(),
             sealing_key: None,
+            replay: crate::replay::ReplayConfig::default(),
+            gate: crate::replay::GateConfig::default(),
         }
     }
 
@@ -1165,10 +1214,27 @@ impl TransportManagerBuilder {
         self
     }
 
+    /// Replay window and record size (P2 slice e).
+    pub fn replay_config(mut self, config: crate::replay::ReplayConfig) -> Self {
+        self.replay = config;
+        self
+    }
+
+    /// Which sender verdicts are admitted (P2 slice e).
+    pub fn gate_config(mut self, config: crate::replay::GateConfig) -> Self {
+        self.gate = config;
+        self
+    }
+
     pub fn build(self) -> TransportManager {
         let mut manager = TransportManager::new(self.config);
         manager.trust_store = TokioRwLock::new(self.trust_store);
         manager.sealing_key = TokioRwLock::new(self.sealing_key);
+        manager.inbound = TokioRwLock::new(crate::replay::InboundState::new(
+            self.replay,
+            self.gate,
+            chrono::Utc::now(),
+        ));
         manager
     }
 }
