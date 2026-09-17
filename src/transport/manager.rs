@@ -179,8 +179,8 @@ pub struct TransportManager {
     failed_transports: TokioRwLock<HashMap<TransportType, Instant>>,
     /// Pinned sender keys; see `crate::sender_auth`.
     trust_store: TokioRwLock<TrustStore>,
-    /// Messages sent with `request_ack`, by message id. Grows until slice e bounds it.
-    outbound: TokioRwLock<HashMap<String, Outbound>>,
+    /// Messages sent with `request_ack`, by message id, bounded by age and count (P2 slice e).
+    outbound: TokioRwLock<crate::replay::Bounded<Outbound>>,
     /// This node's X25519 sealing key; sealed bodies are opened with it.
     sealing_key: TokioRwLock<Option<crate::sealing::SealingKeyPair>>,
     /// The delivery gate and the replay record (P2 slice e).
@@ -272,7 +272,10 @@ impl TransportManager {
             round_robin_index: Arc::new(Mutex::new(0)),
             failed_transports: TokioRwLock::new(HashMap::new()),
             trust_store: TokioRwLock::new(TrustStore::default()),
-            outbound: TokioRwLock::new(HashMap::new()),
+            outbound: TokioRwLock::new(crate::replay::Bounded::new(
+                chrono::Duration::hours(1),
+                10_000,
+            )),
             sealing_key: TokioRwLock::new(None),
             inbound: TokioRwLock::new(crate::replay::InboundState::new(
                 crate::replay::ReplayConfig::default(),
@@ -530,7 +533,29 @@ impl TransportManager {
     /// Acks are applied inside `receive_messages` and the manager has no background receive loop,
     /// so a status only advances while the application keeps calling `receive_messages`.
     pub async fn delivery_status(&self, message_id: &str) -> Option<DeliveryConfirmation> {
-        self.outbound.read().await.get(message_id).map(|o| o.status)
+        let now = chrono::Utc::now();
+        let mut outbound = self.outbound.write().await;
+        let ttl = outbound.ttl();
+        let expired = outbound
+            .age_of(message_id, now)
+            .is_some_and(|age| age > ttl);
+        let status = outbound.get(message_id).map(|entry| entry.status);
+        outbound.sweep(now);
+        match status {
+            // An ack that arrived is final; only an unacknowledged entry expires.
+            Some(DeliveryConfirmation::Sent | DeliveryConfirmation::Delivered) if expired => {
+                Some(DeliveryConfirmation::Expired)
+            }
+            other => other,
+        }
+    }
+
+    /// How many messages are currently tracked for an ack, after sweeping expired entries.
+    pub async fn tracked_count(&self) -> usize {
+        let now = chrono::Utc::now();
+        let mut outbound = self.outbound.write().await;
+        outbound.sweep(now);
+        outbound.len()
     }
 
     async fn track_if_ack_requested(&self, message: &SecureMessage) {
@@ -542,12 +567,12 @@ impl TransportManager {
             digest: delivery_ack::message_digest(message),
             status: DeliveryConfirmation::Sent,
         };
-        // or_insert: resending a message must never downgrade an Acknowledged entry.
-        self.outbound
-            .write()
-            .await
-            .entry(message.message_id.0.to_string())
-            .or_insert(entry);
+        let mut outbound = self.outbound.write().await;
+        // Resending a message must never downgrade an Acknowledged entry. `Bounded` has no
+        // `entry` API, so check first and only insert when absent.
+        if !outbound.contains_key(&message.message_id.0.to_string()) {
+            outbound.insert(message.message_id.0.to_string(), entry, chrono::Utc::now());
+        }
     }
 
     /// Spec §6: upgrade to Acknowledged only for a verified ack, for a tracked message, from its
@@ -1152,6 +1177,8 @@ pub struct TransportManagerBuilder {
     sealing_key: Option<crate::sealing::SealingKeyPair>,
     replay: crate::replay::ReplayConfig,
     gate: crate::replay::GateConfig,
+    tracking_ttl: chrono::Duration,
+    tracking_capacity: usize,
 }
 
 impl TransportManagerBuilder {
@@ -1162,6 +1189,8 @@ impl TransportManagerBuilder {
             sealing_key: None,
             replay: crate::replay::ReplayConfig::default(),
             gate: crate::replay::GateConfig::default(),
+            tracking_ttl: chrono::Duration::hours(1),
+            tracking_capacity: 10_000,
         }
     }
 
@@ -1229,10 +1258,21 @@ impl TransportManagerBuilder {
         self
     }
 
+    /// How long a sent message's ack is tracked, and how many at once (P2 slice e).
+    pub fn tracking_limits(mut self, ttl: chrono::Duration, capacity: usize) -> Self {
+        self.tracking_ttl = ttl;
+        self.tracking_capacity = capacity;
+        self
+    }
+
     pub fn build(self) -> TransportManager {
+        let tracking_ttl = self.tracking_ttl;
+        let tracking_capacity = self.tracking_capacity;
         let mut manager = TransportManager::new(self.config);
         manager.trust_store = TokioRwLock::new(self.trust_store);
         manager.sealing_key = TokioRwLock::new(self.sealing_key);
+        manager.outbound =
+            TokioRwLock::new(crate::replay::Bounded::new(tracking_ttl, tracking_capacity));
         let replay = match self.replay.validate() {
             Ok(()) => self.replay,
             Err(reason) => {

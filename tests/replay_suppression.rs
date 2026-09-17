@@ -332,3 +332,110 @@ async fn a_replayed_ack_is_dropped_before_it_is_applied() {
         "the status is unchanged, and the replayed ack never reached apply_ack"
     );
 }
+
+/// A manager whose ack tracking uses the given limits instead of the 1 h / 10_000 default, so the
+/// tests below can drive expiry and the capacity bound directly.
+async fn udp_node_with_tracking(
+    store: TrustStore,
+    ttl: chrono::Duration,
+    capacity: usize,
+) -> (synapse::transport::TransportManager, u16) {
+    let port = free_udp_port();
+    let mut udp = std::collections::HashMap::new();
+    udp.insert("bind_port".to_string(), port.to_string());
+    let manager = TransportManagerBuilder::new()
+        .disable_transport(TransportType::Tcp)
+        .disable_transport(TransportType::Http)
+        .disable_transport(TransportType::Email)
+        .disable_transport(TransportType::AutoDiscovery)
+        .transport_config(TransportType::Udp, udp)
+        .trust_store(store)
+        .tracking_limits(ttl, capacity)
+        .build();
+    manager
+        .register_factory(Box::new(UdpTransportFactory))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), manager.start())
+        .await
+        .expect("start() returns")
+        .expect("start() succeeds");
+    (manager, port)
+}
+
+/// A message that asks for an ack at a port nobody listens on, so no ack will ever arrive.
+fn ack_requesting_message(alice: &CryptoManager) -> SecureMessage {
+    let mut message = SecureMessage::new(
+        BOB,
+        ALICE,
+        b"please ack".to_vec(),
+        SecurityLevel::Authenticated,
+    );
+    // Nobody listens on this port: no ack ever arrives.
+    message.request_ack("127.0.0.1:1".to_string());
+    alice.sign_secure_message(&mut message).expect("sign");
+    message
+}
+
+// §10 test 12
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unacknowledged_tracked_message_expires() {
+    let alice = signer();
+    // A port nobody listens on: freed immediately after binding, so the send is fire-and-forget
+    // UDP into the void, and no ack will ever come back.
+    let dead_port = free_udp_port();
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{dead_port}"));
+
+    let (expiring, _expiring_port) =
+        udp_node_with_tracking(store_for(&alice), chrono::Duration::seconds(0), 10).await;
+    let message = ack_requesting_message(&alice);
+    let message_id = message.message_id.0.to_string();
+    expiring
+        .send_message(&target, &message)
+        .await
+        .expect("send");
+    assert_eq!(
+        expiring.delivery_status(&message_id).await,
+        Some(synapse::transport::abstraction::DeliveryConfirmation::Expired)
+    );
+
+    // Control: with the default 1 h ttl, the same send reports Sent.
+    let (default_ttl, _default_port) =
+        udp_node_with_tracking(store_for(&alice), chrono::Duration::hours(1), 10_000).await;
+    let control_message = ack_requesting_message(&alice);
+    let control_id = control_message.message_id.0.to_string();
+    default_ttl
+        .send_message(&target, &control_message)
+        .await
+        .expect("send");
+    assert_eq!(
+        default_ttl.delivery_status(&control_id).await,
+        Some(synapse::transport::abstraction::DeliveryConfirmation::Sent)
+    );
+}
+
+// §10 test 13
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ack_tracking_is_capped() {
+    let alice = signer();
+    let (bob, _port) =
+        udp_node_with_tracking(store_for(&alice), chrono::Duration::hours(1), 2).await;
+    let dead_port = free_udp_port();
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{dead_port}"));
+
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let message = ack_requesting_message(&alice);
+        ids.push(message.message_id.0.to_string());
+        bob.send_message(&target, &message).await.expect("send");
+    }
+
+    assert_eq!(bob.tracked_count().await, 2);
+    assert_eq!(bob.delivery_status(&ids[0]).await, None);
+    assert_eq!(
+        bob.delivery_status(&ids[3]).await,
+        Some(synapse::transport::abstraction::DeliveryConfirmation::Sent)
+    );
+}
