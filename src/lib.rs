@@ -206,6 +206,7 @@ pub mod identity;
 pub mod mcp_server;
 pub mod monitoring;
 pub mod network_scope;
+pub mod replay;
 pub mod router;
 pub mod router_enhanced;
 pub mod sealing;
