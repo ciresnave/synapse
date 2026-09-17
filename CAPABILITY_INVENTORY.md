@@ -427,6 +427,15 @@ mis-read an early return as the whole body.
 > `docs/superpowers/specs/2026-09-17-sender-authentication-design.md`. Its PR is held until
 > CireSnave answers #33 §11 Q1. **Until that PR merges, this heading remains true of `main`.**
 
+> **Added 2026-09-17: replay suppression and bounded inbound state are built, on branch
+> `feat/replay-suppression` (held, not on `main`).** `main` has neither. On that branch, unverified
+> senders are denied by default at the transport, with an opt-in setting to accept them and a
+> bounded record of who was refused. This is not sender authentication and does not change the
+> finding above: it decides whether to admit a message from a sender the transport could not
+> verify, not whether the sender is who it claims to be. Stated plainly, not as a caveat to bury:
+> the router's email path (`SynapseRouter`) remains unauthenticated both before and after this
+> branch, because it holds no trust store.
+
 Checked because the OverMind lane — which drives non-Claude models through MCP tools behind a
 refusal gate — asked directly whether Synapse carries a sender identity a recipient can verify
 without trusting the relay. **It does not, and the shape of the "no" matters.**
