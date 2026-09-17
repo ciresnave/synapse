@@ -69,7 +69,7 @@ pub(crate) fn to_hex(bytes: &[u8]) -> String {
 
 /// The serde name of a security level. The match is exhaustive, so a new variant fails to compile
 /// here instead of silently signing a wrong name.
-fn security_level_name(level: &SecurityLevel) -> &'static str {
+pub(crate) fn security_level_name(level: &SecurityLevel) -> &'static str {
     match level {
         SecurityLevel::Public => "public",
         SecurityLevel::Private => "private",
@@ -78,7 +78,7 @@ fn security_level_name(level: &SecurityLevel) -> &'static str {
     }
 }
 
-fn put(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn put(out: &mut Vec<u8>, bytes: &[u8]) {
     let len = u32::try_from(bytes.len()).expect("a signed field longer than 4 GiB");
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(bytes);
