@@ -19,7 +19,7 @@ use tracing::{error, info, warn};
 #[derive(Parser)]
 #[command(name = "synapse-router")]
 #[command(about = "Synapse Network Router - Routes messages between entities")]
-#[command(version = "1.1.0")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt().with_max_level(log_level).init();
 
-    info!("🚀 Starting Synapse Router v1.1.0");
+    info!("🚀 Starting Synapse Router v{}", env!("CARGO_PKG_VERSION"));
     info!("Global ID: {}", cli.global_id);
 
     // Load configuration
