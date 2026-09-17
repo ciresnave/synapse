@@ -104,7 +104,7 @@ length followed by its bytes**, in this order:
 | 6 | `security_level` | its serde name in UTF-8 (`public`, `private`, `authenticated`, `secure`) |
 | 7 | `sender_proof.key_id` | UTF-8 |
 | 8 | payload | SHA-256 of `encrypted_content` (32 bytes) |
-| 9 | `metadata` | a 4-byte count, then each pair as length-prefixed key and value, **sorted by key bytes** |
+| 9 | `metadata` | the field's bytes are a 4-byte count, then each pair as a length-prefixed key and a length-prefixed value, **sorted by key bytes** |
 
 **Not covered: `routing_path`.** Relays append to it, so a signature over it would break at the first
 hop. A consumer must treat `routing_path` as the relays' own claim.
