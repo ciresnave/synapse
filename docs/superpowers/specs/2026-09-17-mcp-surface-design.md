@@ -1,6 +1,6 @@
 # MCP stdio surface — design (P2 slice c)
 
-**Status:** design for review, written 2026-09-17. It is stacked on `feat/receiver-ack` (#38), which is
+**Status:** approved by the PM on 2026-09-17 (plan: `docs/superpowers/plans/2026-09-17-mcp-surface.md`). It is stacked on `feat/receiver-ack` (#38), which is
 stacked on `feat/sender-authentication` (#37), and all three are held until CireSnave answers #33 §11
 Q1. Each slice's commits are self-contained, so the rebase cascade stays mechanical.
 
