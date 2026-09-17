@@ -126,6 +126,9 @@ impl SynapseRouter {
     }
 
     /// Process an incoming email message
+    /// ⚠️ Unverified: senders are not authenticated on this path. The replay suppression and
+    /// delivery gate added in this slice protect `TransportManager::receive_messages`; this path
+    /// has no trust store, so it remains unauthenticated.
     async fn process_email_message(&self, email_msg: SimpleMessage) -> Result<SimpleMessage> {
         debug!("Processing email message from {}", email_msg.from_entity);
 

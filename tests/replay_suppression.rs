@@ -211,7 +211,11 @@ async fn a_contradicted_message_is_dropped_under_both_settings() {
     }
 }
 
-// §10 test 10: the suppression test. An unsigned copy must not reserve a genuine id.
+// §10 test 10: the suppression test. An unsigned copy must not reserve a genuine id. This is true
+// at the type level, not just by observed behaviour: `Admission::AdmitUnverified` is a unit
+// variant carrying no `key_id`, so there is no `key_id` to call `ReplayGuard::check` with on this
+// path, and the unsigned copy is never recorded. If `AdmitUnverified` ever gains a `key_id` field,
+// that guarantee stops holding and this test — not just the type signature — is what catches it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unsigned_copy_cannot_suppress_a_genuine_message() {
     let alice = signer();
@@ -398,6 +402,13 @@ async fn an_unacknowledged_tracked_message_expires() {
     assert_eq!(
         expiring.delivery_status(&message_id).await,
         Some(synapse::transport::abstraction::DeliveryConfirmation::Expired)
+    );
+    // Spec §6: Expired is reported for as long as the entry remains, so a SECOND call must not
+    // see it swept away by the first.
+    assert_eq!(
+        expiring.delivery_status(&message_id).await,
+        Some(synapse::transport::abstraction::DeliveryConfirmation::Expired),
+        "a second delivery_status call on an expired id must still report Expired"
     );
 
     // Control: with the default 1 h ttl, the same send reports Sent.

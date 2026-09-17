@@ -74,6 +74,9 @@ impl ReplayConfig {
         if self.capacity == 0 {
             return Err("the replay record's capacity must be at least 1");
         }
+        if self.past < Duration::zero() || self.ahead < Duration::zero() {
+            return Err("the replay window must not be negative");
+        }
         if self.retention < self.past + self.ahead {
             return Err("the replay retention must be at least the past plus ahead window");
         }
@@ -122,7 +125,9 @@ impl ReplayGuard {
 
     /// Order matters: the retention sweep runs before the lookup, so a message whose id was
     /// recorded more than `retention` ago is treated as new (never as a drop) even though the
-    /// same id was seen before. See task-1-report.md for why this differs from the brief.
+    /// same id was seen before. See
+    /// `docs/superpowers/specs/2026-09-17-replay-suppression-design.md` §5 for why this differs
+    /// from the brief.
     pub fn check(
         &mut self,
         key_id: &str,
@@ -154,7 +159,7 @@ impl ReplayGuard {
                 signed,
             },
         );
-        self.evict_for_capacity();
+        self.evict_for_capacity(now);
         Decision::Deliver(freshness)
     }
 
@@ -167,7 +172,14 @@ impl ReplayGuard {
 
     /// Evict the oldest-recorded entries until the record is back within capacity, raising the
     /// horizon past anything evicted.
-    fn evict_for_capacity(&mut self) {
+    ///
+    /// The raise is clamped to `now`: an entry signed far in the future must not push the horizon
+    /// past the wall clock, or every later message would be classified `Unchecked` for the rest of
+    /// the process's life (`Fresh` would become unreachable). Residual: a message first delivered
+    /// `Ahead` and later evicted here could, once the wall clock passes its signed time, be
+    /// delivered `Fresh` on a replay. That is outside the spec's guarantee, which is stated over
+    /// messages first delivered `Fresh`.
+    fn evict_for_capacity(&mut self, now: DateTime<Utc>) {
         while self.seen.len() > self.config.capacity {
             let Some((key, entry)) = self
                 .seen
@@ -178,9 +190,11 @@ impl ReplayGuard {
                 break;
             };
             self.seen.remove(&key);
-            // The record can no longer speak for anything signed at or before the evicted entry.
-            if entry.signed > self.horizon {
-                self.horizon = entry.signed;
+            // The record can no longer speak for anything signed at or before the evicted entry,
+            // but never past `now`.
+            let raised = entry.signed.min(now);
+            if raised > self.horizon {
+                self.horizon = raised;
             }
         }
     }
@@ -346,6 +360,11 @@ pub fn verdict_reason(verdict: &SenderVerdict) -> &'static str {
     }
 }
 
+/// Truncate an attacker-controlled string to at most 256 characters, on a char boundary.
+fn truncate_knock_string(s: &str) -> String {
+    s.chars().take(256).collect()
+}
+
 /// The gate and the guard together: what a receiver needs to decide about an inbound message.
 #[derive(Debug)]
 pub struct InboundState {
@@ -435,14 +454,18 @@ impl InboundState {
         proof_key_id: &str,
         now: DateTime<Utc>,
     ) {
+        // Both strings come off the wire before any verification, so they are attacker-controlled
+        // and unbounded in length; truncate (char-boundary-safe) before they are stored anywhere,
+        // including as map keys, so the capacity bound is over bounded keys.
+        let claimed_global_id = truncate_knock_string(claimed_global_id);
         let key_id = if proof_key_id.is_empty() {
             "unsigned".to_string()
         } else {
-            proof_key_id.to_string()
+            truncate_knock_string(proof_key_id)
         };
-        let key = (claimed_global_id.to_string(), key_id.clone());
+        let key = (claimed_global_id.clone(), key_id.clone());
         let entry = self.knocks.entry(key).or_insert_with(|| Knock {
-            claimed_global_id: claimed_global_id.to_string(),
+            claimed_global_id,
             key_id,
             reason: verdict_reason(verdict),
             first_seen: now,
@@ -611,6 +634,37 @@ mod tests {
     }
 
     #[test]
+    fn capacity_eviction_never_raises_the_horizon_past_now() {
+        let config = ReplayConfig {
+            capacity: 2,
+            ..ReplayConfig::default()
+        };
+        let mut g = ReplayGuard::new(config, t(0));
+        // A message signed far in the future is classified Ahead but still recorded.
+        assert_eq!(
+            g.check("k", "a", t(10_000_000), t(10)),
+            Decision::Deliver(Freshness::Ahead)
+        );
+        assert_eq!(
+            g.check("k", "b", t(11), t(11)),
+            Decision::Deliver(Freshness::Fresh)
+        );
+        // A third entry evicts "a" (oldest recorded_at); the raise must clamp to `now`, not
+        // jump to the year-3000 `signed` time on the evicted entry.
+        assert_eq!(
+            g.check("k", "c", t(12), t(12)),
+            Decision::Deliver(Freshness::Fresh)
+        );
+        assert!(g.horizon() <= t(12));
+        // A subsequent in-window message must still be delivered Fresh: freshness has not been
+        // permanently disabled.
+        assert_eq!(
+            g.check("k", "d", t(13), t(13)),
+            Decision::Deliver(Freshness::Fresh)
+        );
+    }
+
+    #[test]
     fn retention_shorter_than_the_window_is_refused() {
         let bad = ReplayConfig {
             past: Duration::seconds(300),
@@ -620,6 +674,38 @@ mod tests {
         };
         assert!(bad.validate().is_err());
         assert!(ReplayConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn a_negative_past_or_ahead_is_refused() {
+        let negative_past = ReplayConfig {
+            past: Duration::seconds(-1),
+            ahead: Duration::seconds(60),
+            retention: Duration::seconds(3600),
+            capacity: 10,
+        };
+        assert_eq!(
+            negative_past.validate(),
+            Err("the replay window must not be negative")
+        );
+        let negative_ahead = ReplayConfig {
+            past: Duration::seconds(60),
+            ahead: Duration::seconds(-1),
+            retention: Duration::seconds(3600),
+            capacity: 10,
+        };
+        assert_eq!(
+            negative_ahead.validate(),
+            Err("the replay window must not be negative")
+        );
+        // Control: zero is not negative and is accepted (subject to the retention check).
+        let zero = ReplayConfig {
+            past: Duration::zero(),
+            ahead: Duration::zero(),
+            retention: Duration::zero(),
+            capacity: 10,
+        };
+        assert!(zero.validate().is_ok());
     }
 
     #[test]
@@ -740,6 +826,27 @@ mod tests {
         assert_eq!(knocks.len(), 4, "knock_capacity is 4");
         assert!(!knocks.iter().any(|k| k.claimed_global_id == "a"));
         assert_eq!(knocks[0].claimed_global_id, "e", "newest last_seen first");
+    }
+
+    #[test]
+    fn a_knock_with_an_oversized_claimed_id_is_truncated_and_bounded() {
+        let mut s = state(false);
+        let huge_id: String = std::iter::repeat('a').take(10_000).collect();
+        let huge_key: String = std::iter::repeat('b').take(10_000).collect();
+        s.admit(&unsigned(), &huge_id, &huge_key, t(10));
+        let knocks = s.knocks();
+        assert_eq!(knocks.len(), 1);
+        assert_eq!(knocks[0].claimed_global_id.chars().count(), 256);
+        assert_eq!(knocks[0].key_id.chars().count(), 256);
+        // Control: a second, differently-huge pair that truncates to the SAME 256 chars is one knock.
+        let mut still_huge_id = huge_id.clone();
+        still_huge_id.push_str("more-tail-that-gets-cut-off");
+        s.admit(&unsigned(), &still_huge_id, &huge_key, t(11));
+        assert_eq!(
+            s.knocks().len(),
+            1,
+            "the capacity bound must be over the truncated key"
+        );
     }
 
     #[test]

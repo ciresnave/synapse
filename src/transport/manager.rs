@@ -534,13 +534,14 @@ impl TransportManager {
     /// so a status only advances while the application keeps calling `receive_messages`.
     pub async fn delivery_status(&self, message_id: &str) -> Option<DeliveryConfirmation> {
         let now = chrono::Utc::now();
-        let mut outbound = self.outbound.write().await;
+        let outbound = self.outbound.write().await;
         let ttl = outbound.ttl();
         let expired = outbound
             .age_of(message_id, now)
             .is_some_and(|age| age > ttl);
         let status = outbound.get(message_id).map(|entry| entry.status);
-        outbound.sweep(now);
+        // No sweep here: the spec (§6) says `Expired` is reported for as long as the entry
+        // remains. `tracked_count` and `Bounded::insert` still sweep, so the map stays bounded.
         match status {
             // An ack that arrived is final; only an unacknowledged entry expires.
             Some(DeliveryConfirmation::Sent | DeliveryConfirmation::Delivered) if expired => {
@@ -679,7 +680,14 @@ impl TransportManager {
                         message.timestamp.0,
                         now,
                     ) {
-                        crate::replay::Decision::Drop => continue,
+                        crate::replay::Decision::Drop => {
+                            debug!(
+                                message_id = %message.message_id.0,
+                                key_id = %key_id,
+                                "dropping replayed message"
+                            );
+                            continue;
+                        }
                         crate::replay::Decision::Deliver(freshness) => freshness,
                     }
                 }
