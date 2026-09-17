@@ -1,8 +1,9 @@
 # Receiver acknowledgement — design (P2 slice b)
 
-**Status:** design for review, written 2026-09-17. It is stacked on `feat/sender-authentication`
-(PR #37), which is held until CireSnave answers #33 §11 Q1, so this slice is held too. If that answer
-changes slice a, this branch is rebased.
+**Status:** approved by the PM on 2026-09-17 (plan:
+`docs/superpowers/plans/2026-09-17-receiver-acknowledgement.md`). It is stacked on
+`feat/sender-authentication` (PR #37), which is held until CireSnave answers #33 §11 Q1, so this slice
+is held too. If that answer changes slice a, this branch is rebased.
 
 **Already decided by the PM (2026-09-17):**
 - Acknowledgement is **explicit only**: the receiving application acknowledges after it has processed
@@ -199,7 +200,13 @@ The failing-test set must stay `{test_transport_error_handling}`.
 
 - **UDP loss and the `try_lock` drop in `udp_unified.rs`.** An ack can be lost. Test 2 polls, and the
   application can re-acknowledge (§5).
-- **Unbounded tracking.** Each ack-requesting send adds one entry that is never evicted. Acceptable for
-  this slice; eviction belongs with slice e.
+- **Unbounded tracking.** The tracking map grows by one entry for every message sent with
+  `request_ack`, and nothing evicts entries until slice e. The PM accepted this on 2026-09-17, on one
+  condition: **bounding this map is an acceptance criterion of slice e**, recorded in slice a's slice
+  table, so it cannot be dropped.
+- **The negative tests use a canary to prove the bad ack arrived.** Tests 5–8 send an ordinary message
+  right after the bad ack, on the same loopback path. "Status stays `Sent`" only counts once that
+  canary has reached the application. This assumes loopback UDP keeps datagram order and does not drop
+  them, which holds in practice but is not guaranteed.
 - **The sender must pin the receiver's key** to accept acks. That is by design, and the same
   pinned-key model as slice a.
