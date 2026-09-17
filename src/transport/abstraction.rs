@@ -38,6 +38,8 @@ pub trait Transport: Send + Sync {
     ) -> Result<DeliveryReceipt>;
 
     /// Receive messages from this transport
+    /// ⚠️ Unverified: senders are not authenticated here. `TransportManager::receive_messages`
+    /// pairs each message with a `SenderVerdict`.
     async fn receive_messages(&self) -> Result<Vec<IncomingMessage>>;
 
     /// Test connectivity to a target
@@ -1097,6 +1099,8 @@ impl UnifiedTransportManager {
     }
 
     /// Receive messages from all transports
+    /// ⚠️ Unverified: senders are not authenticated here. `TransportManager::receive_messages`
+    /// pairs each message with a `SenderVerdict`.
     pub async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
         let mut all_messages = Vec::new();
 

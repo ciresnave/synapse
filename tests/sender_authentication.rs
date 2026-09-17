@@ -2,11 +2,18 @@
 //! Sender authentication — spec: docs/superpowers/specs/2026-09-17-sender-authentication-design.md
 //! Test numbers refer to the spec's §10.
 
+use std::collections::HashMap;
+use std::time::Duration;
+
 use synapse::CryptoManager;
 use synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 use synapse::sender_auth::{
     ContradictedReason, ProofAlg, SenderProof, SenderVerdict, TrustStore, UnverifiableReason,
     canonical_input, key_id,
+};
+use synapse::transport::{
+    ReceivedMessage, TransportManager, TransportManagerBuilder, TransportTarget, TransportType,
+    UdpTransportFactory,
 };
 use synapse::types::{SecureMessage, SecurityLevel};
 
@@ -269,4 +276,95 @@ fn signing_without_a_key_is_an_error_not_an_empty_signature() {
     let mut m = vector_message();
     assert!(CryptoManager::new().sign_secure_message(&mut m).is_err());
     assert_eq!(m.sender_proof, SenderProof::unsigned());
+}
+
+fn free_udp_port() -> u16 {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
+    socket.local_addr().expect("local_addr").port()
+}
+
+async fn udp_manager(port: u16, store: TrustStore) -> TransportManager {
+    let mut udp = HashMap::new();
+    udp.insert("bind_port".to_string(), port.to_string());
+    let manager = TransportManagerBuilder::new()
+        .disable_transport(TransportType::Tcp)
+        .disable_transport(TransportType::Http)
+        .disable_transport(TransportType::Email)
+        .disable_transport(TransportType::AutoDiscovery)
+        .transport_config(TransportType::Udp, udp)
+        .trust_store(store)
+        .build();
+    manager
+        .register_factory(Box::new(UdpTransportFactory))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), manager.start())
+        .await
+        .expect("start() returns")
+        .expect("start() succeeds");
+    manager
+}
+
+/// Poll one reader for up to 2 s. `receive_messages` drains, so there must be a single reader.
+async fn receive_one(manager: &TransportManager) -> ReceivedMessage {
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut batch = manager.receive_messages().await.expect("receive");
+        if let Some(first) = batch.pop() {
+            assert!(batch.is_empty(), "expected exactly one message");
+            return first;
+        }
+    }
+    panic!("no message arrived within 2 s");
+}
+
+// §10 test 9: verdicts through TransportManager over a real loopback UDP socket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verdicts_survive_a_real_udp_hop() {
+    let (sender_port, trusting_port, empty_port) =
+        (free_udp_port(), free_udp_port(), free_udp_port());
+    let sender = udp_manager(sender_port, TrustStore::new()).await;
+    let trusting = udp_manager(trusting_port, store_with_alice()).await;
+    let empty = udp_manager(empty_port, TrustStore::new()).await;
+
+    let message = signed_by(ALICE_PEM);
+    for port in [trusting_port, empty_port] {
+        let target = TransportTarget::new("bob@synapse.test".to_string())
+            .with_address(format!("127.0.0.1:{port}"));
+        sender.send_message(&target, &message).await.expect("send");
+    }
+
+    let got = receive_one(&trusting).await;
+    assert_eq!(
+        got.incoming.message.encrypted_content,
+        message.encrypted_content
+    );
+    assert!(
+        got.sender.is_verified(),
+        "pinned sender should verify: {:?}",
+        got.sender
+    );
+
+    assert_eq!(
+        receive_one(&empty).await.sender,
+        SenderVerdict::Unverifiable {
+            reason: UnverifiableReason::UnknownSender
+        }
+    );
+
+    // A forged datagram: a correctly shaped proof whose signature bytes were altered.
+    let mut forged = signed_by(ALICE_PEM);
+    forged.sender_proof.sig[0] ^= 1;
+    let raw = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    raw.send_to(
+        &serde_json::to_vec(&forged).unwrap(),
+        ("127.0.0.1", trusting_port),
+    )
+    .unwrap();
+    assert_eq!(
+        receive_one(&trusting).await.sender,
+        SenderVerdict::Contradicted {
+            reason: ContradictedReason::BadSignature
+        }
+    );
 }

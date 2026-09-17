@@ -193,11 +193,12 @@ async fn main() -> Result<()> {
                 info!("No messages received");
             } else {
                 info!("Received {} messages:", messages.len());
-                for msg in messages {
+                for received in messages {
+                    let msg = &received.incoming;
                     let content_str = String::from_utf8_lossy(&msg.message.encrypted_content);
                     info!(
-                        "  Message from {} via {:?}: {}",
-                        msg.source, msg.transport_type, content_str
+                        "  Message from {} via {:?} (sender: {:?}): {}",
+                        msg.source, msg.transport_type, received.sender, content_str
                     );
                 }
             }
