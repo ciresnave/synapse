@@ -680,6 +680,23 @@ outside this pass's charter). Probe A: construct two `TcpTransportImpl` via
 `tokio::net::TcpListener` and `read_to_end`. Run with `RUST_LOG=synapse=debug` — **without it the
 causal error is invisible.**
 
+#### Update 2026-09-17: listeners bind loopback unless configured otherwise
+
+*Measured with the Windows Firewall event log. Event 2097 (by `svchost`, "Query User") is written when
+a prompt is **raised**; event 2099 (by `dllhost`) is written when someone answers it.*
+
+- **Before the fix:** synapse test runs raised **64 prompts** between 2026-09-17 03:46Z and 06:41Z.
+  - 44 came from doc-test `rust_out.exe` binaries. Each doc-test gets a fresh temp path, so every run
+    prompted again.
+  - The other 20 came from test binaries.
+- **The cause:** every listener bound `0.0.0.0`. This affected the UDP, TCP and WebSocket transports,
+  NAT traversal, mDNS, and the SMTP and IMAP servers. The email connectivity detector did the same.
+  The doc-tests reached these through `EnhancedSynapseRouter::new`.
+- **The fix:** `src/network_scope.rs` makes `BindScope::Loopback` the default, and listening on all
+  interfaces must be configured (see README, "Network exposure").
+  `tests/loopback_by_default.rs` guards the source.
+- **Acceptance:** a full `cargo test --no-fail-fast` in a fresh target directory (0 prompts raised between 09:13:34Z and 09:34:37Z at 002f762e; the same query finds 128 prompt events (64 prompts) in the pre-fix window).
+
 ### 2.3 What "verified" does and does not mean here
 
 102 passing tests over a 44,562-line crate is thin, and the distribution is skewed: `security_test`
