@@ -479,7 +479,7 @@ pub struct SecureMessage {
     pub to_global_id: String,
     pub from_global_id: String,
     pub encrypted_content: Vec<u8>,
-    pub signature: Vec<u8>,
+    pub sender_proof: crate::sender_auth::SenderProof,
     pub timestamp: DateTimeWrapper,
     pub security_level: SecurityLevel,
     #[serde(default)]
@@ -489,12 +489,11 @@ pub struct SecureMessage {
 }
 
 impl SecureMessage {
-    /// Create a new secure message
+    /// Create a new, explicitly unsigned message. Sign it with `CryptoManager::sign_secure_message`.
     pub fn new(
         to_global_id: impl Into<String>,
         from_global_id: impl Into<String>,
         encrypted_content: Vec<u8>,
-        signature: Vec<u8>,
         security_level: SecurityLevel,
     ) -> Self {
         Self {
@@ -502,7 +501,7 @@ impl SecureMessage {
             to_global_id: to_global_id.into(),
             from_global_id: from_global_id.into(),
             encrypted_content,
-            signature,
+            sender_proof: crate::sender_auth::SenderProof::unsigned(),
             timestamp: DateTimeWrapper::new(chrono::Utc::now()),
             security_level,
             routing_path: Vec::new(),

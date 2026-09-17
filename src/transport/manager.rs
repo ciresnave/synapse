@@ -6,6 +6,7 @@
 //! automatic failover, and unified metrics.
 
 use super::abstraction::*;
+use crate::sender_auth::{SenderVerdict, TrustStore};
 use crate::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
     error::Result,
@@ -135,6 +136,13 @@ impl Default for SelectionWeights {
     }
 }
 
+/// A received message together with what this node concluded about its sender.
+#[derive(Debug, Clone)]
+pub struct ReceivedMessage {
+    pub incoming: IncomingMessage,
+    pub sender: SenderVerdict,
+}
+
 /// Main TransportManager that provides unified transport abstraction
 pub struct TransportManager {
     /// Configuration
@@ -155,6 +163,8 @@ pub struct TransportManager {
     round_robin_index: Arc<Mutex<usize>>,
     /// Failed transports and their recovery times
     failed_transports: TokioRwLock<HashMap<TransportType, Instant>>,
+    /// Pinned sender keys; see `crate::sender_auth`.
+    trust_store: TokioRwLock<TrustStore>,
 }
 
 /// Unified metrics across all transports
@@ -241,6 +251,7 @@ impl TransportManager {
             selection_weights: Arc::new(RwLock::new(SelectionWeights::default())),
             round_robin_index: Arc::new(Mutex::new(0)),
             failed_transports: TokioRwLock::new(HashMap::new()),
+            trust_store: TokioRwLock::new(TrustStore::default()),
         }
     }
 
@@ -445,8 +456,18 @@ impl TransportManager {
         ))
     }
 
-    /// Receive messages from all active transports
-    pub async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
+    /// A snapshot of the pinned sender keys.
+    pub async fn trust_store(&self) -> TrustStore {
+        self.trust_store.read().await.clone()
+    }
+
+    /// Replace the pinned sender keys.
+    pub async fn set_trust_store(&self, store: TrustStore) {
+        *self.trust_store.write().await = store;
+    }
+
+    /// Receive messages from all active transports, each paired with a sender verdict.
+    pub async fn receive_messages(&self) -> Result<Vec<ReceivedMessage>> {
         let mut all_messages = Vec::new();
 
         let transports = self.transports.read().await;
@@ -471,7 +492,14 @@ impl TransportManager {
             }
         }
 
-        Ok(all_messages)
+        let store = self.trust_store.read().await;
+        Ok(all_messages
+            .into_iter()
+            .map(|incoming| {
+                let sender = store.verify(&incoming.message);
+                ReceivedMessage { incoming, sender }
+            })
+            .collect())
     }
 
     /// Get status of all transports
@@ -936,12 +964,14 @@ impl TransportManager {
 /// Builder pattern for TransportManager configuration
 pub struct TransportManagerBuilder {
     config: TransportManagerConfig,
+    trust_store: TrustStore,
 }
 
 impl TransportManagerBuilder {
     pub fn new() -> Self {
         Self {
             config: TransportManagerConfig::default(),
+            trust_store: TrustStore::default(),
         }
     }
 
@@ -983,8 +1013,15 @@ impl TransportManagerBuilder {
         self
     }
 
+    pub fn trust_store(mut self, store: TrustStore) -> Self {
+        self.trust_store = store;
+        self
+    }
+
     pub fn build(self) -> TransportManager {
-        TransportManager::new(self.config)
+        let mut manager = TransportManager::new(self.config);
+        manager.trust_store = TokioRwLock::new(self.trust_store);
+        manager
     }
 }
 

@@ -205,6 +205,7 @@ pub mod monitoring;
 pub mod network_scope;
 pub mod router;
 pub mod router_enhanced;
+pub mod sender_auth;
 pub mod streaming;
 
 pub mod transport;
@@ -212,6 +213,7 @@ pub mod transport;
 // Re-export commonly used types
 pub use crypto::CryptoManager;
 pub use email::EmailTransport;
+pub use sender_auth::{SenderProof, SenderVerdict, TrustStore};
 
 // Re-export transport types needed for tests
 pub use config::Config;

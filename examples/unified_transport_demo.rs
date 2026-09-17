@@ -77,7 +77,6 @@ async fn main() -> Result<()> {
         "demo-recipient".to_string(),
         "demo-sender".to_string(),
         "This is a real-time message!".as_bytes().to_vec(),
-        vec![], // signature placeholder
         SecurityLevel::Secure,
     );
 
@@ -108,7 +107,6 @@ async fn main() -> Result<()> {
         "This is a background message with more data that requires reliability."
             .as_bytes()
             .to_vec(),
-        vec![], // signature placeholder
         SecurityLevel::Secure,
     );
 
@@ -195,11 +193,12 @@ async fn main() -> Result<()> {
                 info!("No messages received");
             } else {
                 info!("Received {} messages:", messages.len());
-                for msg in messages {
+                for received in messages {
+                    let msg = &received.incoming;
                     let content_str = String::from_utf8_lossy(&msg.message.encrypted_content);
                     info!(
-                        "  Message from {} via {:?}: {}",
-                        msg.source, msg.transport_type, content_str
+                        "  Message from {} via {:?} (sender: {:?}): {}",
+                        msg.source, msg.transport_type, received.sender, content_str
                     );
                 }
             }
@@ -221,7 +220,6 @@ async fn main() -> Result<()> {
         "demo-recipient".to_string(),
         "demo-sender".to_string(),
         "This message should trigger failover".as_bytes().to_vec(),
-        vec![], // signature placeholder
         SecurityLevel::Secure,
     );
 

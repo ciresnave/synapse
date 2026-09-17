@@ -215,6 +215,41 @@ impl CryptoManager {
         }
     }
 
+    /// Our Ed25519 public key as raw bytes.
+    pub fn public_key_bytes(&self) -> Result<[u8; 32]> {
+        let key_pair = self
+            .key_pair
+            .as_ref()
+            .ok_or_else(|| CryptoError::KeyNotFound("No private key loaded".to_string()))?;
+        let mut out = [0u8; 32];
+        out.copy_from_slice(key_pair.public_key().as_ref());
+        Ok(out)
+    }
+
+    /// Sign `message` as its sender (sender-authentication spec §7). Truncates the timestamp to
+    /// whole microseconds, sets the proof's `key_id`, and signs canonical input v1. Errors if no
+    /// key pair is loaded, and never leaves an empty signature behind.
+    pub fn sign_secure_message(&self, message: &mut crate::types::SecureMessage) -> Result<()> {
+        use crate::sender_auth::{
+            ProofAlg, SenderProof, canonical_input, key_id, truncate_timestamp_to_micros,
+        };
+
+        let key_pair = self
+            .key_pair
+            .as_ref()
+            .ok_or_else(|| CryptoError::KeyNotFound("No private key loaded".to_string()))?;
+        let public = self.public_key_bytes()?;
+        truncate_timestamp_to_micros(message);
+        message.sender_proof = SenderProof {
+            alg: ProofAlg::Ed25519,
+            key_id: key_id(&public),
+            sig: Vec::new(),
+        };
+        let signature = key_pair.sign(&canonical_input(message));
+        message.sender_proof.sig = signature.as_ref().to_vec();
+        Ok(())
+    }
+
     /// Generate a secure hash of data
     pub fn hash_data(&self, data: &[u8]) -> String {
         let mut hasher = Sha256::default();

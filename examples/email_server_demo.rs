@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
         to_global_id: "test@example.com".to_string(),
         from_global_id: "sender@synapse.local".to_string(),
         encrypted_content: "Hello from EMRP Email Server!".as_bytes().to_vec(),
-        signature: vec![],
+        sender_proof: synapse::sender_auth::SenderProof::unsigned(),
         timestamp: DateTimeWrapper(Utc::now()),
         security_level: SecurityLevel::Public,
         routing_path: vec![],

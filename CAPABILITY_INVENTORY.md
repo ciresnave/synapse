@@ -413,6 +413,12 @@ mis-read an early return as the whole body.
 
 #### ⚠️ NO MESSAGE'S SENDER IS EVER AUTHENTICATED, AND THE TYPE SAYS OTHERWISE
 
+> **Added 2026-09-17: a fix is built, on branch `feat/sender-authentication`, not on `main`.**
+> The branch has a mandatory `sender_proof`, a pinned `TrustStore`, and receiver-computed
+> verdicts from `TransportManager::receive_messages`. The design is
+> `docs/superpowers/specs/2026-09-17-sender-authentication-design.md`. Its PR is held until
+> CireSnave answers #33 §11 Q1. **Until that PR merges, this heading remains true of `main`.**
+
 Checked because the OverMind lane — which drives non-Claude models through MCP tools behind a
 refusal gate — asked directly whether Synapse carries a sender identity a recipient can verify
 without trusting the relay. **It does not, and the shape of the "no" matters.**

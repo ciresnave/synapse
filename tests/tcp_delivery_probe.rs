@@ -87,7 +87,6 @@ async fn a_receipted_tcp_message_actually_arrives() {
         "receiver-id",
         "sender-id",
         payload.clone(),
-        Vec::new(),
         SecurityLevel::Authenticated,
     );
     let target =

@@ -65,7 +65,7 @@ impl SynapseRouter {
                 to_global_id: destination_global_id.clone(),
                 from_global_id: self.our_global_id.clone(),
                 encrypted_content: Vec::new(),
-                signature: Vec::new(),
+                sender_proof: crate::sender_auth::SenderProof::unsigned(),
                 timestamp: DateTimeWrapper::new(chrono::Utc::now()),
                 security_level: SecurityLevel::Authenticated,
                 routing_path: Vec::new(),
@@ -81,12 +81,15 @@ impl SynapseRouter {
                 secure_msg.encrypted_content = encrypted;
             }
         }
-        // Sign the message
-        let signature = {
+        // Sign as the sender, after encryption so the signature covers the bytes that are sent.
+        // Without a key pair the message goes out explicitly unsigned (alg "none"), which
+        // receivers mark Unverifiable — never silently.
+        {
             let crypto = self.crypto.read().await;
-            crypto.sign_message(&simple_msg.content).unwrap_or_default()
-        };
-        secure_msg.signature = signature;
+            if let Err(e) = crypto.sign_secure_message(&mut secure_msg) {
+                warn!("Sending {} unsigned: {}", secure_msg.message_id, e);
+            }
+        }
         {
             let email_transport = self.email.read().await;
             let simple_message = SimpleMessage {
@@ -103,6 +106,8 @@ impl SynapseRouter {
     }
 
     /// Receive messages from all transports
+    /// ⚠️ Unverified: senders are not authenticated here. `TransportManager::receive_messages`
+    /// pairs each message with a `SenderVerdict`.
     pub async fn receive_messages(&self) -> Result<Vec<SimpleMessage>> {
         let mut all_messages = Vec::new();
         // Get messages from email transport
@@ -209,7 +214,7 @@ impl SynapseRouter {
             to_global_id: simple_msg.to.clone(),
             from_global_id: self.our_global_id.clone(),
             encrypted_content: Vec::new(),
-            signature: Vec::new(),
+            sender_proof: crate::sender_auth::SenderProof::unsigned(),
             timestamp: DateTimeWrapper::new(chrono::Utc::now()),
             security_level: SecurityLevel::Authenticated,
             routing_path: Vec::new(),

@@ -388,7 +388,7 @@ impl SynapseSmtpServer {
             to_global_id: message.to[0].clone(), // Use first recipient
             from_global_id: message.from,
             encrypted_content: message.data,
-            signature: Vec::new(),
+            sender_proof: crate::sender_auth::SenderProof::unsigned(),
             timestamp: DateTimeWrapper::new(Utc::now()),
             security_level: crate::types::SecurityLevel::Private,
             routing_path: Vec::new(),

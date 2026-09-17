@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         to_global_id: "test_recipient".to_string(),
         from_global_id: "test_sender".to_string(),
         encrypted_content: b"Hello, NAT traversal world!".to_vec(),
-        signature: Vec::new(),
+        sender_proof: synapse::sender_auth::SenderProof::unsigned(),
         timestamp: DateTimeWrapper::new(Utc::now()),
         security_level: SecurityLevel::Public,
         routing_path: Vec::new(),
