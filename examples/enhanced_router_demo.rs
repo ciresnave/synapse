@@ -272,6 +272,7 @@ fn create_demo_config() -> Config {
             trusted_domains: vec!["synapse.local".to_string()],
             require_encryption_for: vec!["AiModel".to_string()],
         },
+        network: Default::default(),
         logging: LoggingConfig {
             level: "info".to_string(),
             format: "pretty".to_string(),

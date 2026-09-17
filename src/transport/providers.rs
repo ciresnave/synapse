@@ -35,7 +35,7 @@ pub struct ProductionTransportProvider;
 
 #[async_trait]
 impl TransportProvider for ProductionTransportProvider {
-    async fn create_tcp_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
+    async fn create_tcp_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use super::tcp_unified::TcpTransportImpl;
@@ -44,6 +44,10 @@ impl TransportProvider for ProductionTransportProvider {
             let mut tcp_config = HashMap::new();
             tcp_config.insert("listen_port".to_string(), "8080".to_string());
             tcp_config.insert("connection_timeout_ms".to_string(), "10000".to_string());
+            tcp_config.insert(
+                crate::network_scope::BIND_SCOPE_KEY.to_string(),
+                config.network.bind_scope.config_value().to_string(),
+            );
 
             match TcpTransportImpl::new(&tcp_config).await {
                 Ok(transport) => {
@@ -60,9 +64,22 @@ impl TransportProvider for ProductionTransportProvider {
         Ok(None)
     }
 
-    async fn create_mdns_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        use crate::transport::mdns_enhanced::EnhancedMdnsTransport;
-        match EnhancedMdnsTransport::new("_synapse._tcp.local".to_string(), 8080, None).await {
+    async fn create_mdns_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>> {
+        use crate::transport::mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig};
+        let bind_scope = config.network.bind_scope;
+        if !bind_scope.is_all_interfaces() {
+            info!(
+                "mDNS transport not created: set network.bind_scope = \"all_interfaces\" to enable it"
+            );
+            return Ok(None);
+        }
+        let mdns_config = MdnsConfig {
+            bind_scope,
+            ..MdnsConfig::default()
+        };
+        match EnhancedMdnsTransport::new("_synapse._tcp.local".to_string(), 8080, Some(mdns_config))
+            .await
+        {
             Ok(transport) => {
                 tracing::info!("mDNS transport initialized");
                 Ok(Some(Arc::new(transport) as Arc<dyn abstraction::Transport>))
@@ -74,11 +91,11 @@ impl TransportProvider for ProductionTransportProvider {
         }
     }
 
-    async fn create_nat_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
+    async fn create_nat_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use super::nat_traversal::NatTraversalTransport;
-            match NatTraversalTransport::new(8080).await {
+            match NatTraversalTransport::new_with_scope(8080, config.network.bind_scope).await {
                 Ok(transport) => {
                     tracing::info!("NAT traversal transport initialized");
                     Ok(Some(Arc::new(transport)))

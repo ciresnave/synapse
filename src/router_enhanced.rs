@@ -419,7 +419,8 @@ impl EnhancedSynapseRouter {
             };
 
         // Try to initialize email server with connectivity detection
-        let email_server = match SynapseEmailServer::new().await {
+        let email_server = match SynapseEmailServer::new_with_scope(config.network.bind_scope).await
+        {
             Ok(server) => {
                 let connectivity = server.get_connectivity();
                 match &connectivity.recommended_config {

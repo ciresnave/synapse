@@ -27,10 +27,15 @@ pub struct SynapseEmailServer {
 }
 
 impl SynapseEmailServer {
-    /// Create a new email server with automatic configuration
+    /// Create a new email server with automatic configuration, listening on loopback only.
     pub async fn new() -> Result<Self> {
+        Self::new_with_scope(crate::network_scope::BindScope::default()).await
+    }
+
+    /// Create a new email server that probes and listens in `bind_scope`.
+    pub async fn new_with_scope(bind_scope: crate::network_scope::BindScope) -> Result<Self> {
         // Assess connectivity first
-        let detector = ConnectivityDetector::default();
+        let detector = ConnectivityDetector::default().with_bind_scope(bind_scope);
         let connectivity = detector.assess_connectivity().await?;
 
         info!(
@@ -45,18 +50,26 @@ impl SynapseEmailServer {
         let smtp_config = match &connectivity.recommended_config {
             ServerRecommendation::RunLocalServer { smtp_port, .. } => SmtpServerConfig {
                 port: *smtp_port,
+                bind_scope,
                 ..Default::default()
             },
-            _ => SmtpServerConfig::default(),
+            _ => SmtpServerConfig {
+                bind_scope,
+                ..Default::default()
+            },
         };
 
         // Configure IMAP server
         let imap_config = match &connectivity.recommended_config {
             ServerRecommendation::RunLocalServer { imap_port, .. } => ImapServerConfig {
                 port: *imap_port,
+                bind_scope,
                 ..Default::default()
             },
-            _ => ImapServerConfig::default(),
+            _ => ImapServerConfig {
+                bind_scope,
+                ..Default::default()
+            },
         };
 
         // Shared message store

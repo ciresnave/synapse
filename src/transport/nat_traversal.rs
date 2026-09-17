@@ -34,6 +34,8 @@ pub struct TurnServer {
 /// Real NAT traversal transport with functional implementations
 pub struct NatTraversalTransport {
     local_port: u16,
+    /// Loopback (the default) listens on 127.0.0.1 and skips STUN and UPnP discovery.
+    bind_scope: crate::network_scope::BindScope,
     stun_servers: Vec<String>,
     turn_servers: Vec<TurnServer>,
     upnp_enabled: bool,
@@ -75,7 +77,17 @@ pub struct UpnpMapping {
 }
 
 impl NatTraversalTransport {
+    /// A loopback-only transport; see [`Self::new_with_scope`] to listen on every interface.
     pub async fn new(local_port: u16) -> Result<Self> {
+        Self::new_with_scope(local_port, crate::network_scope::BindScope::default()).await
+    }
+
+    /// Create a transport that listens in `bind_scope`. STUN and UPnP discovery only run under
+    /// `BindScope::AllInterfaces`.
+    pub async fn new_with_scope(
+        local_port: u16,
+        bind_scope: crate::network_scope::BindScope,
+    ) -> Result<Self> {
         let stun_servers = vec![
             "stun.l.google.com:19302".to_string(),
             "stun1.l.google.com:19302".to_string(),
@@ -90,6 +102,7 @@ impl NatTraversalTransport {
 
         Ok(Self {
             local_port,
+            bind_scope,
             stun_servers,
             turn_servers: Vec::new(),
             upnp_enabled: true,
@@ -109,6 +122,11 @@ impl NatTraversalTransport {
 
     /// Real STUN discovery using proper STUN protocol implementation
     pub async fn discover_external_address(&mut self) -> Result<SocketAddr> {
+        if !self.bind_scope.is_all_interfaces() {
+            return Err(SynapseError::TransportError(
+                "STUN discovery is off: bind_scope is loopback".into(),
+            ));
+        }
         for stun_server in &self.stun_servers.clone() {
             debug!("Trying STUN server: {}", stun_server);
 
@@ -135,7 +153,7 @@ impl NatTraversalTransport {
 
     /// Real STUN query implementation with proper STUN protocol
     async fn stun_query(&self, stun_server: &str) -> Result<SocketAddr> {
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", self.local_port))
+        let socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
             .await
             .map_err(|e| {
                 SynapseError::TransportError(format!("Failed to bind UDP socket: {}", e))
@@ -353,6 +371,11 @@ impl NatTraversalTransport {
         if !self.upnp_enabled {
             return Err(SynapseError::TransportError("UPnP disabled".into()));
         }
+        if !self.bind_scope.is_all_interfaces() {
+            return Err(SynapseError::TransportError(
+                "UPnP discovery is off: bind_scope is loopback".into(),
+            ));
+        }
 
         info!(
             "Attempting UPnP port mapping discovery for port {}",
@@ -394,9 +417,11 @@ impl NatTraversalTransport {
 
     /// Real UPnP gateway discovery using SSDP
     async fn discover_upnp_gateway(&self) -> Result<String> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| {
-            SynapseError::TransportError(format!("Failed to bind UPnP socket: {}", e))
-        })?;
+        let socket = UdpSocket::bind(self.bind_scope.listen_addr(0))
+            .await
+            .map_err(|e| {
+                SynapseError::TransportError(format!("Failed to bind UPnP socket: {}", e))
+            })?;
 
         // SSDP M-SEARCH request for UPnP IGD
         let ssdp_request = "M-SEARCH * HTTP/1.1\r\n\
@@ -495,13 +520,11 @@ impl NatTraversalTransport {
         )));
 
         // Add any interface
-        interfaces.push(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::UNSPECIFIED,
-            self.local_port,
-        )));
+        interfaces
+            .push(crate::network_scope::BindScope::AllInterfaces.listen_addr(self.local_port));
 
         // Try to bind to discover actual local address
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await
+        if let Ok(socket) = UdpSocket::bind(self.bind_scope.listen_addr(0)).await
             && let Ok(local_addr) = socket.local_addr()
             && !interfaces.contains(&local_addr)
         {
@@ -669,7 +692,10 @@ impl Transport for NatTraversalTransport {
             // Try a connectivity test
             if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
                 // Test with a simple UDP probe
-                if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await {
+                if let Ok(socket) =
+                    UdpSocket::bind(crate::network_scope::outbound_udp_local_addr(&socket_addr))
+                        .await
+                {
                     let test_data = b"connectivity_test";
                     match timeout(
                         Duration::from_millis(500),
@@ -729,7 +755,7 @@ impl Transport for NatTraversalTransport {
         let socket = {
             let mut socket_lock = self.socket.lock().await;
             if socket_lock.is_none() {
-                let new_socket = UdpSocket::bind(format!("0.0.0.0:{}", self.local_port))
+                let new_socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
                     .await
                     .map_err(|e| {
                         SynapseError::TransportError(format!("Failed to bind socket: {}", e))
@@ -738,9 +764,11 @@ impl Transport for NatTraversalTransport {
             }
 
             // We can't clone the socket, so we'll create a new one for sending
-            UdpSocket::bind("0.0.0.0:0").await.map_err(|e| {
-                SynapseError::TransportError(format!("Failed to create send socket: {}", e))
-            })?
+            UdpSocket::bind(crate::network_scope::outbound_udp_local_addr(&target_addr))
+                .await
+                .map_err(|e| {
+                    SynapseError::TransportError(format!("Failed to create send socket: {}", e))
+                })?
         };
 
         // Serialize message to JSON
@@ -785,7 +813,7 @@ impl Transport for NatTraversalTransport {
         let socket = {
             let mut socket_lock = self.socket.lock().await;
             if socket_lock.is_none() {
-                let new_socket = UdpSocket::bind(format!("0.0.0.0:{}", self.local_port))
+                let new_socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
                     .await
                     .map_err(|e| {
                         SynapseError::TransportError(format!("Failed to bind socket: {}", e))
@@ -795,7 +823,7 @@ impl Transport for NatTraversalTransport {
             }
 
             // Create a new socket for receiving (since we can't clone)
-            UdpSocket::bind(format!("0.0.0.0:{}", self.local_port))
+            UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
                 .await
                 .map_err(|e| {
                     SynapseError::TransportError(format!("Failed to create receive socket: {}", e))
@@ -903,7 +931,7 @@ impl Transport for NatTraversalTransport {
         {
             let mut socket_lock = self.socket.lock().await;
             if socket_lock.is_none() {
-                let socket = UdpSocket::bind(format!("0.0.0.0:{}", self.local_port))
+                let socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
                     .await
                     .map_err(|e| {
                         SynapseError::TransportError(format!("Failed to bind socket: {}", e))
@@ -916,15 +944,20 @@ impl Transport for NatTraversalTransport {
             }
         }
 
-        // Start NAT traversal discovery
-        tokio::spawn({
-            let transport = self.clone();
-            async move {
-                if let Err(e) = transport.run_nat_discovery().await {
-                    warn!("NAT discovery failed: {}", e);
+        // Start NAT traversal discovery. It contacts STUN servers and UPnP gateways off this
+        // machine, so it only runs when every interface is in scope.
+        if !self.bind_scope.is_all_interfaces() {
+            info!("NAT discovery skipped: bind_scope is loopback");
+        } else {
+            tokio::spawn({
+                let transport = self.clone();
+                async move {
+                    if let Err(e) = transport.run_nat_discovery().await {
+                        warn!("NAT discovery failed: {}", e);
+                    }
                 }
-            }
-        });
+            });
+        }
 
         *is_running = true;
         info!("NAT traversal transport started successfully");
@@ -1074,6 +1107,7 @@ impl Clone for NatTraversalTransport {
     fn clone(&self) -> Self {
         Self {
             local_port: self.local_port,
+            bind_scope: self.bind_scope,
             stun_servers: self.stun_servers.clone(),
             turn_servers: self.turn_servers.clone(),
             upnp_enabled: self.upnp_enabled,

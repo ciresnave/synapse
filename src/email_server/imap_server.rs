@@ -32,6 +32,8 @@ pub struct ImapServerConfig {
     pub enable_idle: bool,
     /// Performance optimization
     pub performance: ImapPerformanceConfig,
+    /// Which interfaces the server listens on (loopback by default)
+    pub bind_scope: crate::network_scope::BindScope,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +77,7 @@ impl Default for ImapServerConfig {
                 idle_timeout: 1740, // 29 minutes (RFC requirement)
                 enable_compression: true,
             },
+            bind_scope: crate::network_scope::BindScope::default(),
         }
     }
 }
@@ -96,7 +99,7 @@ impl SynapseImapServer {
 
     /// Start the IMAP server
     pub async fn start(&self) -> Result<()> {
-        let addr = format!("0.0.0.0:{}", self.config.port);
+        let addr = self.config.bind_scope.listen_addr(self.config.port);
         let listener = TcpListener::bind(&addr).await.map_err(|e| {
             SynapseError::NetworkError(format!("Failed to bind IMAP server to {addr}: {e}"))
         })?;

@@ -2,7 +2,8 @@
 //! External connectivity detection for email server accessibility
 
 use crate::error::{Result, SynapseError};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use crate::network_scope::{BindScope, outbound_udp_local_addr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::time::timeout;
@@ -56,6 +57,8 @@ pub struct ConnectivityDetector {
     /// Ports to test for availability
     smtp_ports: Vec<u16>,
     imap_ports: Vec<u16>,
+    /// Loopback (the default) probes ports on 127.0.0.1 and skips external-IP detection.
+    bind_scope: BindScope,
 }
 
 impl Default for ConnectivityDetector {
@@ -64,11 +67,18 @@ impl Default for ConnectivityDetector {
             test_timeout: Duration::from_secs(10),
             smtp_ports: vec![25, 587, 2525], // Standard, submission, alternative
             imap_ports: vec![143, 993, 1143], // Standard, SSL, alternative
+            bind_scope: BindScope::default(),
         }
     }
 }
 
 impl ConnectivityDetector {
+    /// Probe in `bind_scope` instead of the loopback default.
+    pub fn with_bind_scope(mut self, bind_scope: BindScope) -> Self {
+        self.bind_scope = bind_scope;
+        self
+    }
+
     /// Perform comprehensive connectivity assessment
     pub async fn assess_connectivity(&self) -> Result<ConnectivityAssessment> {
         info!("Starting connectivity assessment for email server...");
@@ -112,7 +122,7 @@ impl ConnectivityDetector {
 
             match timeout(
                 self.test_timeout,
-                TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)),
+                TcpListener::bind(self.bind_scope.listen_addr(port)),
             )
             .await
             {
@@ -135,11 +145,15 @@ impl ConnectivityDetector {
 
     /// Detect external IP address
     async fn detect_external_ip(&self) -> Option<IpAddr> {
+        if !self.bind_scope.is_all_interfaces() {
+            debug!("External IP detection skipped: bind_scope is loopback");
+            return None;
+        }
         debug!("Detecting external IP address...");
 
         // Method 1: Try to connect to external services and check local address
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await
-            && socket.connect("8.8.8.8:53").await.is_ok()
+        if let Ok(socket) = UdpSocket::bind(outbound_udp_local_addr(&google_dns())).await
+            && socket.connect(google_dns()).await.is_ok()
             && let Ok(local_addr) = socket.local_addr()
         {
             let ip = local_addr.ip();
@@ -150,8 +164,8 @@ impl ConnectivityDetector {
         }
 
         // Method 2: Check for common public IP patterns
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await
-            && socket.connect("1.1.1.1:53").await.is_ok()
+        if let Ok(socket) = UdpSocket::bind(outbound_udp_local_addr(&cloudflare_dns())).await
+            && socket.connect(cloudflare_dns()).await.is_ok()
             && let Ok(local_addr) = socket.local_addr()
         {
             let ip = local_addr.ip();
@@ -254,7 +268,7 @@ impl ConnectivityDetector {
         debug!("Testing external accessibility of port {}", port);
 
         // Bind to the port
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
+        let addr = self.bind_scope.listen_addr(port);
         let _listener = timeout(self.test_timeout, TcpListener::bind(addr))
             .await
             .map_err(|_| SynapseError::NetworkError("Timeout binding to port".to_string()))?
@@ -265,4 +279,12 @@ impl ConnectivityDetector {
         // In production, this would test external connectivity via UPnP or external services
         Ok(false) // Conservative default
     }
+}
+
+fn google_dns() -> SocketAddr {
+    SocketAddr::from(([8, 8, 8, 8], 53))
+}
+
+fn cloudflare_dns() -> SocketAddr {
+    SocketAddr::from(([1, 1, 1, 1], 53))
 }

@@ -462,10 +462,18 @@ impl TransportDiscovery {
         for port in ports {
             let address = format!("{target}:{port}");
             let start = Instant::now();
+            // Bind loopback for a loopback target, so probing this machine needs no wildcard socket.
+            let Some(peer) = tokio::net::lookup_host(&address)
+                .await
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+            else {
+                continue;
+            };
 
             match timeout(
                 self.discovery_timeout,
-                tokio::net::UdpSocket::bind("0.0.0.0:0"),
+                tokio::net::UdpSocket::bind(crate::network_scope::outbound_udp_local_addr(&peer)),
             )
             .await
             {

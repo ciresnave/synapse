@@ -784,7 +784,12 @@ impl TransportFactory for QuicTransportFactory {
 
     fn default_config(&self) -> HashMap<String, String> {
         let mut config = HashMap::new();
-        config.insert("bind_address".to_string(), "0.0.0.0:0".to_string());
+        config.insert(
+            "bind_address".to_string(),
+            crate::network_scope::BindScope::Loopback
+                .listen_addr(0)
+                .to_string(),
+        );
         config.insert("connection_timeout_ms".to_string(), "10000".to_string());
         config.insert("max_concurrent_streams".to_string(), "1000".to_string());
         config.insert("max_message_size".to_string(), "10485760".to_string()); // 10MB
