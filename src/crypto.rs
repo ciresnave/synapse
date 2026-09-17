@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-/// Cryptographic operations for EMRP using Ring with Ed25519 signatures and AES-GCM encryption
+/// Cryptographic operations for EMRP: Ed25519 signatures (ring) and HPKE sealing (crate::sealing)
 use crate::error::{CryptoError, Result};
 use crate::synapse::blockchain::serialization::UuidWrapper;
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use pem::{EncodeConfig, LineEnding, Pem, encode_config, parse};
@@ -26,6 +24,8 @@ pub struct CryptoManager {
     known_keys: HashMap<String, [u8; 32]>,
     /// Secure random number generator
     rng: SystemRandom,
+    /// Our X25519 sealing key pair (P2 slice d), independent of the Ed25519 key
+    sealing_key: Option<crate::sealing::SealingKeyPair>,
 }
 
 impl CryptoManager {
@@ -35,6 +35,7 @@ impl CryptoManager {
             key_pair: None,
             known_keys: HashMap::new(),
             rng: SystemRandom::new(),
+            sealing_key: None,
         }
     }
 
@@ -115,72 +116,6 @@ impl CryptoManager {
         }
     }
 
-    /// Encrypt a message for a specific recipient using AES-GCM
-    /// Note: This uses a shared secret approach. In production, you'd derive a shared secret
-    /// from ECDH or use a proper public key encryption scheme.
-    pub fn encrypt_message(&self, message: &str, recipient_global_id: &str) -> Result<Vec<u8>> {
-        // Verify we have the recipient's public key
-        let _recipient_key = self.known_keys.get(recipient_global_id).ok_or_else(|| {
-            CryptoError::KeyNotFound(format!("No public key for {recipient_global_id}"))
-        })?;
-
-        let message_bytes = message.as_bytes();
-        self.encrypt_with_aes(message_bytes)
-    }
-
-    /// Encrypt message using AES-GCM
-    fn encrypt_with_aes(&self, message: &[u8]) -> Result<Vec<u8>> {
-        // Generate random AES key
-        let mut aes_key_bytes = [0u8; 32];
-        ring::rand::SecureRandom::fill(&self.rng, &mut aes_key_bytes)
-            .map_err(|_| CryptoError::Encryption("Failed to generate AES key".to_string()))?;
-        let aes_key = Key::<Aes256Gcm>::from_slice(&aes_key_bytes);
-
-        // Generate random nonce
-        let mut nonce_bytes = [0u8; 12];
-        ring::rand::SecureRandom::fill(&self.rng, &mut nonce_bytes)
-            .map_err(|_| CryptoError::Encryption("Failed to generate nonce".to_string()))?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        // Encrypt message with AES
-        let cipher = Aes256Gcm::new(aes_key);
-        let encrypted_message = cipher
-            .encrypt(nonce, message)
-            .map_err(|e| CryptoError::Encryption(e.to_string()))?;
-
-        // Store format: key(32) + nonce(12) + encrypted_message
-        let mut result = Vec::new();
-        result.extend_from_slice(&aes_key_bytes); // 32 bytes
-        result.extend_from_slice(&nonce_bytes); // 12 bytes
-        result.extend_from_slice(&encrypted_message);
-
-        Ok(result)
-    }
-
-    /// Decrypt a message with our private key
-    pub fn decrypt_message(&self, encrypted_data: &[u8]) -> Result<String> {
-        if encrypted_data.len() < 32 + 12 {
-            return Err(CryptoError::Decryption(
-                "Invalid encrypted data format".to_string(),
-            ));
-        }
-
-        // Extract components
-        let aes_key_bytes = &encrypted_data[0..32];
-        let nonce_bytes = &encrypted_data[32..44];
-        let encrypted_message = &encrypted_data[44..];
-
-        let aes_key = Key::<Aes256Gcm>::from_slice(aes_key_bytes);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let cipher = Aes256Gcm::new(aes_key);
-
-        let decrypted_message = cipher
-            .decrypt(nonce, encrypted_message)
-            .map_err(|e| CryptoError::Decryption(e.to_string()))?;
-
-        String::from_utf8(decrypted_message).map_err(|e| CryptoError::Decryption(e.to_string()))
-    }
-
     /// Sign a message with our Ed25519 private key
     pub fn sign_message(&self, message: &str) -> Result<Vec<u8>> {
         let key_pair = self
@@ -250,6 +185,48 @@ impl CryptoManager {
         Ok(())
     }
 
+    /// Generate a fresh X25519 sealing key pair and keep it. Returns (private PKCS#8 PEM, public
+    /// SubjectPublicKeyInfo PEM). The key is independent of the Ed25519 signing key.
+    pub fn generate_sealing_key(&mut self) -> Result<(String, String)> {
+        let key = crate::sealing::SealingKeyPair::generate();
+        let pems = (key.to_pkcs8_pem(), key.public_key().to_spki_pem());
+        self.sealing_key = Some(key);
+        Ok(pems)
+    }
+
+    /// Load our X25519 sealing key from a PKCS#8 PEM.
+    pub fn load_sealing_key_pem(&mut self, pem: &str) -> Result<()> {
+        self.sealing_key = Some(crate::sealing::SealingKeyPair::from_pkcs8_pem(pem)?);
+        Ok(())
+    }
+
+    /// Our sealing key pair, if one is loaded.
+    pub fn sealing_key(&self) -> Option<&crate::sealing::SealingKeyPair> {
+        self.sealing_key.as_ref()
+    }
+
+    /// Our sealing public key as a SubjectPublicKeyInfo PEM.
+    pub fn sealing_public_key_pem(&self) -> Result<String> {
+        self.sealing_key
+            .as_ref()
+            .map(|key| key.public_key().to_spki_pem())
+            .ok_or_else(|| CryptoError::KeyNotFound("No sealing key loaded".to_string()))
+    }
+
+    /// Seal `message`'s body to `recipient` (see `crate::sealing::seal`). Sign afterwards.
+    pub fn seal_secure_message(
+        &self,
+        message: &mut crate::types::SecureMessage,
+        recipient: &crate::sealing::SealingPublicKey,
+    ) -> Result<()> {
+        crate::sealing::seal(message, recipient)
+    }
+
+    /// Open `message`'s body with our sealing key (see `crate::sealing::open`).
+    pub fn open_payload(&self, message: &crate::types::SecureMessage) -> crate::sealing::Payload {
+        crate::sealing::open(message, self.sealing_key.as_ref())
+    }
+
     /// Generate a secure hash of data
     pub fn hash_data(&self, data: &[u8]) -> String {
         let mut hasher = Sha256::default();
@@ -296,24 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn test_message_encryption() {
-        let mut crypto1 = CryptoManager::new();
-        let mut crypto2 = CryptoManager::new();
-
-        let (_, pub1) = crypto1.generate_keypair().unwrap();
-        let (_, pub2) = crypto2.generate_keypair().unwrap();
-
-        crypto1.import_public_key("entity2", &pub2).unwrap();
-        crypto2.import_public_key("entity1", &pub1).unwrap();
-
-        let message = "Hello, World!";
-        let encrypted = crypto1.encrypt_message(message, "entity2").unwrap();
-        let decrypted = crypto2.decrypt_message(&encrypted).unwrap();
-
-        assert_eq!(message, decrypted);
-    }
-
-    #[test]
     fn test_message_signing() {
         let mut crypto1 = CryptoManager::new();
         let mut crypto2 = CryptoManager::new();
@@ -330,23 +289,5 @@ mod tests {
             .unwrap();
 
         assert!(verified);
-    }
-
-    #[test]
-    fn test_large_message_encryption() {
-        let mut crypto1 = CryptoManager::new();
-        let mut crypto2 = CryptoManager::new();
-
-        let (_, pub1) = crypto1.generate_keypair().unwrap();
-        let (_, pub2) = crypto2.generate_keypair().unwrap();
-
-        crypto1.import_public_key("entity2", &pub2).unwrap();
-        crypto2.import_public_key("entity1", &pub1).unwrap();
-
-        let message = "A".repeat(1000); // Large message
-        let encrypted = crypto1.encrypt_message(&message, "entity2").unwrap();
-        let decrypted = crypto2.decrypt_message(&encrypted).unwrap();
-
-        assert_eq!(message, decrypted);
     }
 }

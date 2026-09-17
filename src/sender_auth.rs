@@ -172,6 +172,8 @@ pub enum ContradictedReason {
 #[derive(Debug, Clone, Default)]
 pub struct TrustStore {
     keys: HashMap<String, [u8; 32]>,
+    /// X25519 sealing keys (P2 slice d), pinned separately from the signing keys.
+    sealing: HashMap<String, crate::sealing::SealingPublicKey>,
 }
 
 impl TrustStore {
@@ -191,6 +193,32 @@ impl TrustStore {
         })?;
         self.pin(global_id, key);
         Ok(())
+    }
+
+    /// Pin a peer's X25519 sealing key.
+    pub fn pin_sealing_key(
+        &mut self,
+        global_id: impl Into<String>,
+        key: crate::sealing::SealingPublicKey,
+    ) {
+        self.sealing.insert(global_id.into(), key);
+    }
+
+    /// Pin a peer's X25519 sealing key from a SubjectPublicKeyInfo PEM.
+    pub fn pin_sealing_key_pem(&mut self, global_id: &str, pem: &str) -> Result<()> {
+        let key = crate::sealing::SealingPublicKey::from_spki_pem(pem)?;
+        self.pin_sealing_key(global_id, key);
+        Ok(())
+    }
+
+    /// The sealing key pinned for `global_id`.
+    pub fn sealing_key_for(&self, global_id: &str) -> Option<&crate::sealing::SealingPublicKey> {
+        self.sealing.get(global_id)
+    }
+
+    /// The id of the sealing key pinned for `global_id`.
+    pub fn sealing_key_id(&self, global_id: &str) -> Option<String> {
+        self.sealing.get(global_id).map(|key| key.key_id())
     }
 
     pub fn is_pinned(&self, global_id: &str) -> bool {

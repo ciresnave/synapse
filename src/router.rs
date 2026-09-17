@@ -72,16 +72,10 @@ impl SynapseRouter {
                 metadata: simple_msg.metadata.clone(),
             }
         };
-        // Apply cryptographic operations if available
-        {
-            let crypto = self.crypto.read().await;
-            if let SecurityLevel::Secure = secure_msg.security_level
-                && let Ok(encrypted) = crypto.encrypt_message(&simple_msg.content, &simple_msg.to)
-            {
-                secure_msg.encrypted_content = encrypted;
-            }
-        }
-        // Sign as the sender, after encryption so the signature covers the bytes that are sent.
+        // This path always sends Authenticated (signed, plaintext): the email router holds no
+        // pinned sealing keys, so it never seals (P2 slice d).
+        secure_msg.encrypted_content = simple_msg.content.as_bytes().to_vec();
+        // Sign as the sender, so the signature covers the bytes that are sent.
         // Without a key pair the message goes out explicitly unsigned (alg "none"), which
         // receivers mark Unverifiable — never silently.
         {
@@ -146,11 +140,11 @@ impl SynapseRouter {
 
         // Try to parse as secure message
         if let Ok(secure_msg) = serde_json::from_str::<SecureMessage>(&simple_msg.content) {
-            // Decrypt and return message
+            // Open a sealed body with our sealing key; anything else is returned as it came.
             let crypto_manager = self.crypto.read().await;
-            if let Ok(decrypted_content) =
-                crypto_manager.decrypt_message(&secure_msg.encrypted_content)
+            if let crate::sealing::Payload::Opened(bytes) = crypto_manager.open_payload(&secure_msg)
             {
+                let decrypted_content = String::from_utf8_lossy(&bytes).into_owned();
                 let decrypted_msg = SimpleMessage {
                     to: simple_msg.to,
                     from_entity: simple_msg.from_entity,
@@ -221,16 +215,8 @@ impl SynapseRouter {
             metadata: simple_msg.metadata.clone(),
         };
 
-        // Apply cryptographic operations if available
-        let crypto = self.crypto.read().await;
-
-        // Try to encrypt content
-        if let Ok(encrypted) = crypto.encrypt_message(&simple_msg.content, &simple_msg.to) {
-            secure_msg.encrypted_content = encrypted;
-            secure_msg.security_level = SecurityLevel::Secure;
-        } else {
-            secure_msg.encrypted_content = simple_msg.content.as_bytes().to_vec();
-        }
+        // Plain body at Authenticated: this router never seals (it has no pinned sealing keys).
+        secure_msg.encrypted_content = simple_msg.content.as_bytes().to_vec();
 
         Ok(secure_msg)
     }

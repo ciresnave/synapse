@@ -231,3 +231,122 @@ fn hex(bytes: &[u8]) -> String {
 fn der_private_bytes(pem_text: &str) -> Vec<u8> {
     pem::parse(pem_text).unwrap().contents()[16..].to_vec()
 }
+
+// §8 test 6c: the email router never produces a sealed or Secure message.
+#[tokio::test]
+async fn the_router_converts_to_a_plain_authenticated_message() {
+    let config = synapse::Config::default_for_entity("router-test", "tool");
+    let router = synapse::SynapseRouter::new(config, ALICE.to_string())
+        .await
+        .expect("router");
+    let simple = synapse::types::SimpleMessage {
+        to: BOB.to_string(),
+        from_entity: ALICE.to_string(),
+        content: "hello over email".to_string(),
+        message_type: synapse::types::MessageType::Direct,
+        metadata: Default::default(),
+    };
+    let m = router.convert_to_secure_message(&simple).await.unwrap();
+    assert_eq!(m.security_level, SecurityLevel::Authenticated);
+    assert_eq!(m.encrypted_content, b"hello over email");
+    assert!(!m.metadata.contains_key(SEALED_KEY));
+}
+
+// §8 test 9 (independence and pinning)
+#[test]
+fn a_node_has_independent_signing_and_sealing_keys() {
+    let mut node = CryptoManager::new();
+    node.generate_keypair().unwrap();
+    let (sealing_private_pem, sealing_public_pem) = node.generate_sealing_key().unwrap();
+    let signing_id = synapse::sender_auth::key_id(&node.public_key_bytes().unwrap());
+    let sealing_id = node.sealing_key().unwrap().public_key().key_id();
+    assert_ne!(signing_id, sealing_id);
+    assert_eq!(node.sealing_public_key_pem().unwrap(), sealing_public_pem);
+
+    let mut other = CryptoManager::new();
+    other.load_sealing_key_pem(&sealing_private_pem).unwrap();
+    assert_eq!(
+        other.sealing_key().unwrap().public_key(),
+        node.sealing_key().unwrap().public_key()
+    );
+
+    let mut store = TrustStore::new();
+    store.pin_sealing_key_pem(BOB, &sealing_public_pem).unwrap();
+    assert_eq!(store.sealing_key_id(BOB), Some(sealing_id));
+    assert_eq!(
+        store.sealing_key_for(BOB),
+        Some(node.sealing_key().unwrap().public_key())
+    );
+    assert!(store.sealing_key_for(ALICE).is_none());
+    // Pinning a sealing key does not pin a signing key.
+    assert!(!store.is_pinned(BOB));
+}
+
+#[test]
+fn crypto_manager_seals_and_opens() {
+    let mut alice = CryptoManager::new();
+    alice.generate_keypair().unwrap();
+    let mut bob = CryptoManager::new();
+    bob.generate_sealing_key().unwrap();
+    let bob_key = bob.sealing_key().unwrap().public_key().clone();
+
+    let mut m = SecureMessage::new(BOB, ALICE, b"via manager".to_vec(), SecurityLevel::Secure);
+    alice.seal_secure_message(&mut m, &bob_key).unwrap();
+    alice.sign_secure_message(&mut m).unwrap();
+    assert_eq!(bob.open_payload(&m), opened(b"via manager"));
+    assert_eq!(
+        alice.open_payload(&m),
+        Payload::CouldNotOpen(OpenError::NoSealingKey)
+    );
+}
+
+// §8 test 10: the self-decrypting encryption is gone from compiled source.
+#[test]
+fn the_self_decrypting_encryption_is_gone() {
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    // src/wasm compiles only for wasm32 and has its own, unrelated decrypt_message.
+    let files: Vec<_> = files
+        .into_iter()
+        .filter(|p| !p.components().any(|c| c.as_os_str() == "wasm"))
+        .collect();
+    let needles = [
+        ["fn encrypt", "_message("].concat(),
+        ["fn decrypt", "_message("].concat(),
+        ["fn encrypt", "_with_aes("].concat(),
+    ];
+    let control = ["fn seal_secure", "_message("].concat();
+    let mut found = Vec::new();
+    let mut control_hits = 0;
+    for path in &files {
+        let text = std::fs::read_to_string(path).unwrap();
+        for needle in &needles {
+            if text.contains(needle.as_str()) {
+                found.push(format!("{}: {needle}", path.display()));
+            }
+        }
+        if text.contains(control.as_str()) {
+            control_hits += 1;
+        }
+    }
+    println!(
+        "scanned {} files under src/ (src/wasm excluded)",
+        files.len()
+    );
+    assert_eq!(
+        control_hits, 1,
+        "the scan must find the new sealing entry point"
+    );
+    assert!(found.is_empty(), "{found:#?}");
+}
