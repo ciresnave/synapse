@@ -675,7 +675,7 @@ impl EnhancedSynapseRouter {
             timestamp,
             security_level,
             encrypted_content: simple_msg.content.as_bytes().to_vec(),
-            signature: Vec::new(),
+            sender_proof: crate::sender_auth::SenderProof::unsigned(),
             routing_path: Vec::new(),
             metadata: simple_msg.metadata.clone(),
         })
@@ -699,7 +699,7 @@ impl EnhancedSynapseRouter {
                 timestamp: DateTimeWrapper::new(Utc::now()),
                 security_level: SecurityLevel::Public,
                 encrypted_content: b"benchmark test".to_vec(),
-                signature: Vec::new(),
+                sender_proof: crate::sender_auth::SenderProof::unsigned(),
                 routing_path: Vec::new(),
                 metadata: std::collections::HashMap::new(),
             };

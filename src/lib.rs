@@ -205,6 +205,7 @@ pub mod monitoring;
 pub mod network_scope;
 pub mod router;
 pub mod router_enhanced;
+pub mod sender_auth;
 pub mod streaming;
 
 pub mod transport;

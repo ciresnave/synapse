@@ -65,7 +65,7 @@ impl SynapseRouter {
                 to_global_id: destination_global_id.clone(),
                 from_global_id: self.our_global_id.clone(),
                 encrypted_content: Vec::new(),
-                signature: Vec::new(),
+                sender_proof: crate::sender_auth::SenderProof::unsigned(),
                 timestamp: DateTimeWrapper::new(chrono::Utc::now()),
                 security_level: SecurityLevel::Authenticated,
                 routing_path: Vec::new(),
@@ -81,12 +81,6 @@ impl SynapseRouter {
                 secure_msg.encrypted_content = encrypted;
             }
         }
-        // Sign the message
-        let signature = {
-            let crypto = self.crypto.read().await;
-            crypto.sign_message(&simple_msg.content).unwrap_or_default()
-        };
-        secure_msg.signature = signature;
         {
             let email_transport = self.email.read().await;
             let simple_message = SimpleMessage {
@@ -209,7 +203,7 @@ impl SynapseRouter {
             to_global_id: simple_msg.to.clone(),
             from_global_id: self.our_global_id.clone(),
             encrypted_content: Vec::new(),
-            signature: Vec::new(),
+            sender_proof: crate::sender_auth::SenderProof::unsigned(),
             timestamp: DateTimeWrapper::new(chrono::Utc::now()),
             security_level: SecurityLevel::Authenticated,
             routing_path: Vec::new(),

@@ -221,7 +221,7 @@ fn create_sample_message(id: &str, content: &str) -> SecureMessage {
         to_global_id: "http-demo-recipient".to_string(),
         from_global_id: "http-demo-sender".to_string(),
         encrypted_content: content.as_bytes().to_vec(),
-        signature: vec![0u8; 64], // Placeholder signature
+        sender_proof: synapse::sender_auth::SenderProof::unsigned(),
         timestamp: synapse::blockchain::serialization::DateTimeWrapper(Utc::now()),
         security_level: SecurityLevel::Public,
         routing_path: Vec::new(),

@@ -80,7 +80,6 @@ async fn main() -> Result<()> {
         "test-target@example.com",
         "test-system@localhost",
         b"Hello from unified transport system!".to_vec(),
-        Vec::new(), // empty signature for now
         SecurityLevel::Authenticated,
     );
 

@@ -64,7 +64,7 @@ impl EmailTransport {
             to_global_id: to_email.clone(),
             from_global_id: from_email.clone(),
             encrypted_content: simple_msg.content.as_bytes().to_vec(),
-            signature: vec![],
+            sender_proof: crate::sender_auth::SenderProof::unsigned(),
             timestamp: Default::default(),
             security_level: SecurityLevel::Authenticated,
             routing_path: vec![],

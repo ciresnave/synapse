@@ -77,7 +77,6 @@ async fn main() -> Result<()> {
         "demo-recipient".to_string(),
         "demo-sender".to_string(),
         "This is a real-time message!".as_bytes().to_vec(),
-        vec![], // signature placeholder
         SecurityLevel::Secure,
     );
 
@@ -108,7 +107,6 @@ async fn main() -> Result<()> {
         "This is a background message with more data that requires reliability."
             .as_bytes()
             .to_vec(),
-        vec![], // signature placeholder
         SecurityLevel::Secure,
     );
 
@@ -221,7 +219,6 @@ async fn main() -> Result<()> {
         "demo-recipient".to_string(),
         "demo-sender".to_string(),
         "This message should trigger failover".as_bytes().to_vec(),
-        vec![], // signature placeholder
         SecurityLevel::Secure,
     );
 
