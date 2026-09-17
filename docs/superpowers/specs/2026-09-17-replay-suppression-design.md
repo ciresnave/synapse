@@ -278,6 +278,13 @@ router's email path is unauthenticated before this slice and remains so after it
   action against — OverMind asked for exactly this on 2026-09-17 — while what each named permission
   may do stays the receiver's local policy. Revocation is a statement signed by the account key,
   with short validity windows rather than a fetched revocation list.
+- **Provider-backed introduction.** Decided 2026-09-17, and **its own project**, neither part of
+  Synapse nor of any one website: two account holders sign in to one site, each with their own OIDC
+  provider, and the site exchanges their account public keys. The site is the single registered
+  client at each provider, holds no secrets, and is used once, at introduction — never in the message
+  path. Both the site and each party's local software show the other's key fingerprint, so a
+  substituted key is visible. It must be hostable by any website; the first public host will be
+  ThinkersJournal.com. Synapse's side is a client for it, designed after slice f.
 - **Persistent state of any kind.** The horizon covers restarts instead.
 - **Rate limiting.** A flood of distinct verified messages is not a replay; bounding that is a
   transport concern, and the record's capacity plus the horizon keeps the memory cost fixed.
