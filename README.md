@@ -450,6 +450,30 @@ linker = "lld-link"
 
 📖 **For detailed information and alternative solutions**, see [Windows Linker Workaround Guide](docs/WINDOWS_LINKER_WORKAROUND.md)
 
+### Network exposure: loopback by default (2.0.0)
+
+Synapse listens on **127.0.0.1 only** unless you ask for more. A listener on every interface can be
+reached from other machines. On Windows it also makes the firewall ask for permission, and test and
+doc-test binaries used to trigger that on every run.
+
+To accept peers from other machines, opt in explicitly:
+
+```toml
+# In a synapse Config file
+[network]
+bind_scope = "all_interfaces"
+```
+
+For a transport built from a config map, set `bind_scope = "all_interfaces"` in the map.
+
+Under the loopback default, features that only work across machines are switched off:
+- the mDNS transport, the service browser and LLM discovery refuse to start, with an error that names
+  the setting;
+- NAT traversal skips STUN and UPnP;
+- email connectivity detection skips external-IP detection.
+
+See [`src/network_scope.rs`](src/network_scope.rs).
+
 ## 🤝 Contributing
 
 We welcome contributions! See the [Developer Guide](docs/DEVELOPER_GUIDE.md) for build, test and layout details.

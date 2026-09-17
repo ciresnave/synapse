@@ -29,6 +29,8 @@ use url::Url;
 pub struct WebSocketTransportImpl {
     /// Local port for WebSocket server
     local_port: u16,
+    /// Which interfaces the server listens on
+    bind_scope: crate::network_scope::BindScope,
     /// TCP listener for WebSocket server
     listener: Arc<RwLock<Option<TcpListener>>>,
     /// Connection timeout
@@ -100,6 +102,7 @@ impl WebSocketTransportImpl {
             .get("max_message_size")
             .and_then(|s| s.parse().ok())
             .unwrap_or(16 * 1024 * 1024); // 16MB default for WebSocket
+        let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
 
         let circuit_breaker_config = CircuitBreakerConfig {
             failure_threshold: 5,
@@ -117,6 +120,7 @@ impl WebSocketTransportImpl {
 
         Ok(Self {
             local_port,
+            bind_scope,
             listener: Arc::new(RwLock::new(None)),
             connection_timeout,
             connections: Arc::new(Mutex::new(HashMap::new())),
@@ -902,7 +906,7 @@ impl Transport for WebSocketTransportImpl {
         }
 
         // Bind TCP listener for WebSocket server
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", self.local_port))
+        let listener = TcpListener::bind(self.bind_scope.listen_addr(self.local_port))
             .await
             .map_err(|e| {
                 crate::error::SynapseError::NetworkError(format!("Network error: {}", e))
@@ -923,15 +927,14 @@ impl Transport for WebSocketTransportImpl {
         let connections = self.connections.clone();
         let metrics = self.metrics.clone();
         let received_messages = self.received_messages.clone();
+        let listen_addr = self.bind_scope.listen_addr(actual_port);
 
         tokio::spawn(async move {
             // Get listener from the stored location
             let listener = {
                 // We need to move the listener out to avoid borrowing issues
                 // In a real implementation, we'd keep the listener in the task
-                TcpListener::bind(format!("0.0.0.0:{}", actual_port))
-                    .await
-                    .ok()
+                TcpListener::bind(listen_addr).await.ok()
             };
 
             if let Some(listener) = listener {

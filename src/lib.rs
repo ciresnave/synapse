@@ -202,6 +202,7 @@ pub mod email;
 pub mod email_server;
 pub mod identity;
 pub mod monitoring;
+pub mod network_scope;
 pub mod router;
 pub mod router_enhanced;
 pub mod streaming;

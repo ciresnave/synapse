@@ -62,8 +62,9 @@ impl TcpTransportImpl {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_secs(10));
 
+        let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
         let listener = if listen_port > 0 {
-            match TcpListener::bind(format!("0.0.0.0:{}", listen_port)).await {
+            match TcpListener::bind(bind_scope.listen_addr(listen_port)).await {
                 Ok(listener) => {
                     info!("TCP transport listening on port {}", listen_port);
                     Some(Arc::new(listener))

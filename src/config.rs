@@ -20,6 +20,17 @@ pub struct Config {
     pub security: SecurityConfig,
     /// Logging configuration
     pub logging: LoggingConfig,
+    /// Network exposure. Absent in a config file means loopback only.
+    #[serde(default)]
+    pub network: NetworkConfig,
+}
+
+/// Which interfaces synapse listens on (see `crate::network_scope`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    /// `loopback` (the default) or `all_interfaces`.
+    #[serde(default)]
+    pub bind_scope: crate::network_scope::BindScope,
 }
 
 /// Entity-specific configuration
@@ -152,6 +163,7 @@ impl Config {
                 trusted_domains: vec!["synapse.local".to_string()],
                 require_encryption_for: vec!["human".to_string()],
             },
+            network: NetworkConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
                 format: "compact".to_string(),

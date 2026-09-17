@@ -44,6 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
         max_llms: 20,
         required_capabilities: vec!["conversation".to_string()],
+        // LAN discovery uses mDNS, so this demo opts in to every interface.
+        bind_scope: synapse::network_scope::BindScope::AllInterfaces,
     };
 
     println!("📡 Creating LLM discovery manager...");

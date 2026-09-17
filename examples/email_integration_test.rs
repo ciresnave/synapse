@@ -52,6 +52,7 @@ fn create_test_config() -> Config {
             trusted_domains: vec![],
             require_encryption_for: vec![],
         },
+        network: Default::default(),
         logging: LoggingConfig {
             level: "info".to_string(),
             format: "compact".to_string(),

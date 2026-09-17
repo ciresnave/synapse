@@ -62,10 +62,11 @@ struct QuicConnection {
 impl QuicTransportImpl {
     /// Create a new QUIC transport instance
     pub async fn new(config: &HashMap<String, String>) -> Result<Self> {
+        let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
         let bind_addr = config
             .get("bind_address")
             .and_then(|addr| addr.parse().ok())
-            .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap()); // Let OS choose port
+            .unwrap_or_else(|| bind_scope.listen_addr(0)); // Let OS choose port
 
         let connection_timeout = config
             .get("connection_timeout_ms")

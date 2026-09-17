@@ -37,6 +37,8 @@ pub struct LlmDiscoveryConfig {
     pub max_llms: usize,
     /// Minimum required capabilities for an LLM to be considered
     pub required_capabilities: Vec<String>,
+    /// Discovery uses mDNS, which needs every interface; loopback (the default) refuses.
+    pub bind_scope: crate::network_scope::BindScope,
 }
 
 impl Default for LlmDiscoveryConfig {
@@ -52,6 +54,7 @@ impl Default for LlmDiscoveryConfig {
             ],
             max_llms: 50,
             required_capabilities: vec!["conversation".to_string()],
+            bind_scope: crate::network_scope::BindScope::default(),
         }
     }
 }
@@ -183,6 +186,7 @@ impl LlmDiscoveryManager {
             cache_ttl: config.cache_ttl,
             max_cache_size: config.max_llms,
             continuous_monitoring: true,
+            bind_scope: config.bind_scope,
         };
 
         let mdns_browser =
@@ -290,7 +294,7 @@ impl LlmDiscoveryManager {
         let mut scored_llms: Vec<(DiscoveredLlm, f64)> = compatible_llms
             .into_iter()
             .map(|llm| {
-                let score = self.calculate_llm_score(&llm, &task_capabilities);
+                let score = Self::calculate_llm_score(&llm, &task_capabilities);
                 (llm, score)
             })
             .collect();
@@ -505,7 +509,7 @@ impl LlmDiscoveryManager {
         }
     }
 
-    fn calculate_llm_score(&self, llm: &DiscoveredLlm, task_capabilities: &[String]) -> f64 {
+    fn calculate_llm_score(llm: &DiscoveredLlm, task_capabilities: &[String]) -> f64 {
         let mut score = 0.0;
 
         // Performance factors
@@ -826,9 +830,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_llm_discovery_creation() {
-        let discovery = LlmDiscoveryManager::new(None).await;
-        assert!(discovery.is_ok());
+    async fn test_llm_discovery_creation_refuses_under_loopback() {
+        // LLM discovery browses mDNS, which needs every interface. The default scope is
+        // loopback (crate::network_scope), so it refuses instead of binding a wildcard socket.
+        let err = LlmDiscoveryManager::new(None)
+            .await
+            .err()
+            .expect("the default loopback scope refuses LLM discovery");
+        assert!(err.to_string().contains("all_interfaces"), "{err}");
     }
 
     #[tokio::test]
@@ -867,19 +876,9 @@ mod tests {
             status: LlmStatus::Available,
         };
 
-        let config = LlmDiscoveryConfig::default();
-        let discovery = LlmDiscoveryManager {
-            mdns_browser: crate::transport::mdns_enhanced::EnhancedMdnsServiceBrowser::new(
-                vec!["_test._tcp".to_string()],
-                None,
-            )
-            .await?,
-            llm_cache: Arc::new(RwLock::new(HashMap::new())),
-            config,
-        };
-
+        // Scoring needs no network, so no manager (and no mDNS socket) is built.
         let task_capabilities = vec!["conversation".to_string()];
-        let score = discovery.calculate_llm_score(&llm, &task_capabilities);
+        let score = LlmDiscoveryManager::calculate_llm_score(&llm, &task_capabilities);
 
         assert!(score > 0.0 && score <= 1.0);
         Ok(())

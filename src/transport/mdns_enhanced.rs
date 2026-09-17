@@ -98,6 +98,8 @@ pub struct MdnsConfig {
     pub max_peers: usize,
     /// How long to keep stale peers
     pub peer_timeout: Duration,
+    /// mDNS only works on every interface; the default loopback scope makes it refuse to start.
+    pub bind_scope: crate::network_scope::BindScope,
 }
 
 /// mDNS packet types we handle
@@ -145,6 +147,7 @@ impl Default for MdnsConfig {
             discovery_timeout: Duration::from_secs(5),
             max_peers: 100,
             peer_timeout: Duration::from_secs(300),
+            bind_scope: crate::network_scope::BindScope::default(),
         }
     }
 }
@@ -636,7 +639,6 @@ impl EnhancedMdnsTransport {
 /// Create a multicast UDP socket for mDNS
 async fn create_multicast_socket(config: &MdnsConfig) -> Result<TokioUdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
-    use std::net::{Ipv4Addr, SocketAddrV4};
 
     // Create socket with SO_REUSEADDR and SO_REUSEPORT
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -646,7 +648,9 @@ async fn create_multicast_socket(config: &MdnsConfig) -> Result<TokioUdpSocket> 
     socket.set_reuse_port(true)?;
 
     // Bind to the mDNS multicast address
-    let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.multicast_port);
+    let bind_addr = config
+        .bind_scope
+        .multicast_listen_addr(config.multicast_port)?;
     socket.bind(&bind_addr.into())?;
 
     // Convert to tokio UdpSocket
@@ -744,10 +748,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_enhanced_mdns_creation() {
-        let transport = EnhancedMdnsTransport::new("test_entity".to_string(), 8080, None).await;
-
-        assert!(transport.is_ok());
+    async fn test_enhanced_mdns_creation_refuses_under_loopback() {
+        // mDNS must listen on every interface. The default scope is loopback
+        // (crate::network_scope), so the default config refuses rather than binding a
+        // wildcard socket, which is what used to raise a firewall prompt from this test.
+        let err = EnhancedMdnsTransport::new("test_entity".to_string(), 8080, None)
+            .await
+            .err()
+            .expect("the default loopback scope refuses mDNS");
+        assert!(err.to_string().contains("all_interfaces"), "{err}");
     }
 
     #[test]
@@ -815,6 +824,8 @@ pub struct BrowserConfig {
     pub max_cache_size: usize,
     /// Whether to perform continuous monitoring
     pub continuous_monitoring: bool,
+    /// Browsing needs every interface; the default loopback scope makes it refuse to start.
+    pub bind_scope: crate::network_scope::BindScope,
 }
 
 impl Default for BrowserConfig {
@@ -824,6 +835,7 @@ impl Default for BrowserConfig {
             cache_ttl: Duration::from_secs(300),
             max_cache_size: 500,
             continuous_monitoring: true,
+            bind_scope: crate::network_scope::BindScope::default(),
         }
     }
 }
@@ -832,7 +844,10 @@ impl EnhancedMdnsServiceBrowser {
     /// Create a new service browser
     pub async fn new(service_types: Vec<String>, config: Option<BrowserConfig>) -> Result<Self> {
         let config = config.unwrap_or_default();
-        let mdns_config = MdnsConfig::default();
+        let mdns_config = MdnsConfig {
+            bind_scope: config.bind_scope,
+            ..MdnsConfig::default()
+        };
         let browse_socket = create_multicast_socket(&mdns_config).await?;
 
         Ok(Self {

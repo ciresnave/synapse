@@ -24,6 +24,8 @@ pub struct UdpTransportImpl {
     socket: Option<Arc<UdpSocket>>,
     /// Local binding port
     bind_port: u16,
+    /// Which interfaces the server listens on
+    bind_scope: crate::network_scope::BindScope,
     /// Maximum message size
     max_message_size: usize,
     /// Received messages queue
@@ -44,6 +46,7 @@ impl UdpTransportImpl {
             .get("bind_port")
             .and_then(|p| p.parse().ok())
             .unwrap_or(0); // 0 means let OS choose port
+        let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
 
         let max_message_size = config
             .get("max_message_size")
@@ -58,6 +61,7 @@ impl UdpTransportImpl {
         Ok(Self {
             socket: None,
             bind_port,
+            bind_scope,
             max_message_size,
             received_messages: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(RwLock::new(TransportStatus::Stopped)),
@@ -68,7 +72,7 @@ impl UdpTransportImpl {
 
     /// Start the UDP server for incoming messages
     async fn start_server(&mut self) -> Result<()> {
-        let bind_addr = format!("0.0.0.0:{}", self.bind_port);
+        let bind_addr = self.bind_scope.listen_addr(self.bind_port);
 
         let socket = UdpSocket::bind(&bind_addr).await.map_err(|e| {
             SynapseError::TransportError(format!("Failed to bind UDP socket to {bind_addr}: {e}"))
@@ -165,7 +169,8 @@ impl UdpTransportImpl {
             socket.send_to(message_json.as_bytes(), target_addr).await
         } else {
             // Create temporary socket for sending
-            let temp_socket = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| {
+            let local = crate::network_scope::outbound_udp_local_addr(target_addr);
+            let temp_socket = UdpSocket::bind(local).await.map_err(|e| {
                 SynapseError::TransportError(format!(
                     "Failed to create UDP socket for sending: {e}"
                 ))
@@ -312,7 +317,7 @@ impl Transport for UdpTransportImpl {
         // We'll send a small test packet and see if it succeeds
         let start = Instant::now();
 
-        match UdpSocket::bind("0.0.0.0:0").await {
+        match UdpSocket::bind(crate::network_scope::outbound_udp_local_addr(&target_addr)).await {
             Ok(test_socket) => {
                 let test_data = b"ping";
                 match test_socket.send_to(&test_data[..], &target_addr).await {
