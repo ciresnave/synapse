@@ -25,6 +25,7 @@ struct Process {
     client: RunningService<RoleClient, ()>,
     stderr: tokio::task::JoinHandle<String>,
     key_path: String,
+    sealing_key_path: String,
     key_file_marker: String,
     config_text: String,
 }
@@ -43,17 +44,22 @@ async fn spawn(
     id: &str,
     port: u16,
     private_pem: &str,
-    peer: (&str, &str, u16),
+    sealing_pem: &str,
+    peer: (&str, &str, &str, u16),
 ) -> Process {
     let key_file_marker = format!("{}-secret-key-9c2e", id.split('@').next().unwrap());
     let key_path = dir.join(format!("{key_file_marker}.pem"));
     std::fs::write(&key_path, private_pem).unwrap();
-    let (peer_id, peer_pem, peer_port) = peer;
+    let sealing_path = dir.join(format!("{key_file_marker}-sealing.pem"));
+    std::fs::write(&sealing_path, sealing_pem).unwrap();
+    let (peer_id, peer_pem, peer_sealing_pem, peer_port) = peer;
     let config_text = format!(
-        "global_id = \"{id}\"\nprivate_key_pem_path = \"{}\"\nudp_bind_port = {port}\n\n\
+        "global_id = \"{id}\"\nprivate_key_pem_path = \"{}\"\nsealing_key_path = \"{}\"\nudp_bind_port = {port}\n\n\
          [[peers]]\nglobal_id = \"{peer_id}\"\npublic_key_pem = \"\"\"\n{peer_pem}\"\"\"\n\
+         sealing_public_key = \"\"\"\n{peer_sealing_pem}\"\"\"\n\
          address = \"127.0.0.1:{peer_port}\"\n",
-        slash(&key_path)
+        slash(&key_path),
+        slash(&sealing_path)
     );
     let config_path = dir.join(format!("{}.toml", id.split('@').next().unwrap()));
     std::fs::write(&config_path, &config_text).unwrap();
@@ -75,6 +81,7 @@ async fn spawn(
         client,
         stderr,
         key_path: slash(&key_path),
+        sealing_key_path: slash(&sealing_path),
         key_file_marker,
         config_text,
     }
@@ -107,13 +114,16 @@ async fn two_processes_send_poll_ack_and_leak_no_key_path() {
     let (mut alice_c, mut bob_c) = (CryptoManager::new(), CryptoManager::new());
     let (alice_sk, alice_pk) = alice_c.generate_keypair().unwrap();
     let (bob_sk, bob_pk) = bob_c.generate_keypair().unwrap();
+    let (alice_seal_sk, alice_seal_pk) = alice_c.generate_sealing_key().unwrap();
+    let (bob_seal_sk, bob_seal_pk) = bob_c.generate_sealing_key().unwrap();
     let (alice_port, bob_port) = (free_udp_port(), free_udp_port());
     let alice = spawn(
         dir.path(),
         ALICE,
         alice_port,
         &alice_sk,
-        (BOB, &bob_pk, bob_port),
+        &alice_seal_sk,
+        (BOB, &bob_pk, &bob_seal_pk, bob_port),
     )
     .await;
     let bob = spawn(
@@ -121,7 +131,8 @@ async fn two_processes_send_poll_ack_and_leak_no_key_path() {
         BOB,
         bob_port,
         &bob_sk,
-        (ALICE, &alice_pk, alice_port),
+        &bob_seal_sk,
+        (ALICE, &alice_pk, &alice_seal_pk, alice_port),
     )
     .await;
     let mut transcript = Vec::new();
@@ -162,6 +173,7 @@ async fn two_processes_send_poll_ack_and_leak_no_key_path() {
     assert_eq!(delivered["message_id"], id.as_str());
     assert_eq!(delivered["text"], "over stdio");
     assert_eq!(delivered["sender"]["verdict"], "verified");
+    assert_eq!(delivered["sealed"], true);
 
     call(&bob, "ack", json!({"message_id": id}), &mut transcript).await;
 
@@ -196,10 +208,11 @@ async fn two_processes_send_poll_ack_and_leak_no_key_path() {
         .unwrap();
 
     let all_responses = transcript.join("\n");
-    for (name, key_path, marker, config_text, stderr) in [
+    for (name, key_path, sealing_key_path, marker, config_text, stderr) in [
         (
             "alice",
             &alice.key_path,
+            &alice.sealing_key_path,
             &alice.key_file_marker,
             &alice.config_text,
             &alice_err,
@@ -207,6 +220,7 @@ async fn two_processes_send_poll_ack_and_leak_no_key_path() {
         (
             "bob",
             &bob.key_path,
+            &bob.sealing_key_path,
             &bob.key_file_marker,
             &bob.config_text,
             &bob_err,
@@ -215,12 +229,18 @@ async fn two_processes_send_poll_ack_and_leak_no_key_path() {
         // Positive controls: the search could find a leak, and stderr was really captured.
         assert!(config_text.contains(key_path.as_str()), "{name}: control");
         assert!(
+            config_text.contains(sealing_key_path.as_str()),
+            "{name}: sealing control"
+        );
+        assert!(
             stderr.contains("UDP transport bound"),
             "{name}: stderr was not captured: {stderr}"
         );
         for haystack in [&all_responses, stderr] {
             assert!(
-                !haystack.contains(key_path.as_str()) && !haystack.contains(marker.as_str()),
+                !haystack.contains(key_path.as_str())
+                    && !haystack.contains(sealing_key_path.as_str())
+                    && !haystack.contains(marker.as_str()),
                 "{name}: the key path leaked"
             );
             assert!(
