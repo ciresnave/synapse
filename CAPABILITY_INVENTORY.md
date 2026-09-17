@@ -800,6 +800,24 @@ tests whose fate the merge decides), but the shape is small: the formatting fail
 and import-order drift, and moving `Check formatting` after `Build`/`Run tests` — or fixing the 23
 files — would make the pipeline able to report on the thing it exists to report on.
 
+#### Update 2026-09-17: `Run tests` stopped at the first failing test binary
+
+*Measured locally at `337f7df5` plus the `TransportManager::start` deadlock fix, with
+`cargo test --no-fail-fast`.*
+
+- CI ran `cargo test --verbose`. That command stops after the first test **binary** that fails, and
+  the known failure is in `transport_error_handling_test`. So every target that sorts after it had
+  never run in CI:
+  - `transport_manager_starts`, the regression test added with the deadlock fix;
+  - `webrtc_transport_integration_test`, which has 0 tests;
+  - **all 25 doc-tests**. They pass locally and take about 72 s.
+- With `--no-fail-fast` the failing set is unchanged, `{test_transport_error_handling}`. 108 named
+  tests and the 25 doc-tests pass.
+- ⚠️ **The earlier "107 tests run in CI" was a count of what ran before the stop, not of the
+  suite.** A new test file named after `transport_error_handling_test` would have been silently
+  skipped in CI.
+- CI now runs `cargo test --verbose --no-fail-fast`.
+
 ---
 
 ## 3. ⚠️ The feature system is decorative — `native` is the only configuration that can compile

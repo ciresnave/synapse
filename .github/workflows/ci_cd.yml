@@ -126,7 +126,9 @@ jobs:
 
     - name: Run tests
       if: always()
-      run: cargo test --verbose
+      # --no-fail-fast: without it cargo stops at the first failing test binary, and
+      # every target that sorts after it (including all doc-tests) never runs here.
+      run: cargo test --verbose --no-fail-fast
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 

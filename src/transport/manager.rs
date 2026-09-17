@@ -297,9 +297,13 @@ impl TransportManager {
     async fn start_transport(&self, transport_type: TransportType) -> Result<()> {
         debug!("Starting transport {:?}", transport_type);
 
-        // Update status to starting
-        let mut status = self.transport_status.write().await;
-        status.insert(transport_type, TransportStatus::Starting);
+        // Update status to starting. The guard must be released at the end of this
+        // statement: the lock is taken again below, and tokio's RwLock is not
+        // reentrant, so holding it here hung start() (tests/transport_manager_starts.rs).
+        self.transport_status
+            .write()
+            .await
+            .insert(transport_type, TransportStatus::Starting);
 
         // Hold the lock, call factory methods, and only store owned values after
         let (factory, config) = {
