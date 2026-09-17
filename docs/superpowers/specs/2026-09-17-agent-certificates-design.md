@@ -1,7 +1,8 @@
 # Account Keys, Agent Certificates, Rotation and Revocation (P2 slice f)
 
 **Status:** decided with CireSnave on 2026-09-17; this document is the spec he reviews.
-**Branch:** `feat/agent-certificates`, stacked on `feat/replay-suppression` (#42).
+**Branch:** `feat/agent-certificates` (slice f1), stacked on `feat/replay-suppression` (#42).
+**Built in two halves (CireSnave, 2026-09-17):** see §11.
 **Depends on:** slice a (sender authentication), slice d (sealing), slice e (the delivery gate and
 the bounded inbound state).
 **Followed by:** trust-on-first-use peer discovery, then the introduction app (its own project).
@@ -45,8 +46,8 @@ the chain roots in an account key that receiver has pinned.
    parent's; and **each delegator sets how much further its delegates may delegate**. The format
    carries no global depth limit.
 8. **Chains are never validated for a sender whose root is not pinned** (§7.3).
-9. **Direct per-agent pinning is removed.** Certificates are the only trust path, with
-   `synapse-cert import` converting an existing config.
+9. **Direct per-agent pinning is removed** — in **f2**, not f1 (§11). Certificates become the only
+   trust path, with `synapse-cert import` converting an existing config.
 10. **A compromised account key is out of scope here.** Recovery needs an identity check that does
     not rely on that key, which is the introduction app's job. Until then the documented recovery is
     manual re-pinning.
@@ -177,6 +178,30 @@ allowance than a pinned root's — and must not simply relax step 2.
 - **The introduction app**, its own project.
 - **Hardware-backed signing.** The CLI keeps a seam: signing goes through one trait with a file
   implementation.
+
+## 11. Delivered in two slices
+
+This document specifies both halves. They are built and reviewed separately, because together they
+are about twice slice e, which itself took six tasks.
+
+**f1 — the format and the verification** (branch `feat/agent-certificates`):
+- `src/certificate.rs`: the certificate, the revocation, canonical bytes, PEM, chain validation
+  (§4, §5, §6).
+- `TrustStore` gains account keys and the revocation store; **`pin`, `pin_pem` and the sealing
+  equivalents stay** for this slice, so nothing existing breaks.
+- The receive path (§7), including the unpinned-root refusal and the size cap.
+- Tests 1-11 of §10.
+- At the end of f1, a node can be configured either way: pinned agent keys as today, or a pinned
+  account key with certificates.
+
+**f2 — the tooling and the changeover** (branch `feat/agent-certificates-cli`, stacked on f1):
+- The `synapse-cert` binary: `init`, `mint`, `delegate`, `revoke`, `inspect`, `import`.
+- The `synapse-mcp` config and tool changes (§8).
+- **Removing direct pinning** and converting every test harness and example.
+- Tests 12-14 of §10.
+
+f1 ships working software on its own: certificates verify end to end, and revocation works. f2 is
+what makes them the only path.
 
 ## 10. Testing
 
