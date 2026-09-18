@@ -59,7 +59,8 @@ pub struct AgentCertificate {
     pub version: u8,                     // 1
     pub serial: [u8; 16],                // random, unique per issuance
     pub issuer_key_id: String,           // SHA-256 of the issuing key, lowercase hex
-    pub subject_label: String,           // human-readable, <= 128 chars, not an identity
+    pub subject_label: String,           // display only: free text, never an identity, and
+                                         // nothing binds it to subject_global_id (<= 128 chars)
     pub subject_global_id: String,       // the id this agent may claim
     pub subject_signing_key: [u8; 32],   // Ed25519
     pub subject_sealing_key: [u8; 32],   // X25519
@@ -104,6 +105,17 @@ looking fine.
    **any** id — permissions narrow, but identity would not — and a sub-agent could impersonate its
    own account holder. The root certificate's `subject_global_id` is unconstrained; the account key
    is the authority for it.
+   **A label is one component of ASCII alphanumerics, `-` and `_`, and is never empty**, and neither
+   id may be empty (both tightened 2026-09-17, during the f1 review). Without the charset rule a
+   label may carry an `@`, so `ciresnave@host.agent@host` narrows "under" `agent@host` while
+   presenting as the account holder to anything that splits an id on `@` — which this crate already
+   does in `src/identity.rs` and `src/synapse/services/privacy_manager.rs`. An empty parent id would
+   make every id ending in a dot narrow "under" it, turning this rule off altogether.
+9. **Every certificate declares `version` 1.** An unknown version is refused, never validated under
+   v1's rules.
+10. **A non-root certificate's `issuer_key_id` names the key that signed it.** Authentication rides
+    on the signature, so this is belt-and-braces; the field is signature-covered and consumers may
+    key diagnostics or revocation off it.
 
 Failing any of these makes the sender `Unverifiable`, which slice e's gate denies by default.
 The reason is recorded in the knock, so a misconfiguration is visible rather than silent.
