@@ -148,10 +148,11 @@ pub struct ReceivedMessage {
     pub payload: crate::sealing::Payload,
     /// Whether the signed timestamp could be checked, and what it said (P2 slice e).
     pub freshness: crate::replay::Freshness,
-    /// The certificate chain's summary, when `sender` is `Verified` via a chain rooted in a
-    /// pinned account key (P2 slice f1). `None` for a directly pinned sender, and for any sender
-    /// that is not `Verified` -- this never carries a chain whose leaf identity was not bound to
-    /// this message's claimed sender.
+    /// The certificate chain's summary (P2 slice f1) -- present only when the chain it describes
+    /// is the very chain that authenticated `sender` as `Verified`: its subject names this
+    /// message's claimed sender, and its subject signing key is the key `sender`'s `key_id`
+    /// names. `None` for a directly pinned sender (even one whose message happens to carry an
+    /// unrelated or stale chain for the same id), and for any sender that is not `Verified`.
     pub certificate: Option<crate::certificate::VerifiedChain>,
 }
 
@@ -704,17 +705,24 @@ impl TransportManager {
                 continue;
             }
             let payload = crate::sealing::open(message, sealing_key.as_ref());
-            // Only ever attach a chain summary alongside a verdict that actually bound this
-            // chain's subject to this message's claimed sender: `verify_at`'s chain route checks
-            // that binding before it returns `Verified`, and the `filter` below re-checks it here
-            // rather than trusting that invariant silently -- `verified_chain_at` itself performs
-            // no such check (see its doc comment), so this is the one place that must.
-            let certificate = if verdict.is_verified() {
-                store
-                    .verified_chain_at(message, now)
-                    .filter(|chain| chain.subject_global_id == message.from_global_id)
-            } else {
-                None
+            // Only ever attach a chain summary when the chain it describes is the SAME one that
+            // authenticated this message: `verified_chain_at` resolves any well-formed
+            // `CHAIN_KEY` metadata independently of which route produced the verdict (it performs
+            // no binding check itself -- see its doc comment), so a directly pinned sender whose
+            // message also carries an unrelated or stale chain for the same `global_id` must not
+            // have that chain's (possibly different) key and permissions attached. Matching both
+            // the subject id and the subject's signing key against the verdict's own `key_id`
+            // (which `verify_at`'s chain route only reaches after checking exactly this) closes
+            // that gap; on the chain route the check is a no-op; on the direct-pin route it can
+            // reject a chain that authenticated nothing.
+            let certificate = match &verdict {
+                SenderVerdict::Verified { key_id } => {
+                    store.verified_chain_at(message, now).filter(|chain| {
+                        chain.subject_global_id == message.from_global_id
+                            && crate::sender_auth::key_id(&chain.subject_signing_key) == *key_id
+                    })
+                }
+                _ => None,
             };
             delivered.push(ReceivedMessage {
                 incoming,

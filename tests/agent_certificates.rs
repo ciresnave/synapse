@@ -299,6 +299,67 @@ async fn rotating_an_agent_key_needs_no_change_at_the_receiver() {
     assert!(drain(&bob).await.is_empty());
 }
 
+// Fix round 1: a directly pinned sender must not inherit a chain's summary unless that chain is
+// the one that authenticated this message -- not merely one naming the same `global_id`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_directly_pinned_sender_does_not_inherit_an_unrelated_chains_summary() {
+    let account = account_key(15);
+    let alice = agent();
+    // A different key than Alice's -- standing in for a key that has since rotated away, whose
+    // certificate is stale but still sitting in metadata somewhere upstream.
+    let stale_agent = agent();
+
+    let stale_cert = cert_for(
+        &account,
+        &stale_agent,
+        "agent@alice.test",
+        vec![Permission::Send],
+        6,
+    );
+    // Signed by ALICE's key (the one Bob pins directly), but carrying a chain for the SAME
+    // global id naming the STALE key.
+    let message = message_with_chain(
+        &alice,
+        "agent@alice.test",
+        std::slice::from_ref(&stale_cert),
+        b"hi",
+    );
+
+    // Positive control: the chain is well-formed and resolves entirely on its own -- a receiver
+    // that pins only the account key (no direct pin) accepts it, naming the stale key. This rules
+    // out the failure mode where the test would pass merely because the chain was malformed.
+    let account_only = store_pinning(&account);
+    let resolved = account_only
+        .verified_chain(&message)
+        .expect("the chain resolves on its own");
+    assert_eq!(
+        synapse::sender_auth::key_id(&resolved.subject_signing_key),
+        synapse::sender_auth::key_id(&stale_agent.public_key_bytes().expect("public key"))
+    );
+
+    // Bob pins Alice's key directly AND the account key, so both routes are live at once.
+    let mut store = store_pinning(&account);
+    store.pin(
+        "agent@alice.test",
+        alice.public_key_bytes().expect("public key"),
+    );
+    let (bob, port) = udp_node(store, None).await;
+    send_raw(port, &message);
+    let received = receive_one(&bob).await;
+
+    // The direct pin authenticates the message -- Alice's own signature verifies.
+    assert!(received.sender.is_verified());
+    assert_eq!(
+        received.sender,
+        synapse::sender_auth::SenderVerdict::Verified {
+            key_id: synapse::sender_auth::key_id(&alice.public_key_bytes().expect("public key"))
+        }
+    );
+    // But the chain names a different key than the one that signed this message, so no summary
+    // is attached.
+    assert!(received.certificate.is_none());
+}
+
 /// A revocation of `serial`, signed by `account`.
 fn signed_revocation(account: &SigningKey, serial: [u8; 16]) -> Revocation {
     Revocation::sign(
