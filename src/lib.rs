@@ -195,6 +195,7 @@ pub mod config;
 pub mod error;
 pub mod security;
 
+pub mod certificate;
 pub mod circuit_breaker;
 pub mod connectivity;
 pub mod crypto;
