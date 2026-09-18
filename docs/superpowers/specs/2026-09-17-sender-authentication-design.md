@@ -50,7 +50,7 @@ From `CAPABILITY_INVENTORY.md` §2.2, contributed by the OverMind lane:
 | b | receiver acknowledgement (`DeliveryConfirmation::Received` is never constructed today) |
 | c | a Rust MCP stdio surface an agent can attach to (send, poll, list) |
 | d | **sealing**: real recipient-key encryption (X25519/HPKE, never a key derived from Ed25519). **Publishing 2.0.0 is blocked until this lands.** |
-| e | replay suppression: the signed `message_id` and `timestamp` make it possible; nothing checks them yet. **Acceptance criterion (PM, 2026-09-17): it must also bound slice b's ack-tracking map**, which grows by one entry per `request_ack` send until then |
+| e | replay suppression: the signed `message_id` and `timestamp` make it possible; nothing checks them yet. **Acceptance criterion (PM, 2026-09-17): it must also bound slice b's ack-tracking map, and slice c's kept-messages map and sent-ids list**, all of which grow without bound until then |
 | f | key rotation and revocation for the trust store |
 
 **Left raw on purpose.** These paths still hand out messages without a verdict:

@@ -197,6 +197,11 @@ impl TrustStore {
         self.keys.contains_key(global_id)
     }
 
+    /// The `key_id` of the key pinned for `global_id`.
+    pub fn pinned_key_id(&self, global_id: &str) -> Option<String> {
+        self.keys.get(global_id).map(key_id)
+    }
+
     /// Spec §5: the rules apply in order and the first match wins.
     pub fn verify(&self, message: &SecureMessage) -> SenderVerdict {
         let proof = &message.sender_proof;

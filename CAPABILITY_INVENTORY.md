@@ -550,6 +550,13 @@ lands** (the PM recorded this on CireSnave's board, 2026-09-17).
 
 #### What this means for a non-Rust agent runtime
 
+> **Added 2026-09-17: an MCP stdio surface is built, on branch `feat/mcp-surface` (stacked on
+> `feat/receiver-ack` and `feat/sender-authentication`, and held with them), not on `main`.**
+> It is the `synapse-mcp` binary. Any MCP client, in any language, can `send`, `poll`, `list` and
+> `ack` through synapse, and gets sender verdicts and receiver acknowledgement. Keys and peers can
+> only be changed in the config file. Design: `docs/superpowers/specs/2026-09-17-mcp-surface-design.md`.
+> **`main` has no agent-facing surface until that branch merges.**
+
 | direction | status |
 |---|---|
 | **Synapse → foreign process (TCP)** | ✅ **WORKS — measured.** A Python/Node/Go process opening a TCP listener receives clean parseable JSON. No Rust linkage required. |
