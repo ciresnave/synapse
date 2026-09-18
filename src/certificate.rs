@@ -443,10 +443,13 @@ pub struct VerifiedChain {
     pub links: usize,
 }
 
-/// Whether a certificate's serial has been revoked. Kept as a trait so this module never depends
-/// on the trust store's storage: it is unit-testable with an in-memory fake.
+/// Whether a certificate's serial has been revoked by its own issuer. Scoped by `issuer_key_id` so
+/// one pinned account can never revoke (or, in the trust store, evict) another's entries -- serials
+/// are visible in any chain, so without this any pinned account could silently un-trust another's
+/// agents. Kept as a trait so this module never depends on the trust store's storage: it is
+/// unit-testable with an in-memory fake.
 pub trait RevocationLookup {
-    fn is_revoked(&self, serial: &[u8; 16]) -> bool;
+    fn is_revoked(&self, issuer_key_id: &str, serial: &[u8; 16]) -> bool;
 }
 
 /// A child's id is its parent's with exactly one label prepended: `worker.agent@host` under
@@ -525,7 +528,7 @@ pub fn validate_chain(
     if now > root.not_after {
         return Err(ChainError::Expired);
     }
-    if revoked.is_revoked(&root.serial) {
+    if revoked.is_revoked(&root.issuer_key_id, &root.serial) {
         return Err(ChainError::Revoked);
     }
 
@@ -581,8 +584,9 @@ pub fn validate_chain(
             return Err(ChainError::IdentityNotNarrowed);
         }
 
-        // Rule 8: no certificate's serial is revoked.
-        if revoked.is_revoked(&cert.serial) {
+        // Rule 8: no certificate's serial is revoked (scoped to its own issuer -- a certificate
+        // may only be revoked by the key that actually issued it).
+        if revoked.is_revoked(&cert.issuer_key_id, &cert.serial) {
             return Err(ChainError::Revoked);
         }
 
@@ -807,14 +811,14 @@ mod tests {
 
     struct NoRevocations;
     impl RevocationLookup for NoRevocations {
-        fn is_revoked(&self, _serial: &[u8; 16]) -> bool {
+        fn is_revoked(&self, _issuer_key_id: &str, _serial: &[u8; 16]) -> bool {
             false
         }
     }
 
     struct Revoked([u8; 16]);
     impl RevocationLookup for Revoked {
-        fn is_revoked(&self, serial: &[u8; 16]) -> bool {
+        fn is_revoked(&self, _issuer_key_id: &str, serial: &[u8; 16]) -> bool {
             serial == &self.0
         }
     }

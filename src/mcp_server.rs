@@ -302,6 +302,7 @@ fn sender_view(verdict: &SenderVerdict) -> Value {
                 ContradictedReason::NonCanonicalTimestamp => "non_canonical_timestamp",
                 ContradictedReason::KeyMismatch => "key_mismatch",
                 ContradictedReason::BadSignature => "bad_signature",
+                ContradictedReason::IdentityMismatch => "identity_mismatch",
             },
         }),
     }

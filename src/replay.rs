@@ -359,6 +359,7 @@ pub fn verdict_reason(verdict: &SenderVerdict) -> &'static str {
             ContradictedReason::NonCanonicalTimestamp => "non_canonical_timestamp",
             ContradictedReason::KeyMismatch => "key_mismatch",
             ContradictedReason::BadSignature => "bad_signature",
+            ContradictedReason::IdentityMismatch => "identity_mismatch",
         },
     }
 }
