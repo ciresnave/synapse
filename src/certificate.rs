@@ -190,6 +190,13 @@ fn read_permissions(field: &[u8]) -> Result<Vec<Permission>, ChainError> {
     }
     let count_bytes: [u8; 4] = field[..4].try_into().map_err(|_| ChainError::Malformed)?;
     let count = u32::from_be_bytes(count_bytes) as usize;
+    // Each entry needs at least a 4-byte length prefix, so a `count` larger than the field could
+    // possibly hold is a lying wire value: reject it before allocating rather than trusting it
+    // enough to size a `Vec`.
+    let max_possible_entries = (field.len() - 4) / 4;
+    if count > max_possible_entries {
+        return Err(ChainError::Malformed);
+    }
     let mut pos = 4;
     let mut permissions = Vec::with_capacity(count);
     for _ in 0..count {
@@ -553,6 +560,48 @@ mod tests {
             AgentCertificate::from_pem(&signed.to_pem()),
             Err(ChainError::UnknownPermission)
         ));
+    }
+
+    /// Assemble a well-formed certificate body except that its permissions field is exactly
+    /// `permissions_blob` — bypassing `put_permissions` so a test can hand it a dishonest count.
+    fn build_cert_body(permissions_blob: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        put(&mut out, CERT_DOMAIN_TAG);
+        put(&mut out, &[1u8]); // version
+        put(&mut out, &[7u8; 16]); // serial
+        put(&mut out, b"issuer-key-id"); // issuer_key_id
+        put(&mut out, b"test agent"); // subject_label
+        put(&mut out, b"agent@host"); // subject_global_id
+        put(&mut out, &[0u8; 32]); // subject_signing_key
+        put(&mut out, &[0u8; 32]); // subject_sealing_key
+        put(&mut out, &0i64.to_be_bytes()); // not_before
+        put(&mut out, &86_400i64.to_be_bytes()); // not_after
+        put(&mut out, permissions_blob); // permissions: caller controls the raw blob
+        put(&mut out, &[0u8]); // may_delegate
+        out.extend_from_slice(&[0u8; 64]); // signature (unchecked by from_pem's structural parse)
+        out
+    }
+
+    #[test]
+    fn a_lying_permissions_count_is_rejected_before_allocating() {
+        // A permissions field that is only 4 bytes long -- just the count, no entries -- but
+        // claims ~4.3 billion entries. `Vec::with_capacity` on that count would try to allocate
+        // roughly 100 GB and abort the process; parsing must refuse it structurally first.
+        let malicious_permissions = u32::MAX.to_be_bytes().to_vec();
+        let malicious_pem = pem_text(CERT_PEM_LABEL, build_cert_body(&malicious_permissions));
+        assert!(matches!(
+            AgentCertificate::from_pem(&malicious_pem),
+            Err(ChainError::Malformed)
+        ));
+        // The process reaching this line at all is part of the assertion: an aborting allocation
+        // would have killed the test binary before any assert could run.
+
+        // Control: the same construction with an honest count (one real entry) parses fine.
+        let mut honest_permissions = 1u32.to_be_bytes().to_vec();
+        put(&mut honest_permissions, b"send");
+        let honest_pem = pem_text(CERT_PEM_LABEL, build_cert_body(&honest_permissions));
+        let parsed = AgentCertificate::from_pem(&honest_pem).expect("honest count parses");
+        assert_eq!(parsed.permissions, vec![Permission::Send]);
     }
 
     #[test]
