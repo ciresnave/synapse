@@ -432,6 +432,8 @@ pub fn chain_from_pem(text: &str) -> Result<Vec<AgentCertificate>, ChainError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedChain {
     pub account_key_id: String,
+    /// Display-only free text carried by the leaf certificate. It is never an identity and
+    /// nothing binds it to `subject_global_id`; never key trust or routing decisions off it.
     pub subject_label: String,
     pub subject_global_id: String,
     pub subject_signing_key: [u8; 32],
@@ -452,19 +454,35 @@ pub trait RevocationLookup {
 /// own account holder's (spec §5 rule 8).
 #[must_use]
 pub fn identity_narrows(parent: &str, child: &str) -> bool {
+    // An empty parent would let `child.strip_suffix("")` match anything, and an empty child
+    // cannot narrow anything: close both off before the suffix logic runs.
+    if parent.is_empty() || child.is_empty() {
+        return false;
+    }
     let Some(prefix) = child.strip_suffix(parent) else {
         return false;
     };
     let Some(label) = prefix.strip_suffix('.') else {
         return false;
     };
-    !label.is_empty() && !label.contains('.')
+    if label.is_empty() || label.contains('.') {
+        return false;
+    }
+    // A label is one component: it may not carry the '@' that separates local part from host,
+    // nor anything unprintable that could render as another identity at the display layer (this
+    // crate splits ids on '@' elsewhere, e.g. `src/identity.rs`).
+    label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Validate a certificate chain, leaf first (`chain[0]` is the leaf, `chain[chain.len() - 1]` is
 /// the root), against the rules in spec §5. Walks from the root down to the leaf, carrying the
 /// parent's public key, validity window, permission set and delegation budget, and returns the
 /// first error encountered. On success, returns the leaf's identity, keys and permissions.
+///
+/// This function applies no length cap on `chain`: a caller taking a chain off the network must
+/// bound `chain.len()` itself before calling (the trust store wiring in Task 3 adds that cap).
 pub fn validate_chain(
     chain: &[AgentCertificate],
     account_keys: &dyn Fn(&str) -> Option<[u8; 32]>,
@@ -475,6 +493,12 @@ pub fn validate_chain(
     let Some(root) = chain.last() else {
         return Err(ChainError::Malformed);
     };
+
+    // Every certificate, including the root, must be a version this module knows how to apply
+    // these rules to.
+    if root.version != 1 {
+        return Err(ChainError::Malformed);
+    }
 
     // Rule 2: the root's issuer resolves through the account-key lookup, and its signature
     // verifies against that key.
@@ -508,8 +532,19 @@ pub fn validate_chain(
     // Walk from the root (last element) down to the leaf (first element), skipping the root
     // itself since it was already checked above.
     for cert in chain[..chain.len() - 1].iter().rev() {
+        if cert.version != 1 {
+            return Err(ChainError::Malformed);
+        }
+
         // Rule 3: the certificate's signature verifies against its parent's signing key.
         if !cert.verify_signature(&parent_key) {
+            return Err(ChainError::BadSignature);
+        }
+
+        // The issuer_key_id a certificate declares must actually name its parent. Authentication
+        // rides on the signature check above, so this is not itself exploitable, but the field is
+        // signature-covered and diagnostics or revocation lookups may key off it later.
+        if cert.issuer_key_id != crate::sender_auth::key_id(&parent_key) {
             return Err(ChainError::BadSignature);
         }
 
@@ -831,16 +866,34 @@ mod tests {
 
     #[test]
     fn validity_must_nest_inside_the_parents() {
-        let (account, agent) = (key(1), key(2));
-        let mut child = unsigned(&account, &agent, "worker.agent@host");
-        child.not_after = t(999_999); // outside the parent's window
+        // A child's not_after outside the parent's window.
         let (mut chain, account_key) = two_link_chain();
-        child.issuer_key_id = chain[1].issuer_key_id.clone();
-        chain[0] = AgentCertificate::sign(child, &account);
-        assert!(matches!(
+        let agent = key(2);
+        let worker = key(3);
+        let mut child = unsigned(&agent, &worker, "worker.agent@host");
+        child.issuer_key_id = crate::sender_auth::key_id(&public(&agent));
+        child.may_delegate = 1;
+        child.serial = [8u8; 16];
+        child.not_after = t(999_999); // outside the parent's window
+        chain[0] = AgentCertificate::sign(child, &agent);
+        assert_eq!(
             validate_chain(&chain, &pinned(account_key), &NoRevocations, t(10)),
-            Err(ChainError::ValidityNotNested) | Err(ChainError::BadSignature)
-        ));
+            Err(ChainError::ValidityNotNested)
+        );
+
+        // Mirror case: a child's not_before earlier than the parent's. The `||` in the nesting
+        // check has two arms; without this, only the not_after arm would ever be exercised.
+        let (mut chain, account_key) = two_link_chain();
+        let mut child = unsigned(&agent, &worker, "worker.agent@host");
+        child.issuer_key_id = crate::sender_auth::key_id(&public(&agent));
+        child.may_delegate = 1;
+        child.serial = [8u8; 16];
+        child.not_before = t(-1); // earlier than the parent's not_before
+        chain[0] = AgentCertificate::sign(child, &agent);
+        assert_eq!(
+            validate_chain(&chain, &pinned(account_key), &NoRevocations, t(10)),
+            Err(ChainError::ValidityNotNested)
+        );
     }
 
     #[test]
@@ -952,6 +1005,15 @@ mod tests {
             "the dot is required"
         );
         assert!(!identity_narrows("agent@host", "worker.agent@other"));
+        // An empty parent must not act as a wildcard suffix, and an empty child cannot narrow.
+        assert!(!identity_narrows("", "evil."));
+        assert!(!identity_narrows("agent@host", ""));
+        // A label may not smuggle an '@', which would present as another identity once split.
+        assert!(!identity_narrows("agent@host", "ciresnave@host.agent@host"));
+        // A label may not contain unprintable/whitespace characters either.
+        assert!(!identity_narrows("agent@host", "wor ker.agent@host"));
+        // Positive control: an ordinary label of alphanumerics, '-' and '_' is still accepted.
+        assert!(identity_narrows("agent@host", "worker-1_a.agent@host"));
     }
 
     #[test]
@@ -973,6 +1035,103 @@ mod tests {
         assert_eq!(
             validate_chain(&chain, &pinned(account), &Revoked(root_serial), t(10)),
             Err(ChainError::Revoked)
+        );
+    }
+
+    #[test]
+    fn an_empty_chain_is_malformed() {
+        assert_eq!(
+            validate_chain(&[], &|_| None, &NoRevocations, t(10)),
+            Err(ChainError::Malformed)
+        );
+    }
+
+    #[test]
+    fn a_root_signed_by_the_wrong_key_for_its_known_issuer_id_fails() {
+        let (chain, account) = two_link_chain();
+        // A known issuer id, but the pinned bytes are for a different key than actually signed
+        // the root.
+        let id = crate::sender_auth::key_id(&account);
+        let wrong = public(&key(9));
+        let wrong_key = move |key_id: &str| (key_id == id).then_some(wrong);
+        assert_eq!(
+            validate_chain(&chain, &wrong_key, &NoRevocations, t(10)),
+            Err(ChainError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_flipped_leaf_signature_byte_fails() {
+        let (mut chain, account) = two_link_chain();
+        chain[0].signature[0] ^= 1;
+        assert_eq!(
+            validate_chain(&chain, &pinned(account), &NoRevocations, t(10)),
+            Err(ChainError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_childs_delegation_budget_must_be_strictly_less_than_its_parents() {
+        let (account, agent, worker) = (key(1), key(2), key(3));
+        // Equal budgets (parent 2, child 2) are refused.
+        let upper = {
+            let mut c = unsigned(&account, &agent, "agent@host");
+            c.may_delegate = 2;
+            AgentCertificate::sign(c, &account)
+        };
+        let lower = {
+            let mut c = unsigned(&agent, &worker, "worker.agent@host");
+            c.issuer_key_id = crate::sender_auth::key_id(&public(&agent));
+            c.may_delegate = 2;
+            c.serial = [8u8; 16];
+            AgentCertificate::sign(c, &agent)
+        };
+        assert_eq!(
+            validate_chain(
+                &[lower, upper.clone()],
+                &pinned(public(&account)),
+                &NoRevocations,
+                t(10)
+            ),
+            Err(ChainError::DelegationNotAllowed)
+        );
+
+        // Positive control: a strictly smaller budget (parent 2, child 1) is accepted.
+        let lower_ok = {
+            let mut c = unsigned(&agent, &worker, "worker.agent@host");
+            c.issuer_key_id = crate::sender_auth::key_id(&public(&agent));
+            c.may_delegate = 1;
+            c.serial = [8u8; 16];
+            AgentCertificate::sign(c, &agent)
+        };
+        assert!(
+            validate_chain(
+                &[lower_ok, upper],
+                &pinned(public(&account)),
+                &NoRevocations,
+                t(10)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_single_link_chain_verifies() {
+        let (chain, account) = two_link_chain();
+        let root_only = &chain[1..];
+        let verified = validate_chain(root_only, &pinned(account), &NoRevocations, t(10))
+            .expect("a lone root is a valid one-link chain");
+        assert_eq!(verified.links, 1);
+        assert_eq!(verified.subject_global_id, "agent@host");
+    }
+
+    #[test]
+    fn an_unknown_certificate_version_is_malformed() {
+        let (mut chain, account) = two_link_chain();
+        chain[0].version = 2;
+        assert_eq!(
+            validate_chain(&chain, &pinned(account), &NoRevocations, t(10)),
+            Err(ChainError::Malformed)
         );
     }
 }
