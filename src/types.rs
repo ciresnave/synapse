@@ -519,6 +519,12 @@ impl SecureMessage {
         self.metadata.insert(key.into(), value.into());
     }
 
+    /// Ask the receiver to acknowledge this message at `reply_to` (P2 slice b). Call this BEFORE
+    /// signing: the address is a signed field.
+    pub fn request_ack(&mut self, reply_to: impl Into<String>) {
+        self.add_metadata(crate::delivery_ack::REPLY_TO_KEY, reply_to);
+    }
+
     /// Get the content as a string (for testing compatibility)
     pub fn content(&self) -> String {
         String::from_utf8_lossy(&self.encrypted_content).to_string()

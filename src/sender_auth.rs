@@ -59,10 +59,12 @@ pub const CANONICAL_DOMAIN_TAG: &[u8] = b"synapse/sender-proof/v1";
 
 /// Lowercase hex SHA-256 of an Ed25519 public key.
 pub fn key_id(public_key: &[u8; 32]) -> String {
-    Sha256::digest(public_key)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    to_hex(&Sha256::digest(public_key))
+}
+
+/// Lowercase hex.
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The serde name of a security level. The match is exhaustive, so a new variant fails to compile

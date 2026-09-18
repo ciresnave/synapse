@@ -312,6 +312,13 @@ capped at 65507 bytes (`max_message_size` default). **This is a working link, no
 
 #### ⚠️ EVERY DELIVERY CONFIRMATION SYNAPSE PRODUCES IS SENDER-SIDE
 
+> **Added 2026-09-17: a receiver-derived acknowledgement is built, on branch `feat/receiver-ack`
+> (stacked on `feat/sender-authentication`, and held with it), not on `main`.** The receiving
+> application sends a signed ack after processing. The sender reaches `Acknowledged` only on a
+> verified, matching ack, and the unused `Received` variant is removed. Design:
+> `docs/superpowers/specs/2026-09-17-receiver-acknowledgement-design.md`. **Until that branch
+> merges, this heading remains true of `main`.**
+
 Checked because the FAM lane, whose fabric is being rewritten into Synapse, handed over a measured
 requirement — *"the ack must belong to the receiver"* — after their own system marked a message
 delivered on the **pushing** side and a client silently destroyed its own backlog. **Synapse has the

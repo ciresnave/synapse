@@ -198,6 +198,7 @@ pub mod security;
 pub mod circuit_breaker;
 pub mod connectivity;
 pub mod crypto;
+pub mod delivery_ack;
 pub mod email;
 pub mod email_server;
 pub mod identity;
