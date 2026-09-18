@@ -141,8 +141,9 @@ async fn drain(
 // FIX 1 (P2f1 fix wave): the send-side mechanism (`CryptoManager::set_certificate_chain` +
 // `sign_secure_message` attaching it) had zero callers and zero tests before this -- every other
 // test in this file attaches CHAIN_KEY by hand. This exercises the actual send path, then proves
-// the chain is signature-covered: stripping CHAIN_KEY out of the received message's metadata and
-// re-verifying must NOT verify, because the metadata is inside the signed bytes.
+// the chain is signature-covered: the chain is inside the signed bytes, so altering or removing it
+// invalidates the signature for any receiver that can check it (one that has an independent
+// binding to check the signature against -- here, a direct pin).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_send_side_chain_mechanism_signs_and_verifies_with_no_hand_added_metadata() {
     let account = account_key(21);
@@ -179,13 +180,20 @@ async fn the_send_side_chain_mechanism_signs_and_verifies_with_no_hand_added_met
     let summary = received.certificate.expect("a certificate summary");
     assert_eq!(summary.subject_global_id, "agent@alice.test");
 
-    // Control: strip CHAIN_KEY from the message's metadata (as a relay stripping the chain would)
-    // and re-run verify_at directly. Pin Alice's own key directly here too (spec: direct pinning
-    // always wins when both apply), so the recomputed canonical input -- which folds in metadata
-    // -- is checked against the ORIGINAL signature, which was computed over metadata that included
-    // the chain. Because the chain is inside the signed bytes, removing it changes the recomputed
-    // input and must break the signature outright, not merely fall back to "no chain": that is what
-    // proves a relay cannot strip the chain undetected.
+    // Control: clone the locally built, already-signed pre-send `message` (same bytes as what was
+    // sent, not the received copy), strip CHAIN_KEY from that clone's metadata (as a relay
+    // stripping the chain would), and re-run verify_at directly. Pin Alice's own key directly here
+    // too (spec: direct pinning always wins when both apply), so the recomputed canonical input --
+    // which folds in metadata -- is checked against the ORIGINAL signature, which was computed
+    // over metadata that included the chain.
+    //
+    // This does NOT show a relay can never strip the chain undetected in general: a receiver that
+    // pins only the account key has no independent binding to check the stripped message against,
+    // so on that route stripping yields `Unverifiable { UnknownSender }` (delivered, unflagged,
+    // under `accept_unverified`) rather than a caught contradiction. What it shows is narrower and
+    // still the point: the chain is inside the signed bytes, so altering or removing it invalidates
+    // the signature for any receiver that CAN check it -- one with an independent binding, such as
+    // this direct pin.
     let mut stripped = message.clone();
     stripped
         .metadata
@@ -196,6 +204,14 @@ async fn the_send_side_chain_mechanism_signs_and_verifies_with_no_hand_added_met
         "agent@alice.test",
         alice.public_key_bytes().expect("public key"),
     );
+
+    // Positive half of the control: the SAME store, on the UNSTRIPPED message, verifies fine --
+    // so the failure below is caused by the stripping, not by some other property of this store.
+    assert!(
+        store.verify(&message).is_verified(),
+        "the unstripped message must still verify under the same (doubly-pinned) store"
+    );
+
     let verdict = store.verify(&stripped);
     assert_eq!(
         verdict,

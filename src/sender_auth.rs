@@ -1311,6 +1311,41 @@ mod tests {
         );
     }
 
+    // Follow-up to FIX 4: once the key_id check fires two steps earlier, the chain route's own
+    // terminal `BadSignature` arm (the actual Ed25519 signature check, not the key_id check) had
+    // no test left reaching it -- `a_chain_that_does_not_match_the_signing_key_is_contradicted`
+    // now stops at `KeyMismatch` before it gets there. Reach it here: sign correctly with the
+    // leaf's own key (so `sender_proof.key_id` names the leaf and the identity check passes), then
+    // tamper `encrypted_content` after signing -- a field the signature covers but no earlier
+    // check inspects.
+    #[test]
+    fn the_chain_route_rejects_a_signature_that_does_not_verify_against_the_leaf() {
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let mut agent = CryptoManager::new_with_keypair();
+        let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        agent.set_certificate_chain(vec![cert]);
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        agent.sign_secure_message(&mut message).unwrap();
+        // `sender_proof.key_id` correctly names the leaf, and `from_global_id` matches the chain's
+        // subject -- both earlier checks pass. Tampering the ciphertext after signing invalidates
+        // only the signature itself.
+        message.encrypted_content.push(0xFF);
+
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Contradicted {
+                reason: ContradictedReason::BadSignature
+            }
+        );
+    }
+
     // FIX 5 (P2f1 fix wave): `Revocation.version` is checked, just as certificates already refuse
     // an unknown version in two places -- a future v2 revocation must not be stored and applied
     // under v1 semantics.
