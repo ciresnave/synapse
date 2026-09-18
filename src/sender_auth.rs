@@ -208,11 +208,12 @@ pub struct TrustStore {
     /// Pinned account keys, by `key_id`. A chain whose root names one of these is trusted for
     /// however many agents that account signs certificates for.
     account_keys: HashMap<String, AccountKeyEntry>,
-    /// Accepted revocations, keyed by `(issuer_key_id, serial)`. Keying on the issuer as well as
-    /// the serial means one pinned account can never revoke, or evict, another's entries: serials
-    /// are visible in any chain, so without this any pinned account could silently un-trust
-    /// another's agents.
-    revocations: HashMap<(String, [u8; 16]), Revocation>,
+    /// Accepted revocations, keyed by issuer `key_id` and then by serial. Keying on the issuer as
+    /// well as the serial means one pinned account can never evict another's entries: serials are
+    /// visible in any chain, so without this any pinned account could silently un-trust another's
+    /// agents (`validate_chain` separately allows an account key to revoke anything in its own
+    /// subtree, not only what it issued directly -- see `resolve_chain`).
+    revocations: HashMap<String, HashMap<[u8; 16], Revocation>>,
     /// A chain's PEM text longer than this is refused before parsing.
     pub max_chain_bytes: usize,
     /// A parsed chain with more certificates than this is refused before any signature in it is
@@ -274,9 +275,10 @@ impl TrustStore {
     /// Accept `revocation` if its issuer is a pinned account key, its signature verifies against
     /// that key, and its `(issuer_key_id, serial)` is not already held. Returns whether it was
     /// stored. Before inserting, evicts that issuer's oldest `issued_at` entry once that issuer is
-    /// already at [`MAX_REVOCATIONS_PER_ISSUER`], and the store's oldest overall once the store is
-    /// already at [`MAX_REVOCATIONS`] -- always from the existing entries, never the one about to
-    /// be inserted.
+    /// already at [`MAX_REVOCATIONS_PER_ISSUER`], and (once the store is already at
+    /// [`MAX_REVOCATIONS`] overall) the oldest entry belonging to whichever issuer currently holds
+    /// the most, so one busy issuer cannot cost another issuer its own revocations -- always from
+    /// the existing entries, never the one about to be inserted.
     pub fn add_revocation(&mut self, revocation: Revocation) -> bool {
         let Some(entry) = self.account_keys.get(&revocation.issuer_key_id) else {
             return false;
@@ -284,50 +286,63 @@ impl TrustStore {
         if !revocation.verify_signature(&entry.key) {
             return false;
         }
-        let key = (revocation.issuer_key_id.clone(), revocation.serial);
-        if self.revocations.contains_key(&key) {
-            return false;
-        }
-
         let issuer = revocation.issuer_key_id.clone();
         if self
             .revocations
-            .keys()
-            .filter(|(i, _)| *i == issuer)
-            .count()
-            >= MAX_REVOCATIONS_PER_ISSUER
-            && let Some(oldest) = self
-                .revocations
-                .iter()
-                .filter(|((i, _), _)| *i == issuer)
-                .min_by_key(|(_, r)| r.issued_at)
-                .map(|(k, _)| k.clone())
+            .get(&issuer)
+            .is_some_and(|bucket| bucket.contains_key(&revocation.serial))
         {
-            self.revocations.remove(&oldest);
-        }
-        if self.revocations.len() >= MAX_REVOCATIONS
-            && let Some(oldest) = self
-                .revocations
-                .iter()
-                .min_by_key(|(_, r)| r.issued_at)
-                .map(|(k, _)| k.clone())
-        {
-            self.revocations.remove(&oldest);
+            return false;
         }
 
-        self.revocations.insert(key, revocation);
+        if let Some(bucket) = self.revocations.get(&issuer)
+            && bucket.len() >= MAX_REVOCATIONS_PER_ISSUER
+            && let Some(oldest) = bucket
+                .iter()
+                .min_by_key(|(_, r)| r.issued_at)
+                .map(|(serial, _)| *serial)
+        {
+            self.revocations
+                .get_mut(&issuer)
+                .expect("just read")
+                .remove(&oldest);
+        }
+
+        let total: usize = self.revocations.values().map(HashMap::len).sum();
+        if total >= MAX_REVOCATIONS
+            && let Some(biggest_issuer) = self
+                .revocations
+                .iter()
+                .max_by_key(|(_, bucket)| bucket.len())
+                .map(|(issuer, _)| issuer.clone())
+            && let Some(oldest) = self.revocations[&biggest_issuer]
+                .iter()
+                .min_by_key(|(_, r)| r.issued_at)
+                .map(|(serial, _)| *serial)
+        {
+            self.revocations
+                .get_mut(&biggest_issuer)
+                .expect("just read")
+                .remove(&oldest);
+        }
+
+        self.revocations
+            .entry(issuer)
+            .or_default()
+            .insert(revocation.serial, revocation);
         true
     }
 
     /// Whether a certificate serial has been revoked by that same issuer.
     pub fn is_revoked(&self, issuer_key_id: &str, serial: &[u8; 16]) -> bool {
         self.revocations
-            .contains_key(&(issuer_key_id.to_string(), *serial))
+            .get(issuer_key_id)
+            .is_some_and(|bucket| bucket.contains_key(serial))
     }
 
     /// How many revocations are currently held, across all issuers.
     pub fn revocation_count(&self) -> usize {
-        self.revocations.len()
+        self.revocations.values().map(HashMap::len).sum()
     }
 
     /// Steps 3-6 of [`TrustStore::verify`]'s chain route: bound the chain's size before parsing,
@@ -467,6 +482,18 @@ impl TrustStore {
             Err(reason) => return SenderVerdict::Unverifiable { reason },
         };
 
+        // `alg: none` asserts nothing -- there is no failed signature to be `Contradicted` about,
+        // only an absent one. Spec rule 1 puts "no signature" ahead of every other rule that
+        // depends on the signature, including the identity check just below, and it matters
+        // operationally: `Contradicted` is always dropped, while `Unverifiable` is delivered under
+        // `accept_unverified`. This runs before the identity check so both routes (direct-pin and
+        // chain) agree on precedence.
+        if message.sender_proof.alg == ProofAlg::None {
+            return SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::Unsigned,
+            };
+        }
+
         // The chain authenticates a subject id; the message merely claims one in
         // `from_global_id`. Without this check, any agent under a pinned account could send as
         // any id it likes -- another account's namespace, or its own account holder's -- simply
@@ -474,16 +501,6 @@ impl TrustStore {
         if verified.subject_global_id != message.from_global_id {
             return SenderVerdict::Contradicted {
                 reason: ContradictedReason::IdentityMismatch,
-            };
-        }
-
-        // `alg: none` asserts nothing -- there is no failed signature to be `Contradicted` about,
-        // only an absent one. Spec rule 1 puts "no signature" ahead of every signature rule, and
-        // it matters operationally: `Contradicted` is always dropped, while `Unverifiable` is
-        // delivered under `accept_unverified`.
-        if message.sender_proof.alg == ProofAlg::None {
-            return SenderVerdict::Unverifiable {
-                reason: UnverifiableReason::Unsigned,
             };
         }
 
@@ -888,6 +905,239 @@ mod tests {
             store.verify(&message),
             SenderVerdict::Unverifiable {
                 reason: UnverifiableReason::Unsigned
+            }
+        );
+    }
+
+    // Fix round 2, fix 4: the unsigned check now runs before the identity check on the chain
+    // route too, so an unsigned message with a valid chain reports `Unsigned` even when the
+    // chain's subject also does not match `from_global_id` -- both routes now agree that missing
+    // evidence is reported before any conclusion that depends on a signature existing at all.
+    #[test]
+    fn an_unsigned_mismatched_chain_reports_unsigned_not_identity_mismatch() {
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let agent = CryptoManager::new_with_keypair();
+        let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "ceo@bob.test", // mismatched claimed sender, on top of being unsigned
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        message.add_metadata(
+            certificate::CHAIN_KEY,
+            certificate::chain_to_pem(std::slice::from_ref(&cert)),
+        );
+        // Deliberately never signed.
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::Unsigned
+            }
+        );
+    }
+
+    // Fix round 2, fix 1: an account key's revocation must reach a certificate it did not issue
+    // directly, as long as that certificate is in the account's own subtree. Before this fix,
+    // the trust store only ever checked a certificate's revocation status under its own immediate
+    // issuer, so revoking a grandchild's serial with the account key was silently a no-op: it
+    // returned `true` from `add_revocation`, but the certificate kept verifying.
+    #[test]
+    fn an_account_key_revokes_a_certificate_it_did_not_issue_directly() {
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let agent = SigningKey::from_bytes(&[12u8; 32]); // intermediate: delegates to the worker
+        let worker = CryptoManager::new_with_keypair();
+        let now = t_now();
+
+        let root = certificate::AgentCertificate::sign(
+            certificate::AgentCertificate {
+                version: 1,
+                serial: [7u8; 16],
+                issuer_key_id: key_id(&account.verifying_key().to_bytes()),
+                subject_label: "agent".to_string(),
+                subject_global_id: "agent@alice.test".to_string(),
+                subject_signing_key: agent.verifying_key().to_bytes(),
+                subject_sealing_key: [9u8; 32],
+                not_before: now - chrono::Duration::hours(1),
+                not_after: now + chrono::Duration::hours(1),
+                permissions: vec![certificate::Permission::Send],
+                may_delegate: 1,
+                signature: [0u8; 64],
+            },
+            &account,
+        );
+        let leaf_serial = [8u8; 16];
+        let leaf = certificate::AgentCertificate::sign(
+            certificate::AgentCertificate {
+                version: 1,
+                serial: leaf_serial,
+                issuer_key_id: key_id(&agent.verifying_key().to_bytes()),
+                subject_label: "worker".to_string(),
+                subject_global_id: "worker.agent@alice.test".to_string(),
+                subject_signing_key: worker.public_key_bytes().expect("worker has a public key"),
+                subject_sealing_key: [9u8; 32],
+                not_before: now - chrono::Duration::hours(1),
+                not_after: now + chrono::Duration::hours(1),
+                permissions: vec![certificate::Permission::Send],
+                may_delegate: 0,
+                signature: [0u8; 64],
+            },
+            &agent,
+        );
+
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "worker.agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        message.add_metadata(
+            certificate::CHAIN_KEY,
+            certificate::chain_to_pem(&[leaf, root]),
+        );
+        worker.sign_secure_message(&mut message).unwrap();
+
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert!(
+            store.verify(&message).is_verified(),
+            "valid before any revocation"
+        );
+
+        // The account revokes the leaf's serial directly -- it never issued the leaf (the agent
+        // did) -- and `add_revocation` must both accept it AND have it actually bite.
+        assert!(store.add_revocation(signed_revocation(&account, leaf_serial)));
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::InvalidChain
+            }
+        );
+    }
+
+    // Fix round 2, fix 1 (continued): the same reach extends past one level -- revoking a
+    // non-root, non-leaf certificate with the account key kills its whole subtree, not just that
+    // one certificate.
+    #[test]
+    fn revoking_an_intermediate_certificate_with_the_account_key_kills_its_subtree() {
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let agent = SigningKey::from_bytes(&[12u8; 32]);
+        let worker = SigningKey::from_bytes(&[13u8; 32]);
+        let subworker = CryptoManager::new_with_keypair();
+        let now = t_now();
+
+        let root = certificate::AgentCertificate::sign(
+            certificate::AgentCertificate {
+                version: 1,
+                serial: [7u8; 16],
+                issuer_key_id: key_id(&account.verifying_key().to_bytes()),
+                subject_label: "agent".to_string(),
+                subject_global_id: "agent@alice.test".to_string(),
+                subject_signing_key: agent.verifying_key().to_bytes(),
+                subject_sealing_key: [9u8; 32],
+                not_before: now - chrono::Duration::hours(1),
+                not_after: now + chrono::Duration::hours(1),
+                permissions: vec![certificate::Permission::Send],
+                may_delegate: 2,
+                signature: [0u8; 64],
+            },
+            &account,
+        );
+        let middle_serial = [8u8; 16];
+        let middle = certificate::AgentCertificate::sign(
+            certificate::AgentCertificate {
+                version: 1,
+                serial: middle_serial,
+                issuer_key_id: key_id(&agent.verifying_key().to_bytes()),
+                subject_label: "worker".to_string(),
+                subject_global_id: "worker.agent@alice.test".to_string(),
+                subject_signing_key: worker.verifying_key().to_bytes(),
+                subject_sealing_key: [9u8; 32],
+                not_before: now - chrono::Duration::hours(1),
+                not_after: now + chrono::Duration::hours(1),
+                permissions: vec![certificate::Permission::Send],
+                may_delegate: 1,
+                signature: [0u8; 64],
+            },
+            &agent,
+        );
+        let leaf = certificate::AgentCertificate::sign(
+            certificate::AgentCertificate {
+                version: 1,
+                serial: [9u8; 16],
+                issuer_key_id: key_id(&worker.verifying_key().to_bytes()),
+                subject_label: "subworker".to_string(),
+                subject_global_id: "sub.worker.agent@alice.test".to_string(),
+                subject_signing_key: subworker
+                    .public_key_bytes()
+                    .expect("subworker has a public key"),
+                subject_sealing_key: [9u8; 32],
+                not_before: now - chrono::Duration::hours(1),
+                not_after: now + chrono::Duration::hours(1),
+                permissions: vec![certificate::Permission::Send],
+                may_delegate: 0,
+                signature: [0u8; 64],
+            },
+            &worker,
+        );
+
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "sub.worker.agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        message.add_metadata(
+            certificate::CHAIN_KEY,
+            certificate::chain_to_pem(&[leaf, middle, root]),
+        );
+        subworker.sign_secure_message(&mut message).unwrap();
+
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert!(
+            store.verify(&message).is_verified(),
+            "valid before revocation"
+        );
+
+        // The account revokes the MIDDLE certificate (issued by the agent, not the account); the
+        // leaf's own serial was never revoked, but its whole branch must die with its parent.
+        assert!(store.add_revocation(signed_revocation(&account, middle_serial)));
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::InvalidChain
+            }
+        );
+    }
+
+    // Reported, not fixed: an unpinned, chain-less sender using `alg: Ed25519` with
+    // sub-microsecond digits used to report `Unverifiable { UnknownSender }` (delivered under
+    // `accept_unverified`) and now reports `Contradicted { NonCanonicalTimestamp }` (always
+    // dropped), because the timestamp guard now runs before the pin/chain lookup on every route.
+    // Pinned here deliberately: the digits are unauthenticated on every route regardless of
+    // whether the sender is otherwise recognised, so this is judged correct and intended.
+    #[test]
+    fn an_unrecognised_signed_sender_with_a_non_canonical_timestamp_is_contradicted() {
+        let agent = CryptoManager::new_with_keypair();
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "mallory@nowhere.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        agent.sign_secure_message(&mut message).unwrap();
+        let ts = message.timestamp.0;
+        message.timestamp.0 = ts
+            .with_nanosecond(ts.timestamp_subsec_nanos() + 7)
+            .expect("still a valid instant");
+        let store = TrustStore::new(); // unpinned, no chain
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Contradicted {
+                reason: ContradictedReason::NonCanonicalTimestamp
             }
         );
     }

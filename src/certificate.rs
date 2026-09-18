@@ -584,9 +584,15 @@ pub fn validate_chain(
             return Err(ChainError::IdentityNotNarrowed);
         }
 
-        // Rule 8: no certificate's serial is revoked (scoped to its own issuer -- a certificate
-        // may only be revoked by the key that actually issued it).
-        if revoked.is_revoked(&cert.issuer_key_id, &cert.serial) {
+        // Rule 8: no certificate's serial is revoked. Checked under both the certificate's own
+        // issuer (an intermediate agent may revoke only what it itself issued) and the chain's
+        // root account key (an account holder may revoke anything in their own subtree, not only
+        // what they issued directly -- otherwise an account-signed revocation of a
+        // grandchild's serial would silently do nothing, since validate_chain looks a non-root
+        // certificate up under its immediate issuer).
+        if revoked.is_revoked(&cert.issuer_key_id, &cert.serial)
+            || revoked.is_revoked(&account_key_id, &cert.serial)
+        {
             return Err(ChainError::Revoked);
         }
 
@@ -816,10 +822,15 @@ mod tests {
         }
     }
 
-    struct Revoked([u8; 16]);
+    /// A fake that only revokes `serial` when asked under exactly `issuer_key_id` -- unlike the
+    /// old serial-only fake, this exercises the issuer scoping `validate_chain` actually enforces.
+    struct Revoked {
+        issuer_key_id: String,
+        serial: [u8; 16],
+    }
     impl RevocationLookup for Revoked {
-        fn is_revoked(&self, _issuer_key_id: &str, serial: &[u8; 16]) -> bool {
-            serial == &self.0
+        fn is_revoked(&self, issuer_key_id: &str, serial: &[u8; 16]) -> bool {
+            issuer_key_id == self.issuer_key_id && serial == &self.serial
         }
     }
 
@@ -1024,12 +1035,32 @@ mod tests {
     fn a_revoked_certificate_invalidates_the_chain() {
         let (chain, account) = two_link_chain();
         let leaf_serial = chain[0].serial;
+        let agent_id = crate::sender_auth::key_id(&public(&key(2)));
         assert_eq!(
-            validate_chain(&chain, &pinned(account), &Revoked(leaf_serial), t(10)),
+            validate_chain(
+                &chain,
+                &pinned(account),
+                &Revoked {
+                    issuer_key_id: agent_id.clone(),
+                    serial: leaf_serial
+                },
+                t(10)
+            ),
             Err(ChainError::Revoked)
         );
-        // Control: revoking an unrelated serial leaves the chain valid.
-        assert!(validate_chain(&chain, &pinned(account), &Revoked([1u8; 16]), t(10)).is_ok());
+        // Control: revoking an unrelated serial, from the same issuer, leaves the chain valid.
+        assert!(
+            validate_chain(
+                &chain,
+                &pinned(account),
+                &Revoked {
+                    issuer_key_id: agent_id,
+                    serial: [1u8; 16]
+                },
+                t(10)
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1037,7 +1068,60 @@ mod tests {
         let (chain, account) = two_link_chain();
         let root_serial = chain[1].serial;
         assert_eq!(
-            validate_chain(&chain, &pinned(account), &Revoked(root_serial), t(10)),
+            validate_chain(
+                &chain,
+                &pinned(account),
+                &Revoked {
+                    issuer_key_id: crate::sender_auth::key_id(&account),
+                    serial: root_serial
+                },
+                t(10)
+            ),
+            Err(ChainError::Revoked)
+        );
+    }
+
+    // Fix 6 (P2f1 fix round 2): a revocation is only honoured under the right issuer -- neither an
+    // unrelated key nor even the leaf's own serial-holder is enough on its own.
+    #[test]
+    fn a_revocation_under_the_wrong_issuer_does_not_revoke_it() {
+        let (chain, account) = two_link_chain();
+        let leaf_serial = chain[0].serial;
+        // Neither the leaf's own key nor an unrelated third key issued the leaf: only its actual
+        // issuer (the agent) or the account root may revoke it (the latter checked below).
+        let unrelated_issuer = crate::sender_auth::key_id(&public(&key(9)));
+        assert!(
+            validate_chain(
+                &chain,
+                &pinned(account),
+                &Revoked {
+                    issuer_key_id: unrelated_issuer,
+                    serial: leaf_serial
+                },
+                t(10)
+            )
+            .is_ok()
+        );
+    }
+
+    // Fix 1 (P2f1 fix round 2): an account key's revocation reaches a certificate it did not
+    // issue directly, as long as that certificate is somewhere in the account's own subtree.
+    // Before this fix, `validate_chain` only ever looked a certificate up under its own immediate
+    // issuer, so an account-signed revocation of a grandchild's serial silently did nothing.
+    #[test]
+    fn an_account_key_can_revoke_a_certificate_it_did_not_issue_directly() {
+        let (chain, account) = two_link_chain();
+        let leaf_serial = chain[0].serial; // issued by the agent, not the account
+        assert_eq!(
+            validate_chain(
+                &chain,
+                &pinned(account),
+                &Revoked {
+                    issuer_key_id: crate::sender_auth::key_id(&account),
+                    serial: leaf_serial
+                },
+                t(10)
+            ),
             Err(ChainError::Revoked)
         );
     }

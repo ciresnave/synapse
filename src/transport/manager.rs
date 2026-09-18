@@ -663,7 +663,7 @@ impl TransportManager {
         let mut delivered = Vec::with_capacity(all_messages.len());
         for incoming in all_messages {
             let message = &incoming.message;
-            let verdict = store.verify(message);
+            let verdict = store.verify_at(message, now);
             let admission = inbound.admit(
                 &verdict,
                 &message.from_global_id,
