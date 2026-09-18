@@ -84,7 +84,7 @@ The CLI, the `synapse-mcp` config changes and removing direct pinning are f2, no
   - `to_pem(&self) -> String` and `from_pem(&str) -> Result<Self, ChainError>` for both.
   - `pub fn chain_to_pem(chain: &[AgentCertificate]) -> String` and
     `pub fn chain_from_pem(text: &str) -> Result<Vec<AgentCertificate>, ChainError>` (leaf first).
-  - `pub enum ChainError { Malformed, UnknownPermission, TooLarge, UnknownIssuer, BadSignature, NotYetValid, Expired, ValidityNotNested, PermissionWidened, DelegationNotAllowed, IdentityNotNarrowed, SubjectMismatch, Revoked }`, with `Display` giving snake_case names.
+  - `pub enum ChainError { Malformed, UnknownPermission, TooLarge, UnknownIssuer, BadSignature, NotYetValid, Expired, ValidityNotNested, PermissionWidened, DelegationNotAllowed, IdentityNotNarrowed, Revoked }` — note `SubjectMismatch` was in the first draft of this plan and was deleted during the final review: it was never constructed, because the leaf-to-message binding lives in `sender_auth` as `ContradictedReason::IdentityMismatch`., with `Display` giving snake_case names.
 
 - [ ] **Step 1: Write the failing tests** in `src/certificate.rs`'s `#[cfg(test)] mod tests`.
 
