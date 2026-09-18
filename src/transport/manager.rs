@@ -6,6 +6,7 @@
 //! automatic failover, and unified metrics.
 
 use super::abstraction::*;
+use crate::certificate;
 use crate::crypto::CryptoManager;
 use crate::delivery_ack;
 use crate::error::SynapseError;
@@ -636,6 +637,18 @@ impl TransportManager {
         *self.trust_store.write().await = store;
     }
 
+    /// Offer `revocations` to the trust store, taking its write lock. Returns how many were newly
+    /// stored -- `TrustStore::add_revocation` already refuses anything not signed by a pinned
+    /// account key, so a relay (see [`Self::receive_messages`]) can deliver a revocation but never
+    /// forge one.
+    pub async fn add_revocations(&self, revocations: &[crate::certificate::Revocation]) -> usize {
+        let mut store = self.trust_store.write().await;
+        revocations
+            .iter()
+            .filter(|revocation| store.add_revocation((*revocation).clone()))
+            .count()
+    }
+
     /// Receive messages from all active transports, each paired with a sender verdict.
     pub async fn receive_messages(&self) -> Result<Vec<ReceivedMessage>> {
         let mut all_messages = Vec::new();
@@ -667,9 +680,23 @@ impl TransportManager {
         let mut inbound = self.inbound.write().await;
         let now = chrono::Utc::now();
         let mut delivered = Vec::with_capacity(all_messages.len());
+        let mut relayed_revocations = Vec::new();
         for incoming in all_messages {
             let message = &incoming.message;
             let verdict = store.verify_at(message, now);
+            // A verified sender may relay revocations it learned about, in metadata alongside the
+            // message itself. `add_revocation` refuses anything not signed by a pinned account
+            // key, so a relay can deliver a revocation but never forge one; the cap below (mirrors
+            // the chain field's own cap) bounds attacker-supplied input before it is parsed at
+            // all. Collected here and applied after this loop, once the read lock on the trust
+            // store this loop is holding is dropped.
+            if verdict.is_verified()
+                && let Some(field) = message.metadata.get(certificate::REVOCATIONS_KEY)
+                && field.len() <= store.max_chain_bytes
+                && let Ok(parsed) = certificate::revocations_from_pem(field)
+            {
+                relayed_revocations.extend(parsed);
+            }
             let admission = inbound.admit(
                 &verdict,
                 &message.from_global_id,
@@ -731,6 +758,12 @@ impl TransportManager {
                 freshness,
                 certificate,
             });
+        }
+        drop(store);
+        drop(sealing_key);
+        drop(inbound);
+        if !relayed_revocations.is_empty() {
+            self.add_revocations(&relayed_revocations).await;
         }
         Ok(delivered)
     }

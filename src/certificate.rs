@@ -409,6 +409,22 @@ pub fn chain_to_pem(chain: &[AgentCertificate]) -> String {
     chain.iter().map(AgentCertificate::to_pem).collect()
 }
 
+/// Parse zero or more concatenated [`Revocation`] PEM blocks, as carried in [`REVOCATIONS_KEY`]
+/// metadata. Unlike [`chain_from_pem`], an empty input is not an error: a message may legitimately
+/// carry the key with no revocations, or none at all.
+pub fn revocations_from_pem(text: &str) -> Result<Vec<Revocation>, ChainError> {
+    let blocks = pem::parse_many(text).map_err(|_| ChainError::Malformed)?;
+    blocks
+        .iter()
+        .map(|block| {
+            if block.tag() != REVOCATION_PEM_LABEL {
+                return Err(ChainError::Malformed);
+            }
+            Revocation::from_body(block.contents())
+        })
+        .collect()
+}
+
 /// The inverse of [`chain_to_pem`]. Returns [`ChainError::Malformed`] on an empty or unparsable
 /// input.
 pub fn chain_from_pem(text: &str) -> Result<Vec<AgentCertificate>, ChainError> {

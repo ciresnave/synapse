@@ -5,7 +5,9 @@
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use synapse::CryptoManager;
-use synapse::certificate::{AgentCertificate, Permission, Revocation, chain_to_pem};
+use synapse::certificate::{
+    AgentCertificate, Permission, REVOCATIONS_KEY, Revocation, chain_to_pem,
+};
 use synapse::sender_auth::TrustStore;
 use synapse::types::{SecureMessage, SecurityLevel};
 
@@ -373,4 +375,108 @@ fn signed_revocation(account: &SigningKey, serial: [u8; 16]) -> Revocation {
         },
         account,
     )
+}
+
+// §10 test 10
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leaf_without_send_is_refused_at_the_transport() {
+    let account = account_key(15);
+    let alice = agent();
+    // Granted `ack` only: this agent may acknowledge, but may not originate messages.
+    let narrowed = cert_for(
+        &account,
+        &alice,
+        "agent@alice.test",
+        vec![Permission::Ack],
+        6,
+    );
+    let (bob, port) = udp_node(store_pinning(&account), None).await;
+    send_raw(
+        port,
+        &message_with_chain(&alice, "agent@alice.test", &[narrowed], b"denied"),
+    );
+    assert!(drain(&bob).await.is_empty());
+    assert_eq!(bob.knocks().await[0].reason, "no_send_permission");
+
+    // Control: the same agent, same account key, with `send` granted, is delivered.
+    let allowed = cert_for(
+        &account,
+        &alice,
+        "agent@alice.test",
+        vec![Permission::Send, Permission::Ack],
+        7,
+    );
+    send_raw(
+        port,
+        &message_with_chain(&alice, "agent@alice.test", &[allowed], b"allowed"),
+    );
+    assert!(receive_one(&bob).await.sender.is_verified());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relayed_revocation_is_accepted_only_for_a_pinned_account_key() {
+    let account = account_key(16);
+    let alice = agent();
+    let doomed = cert_for(
+        &account,
+        &alice,
+        "agent@alice.test",
+        vec![Permission::Send],
+        8,
+    );
+    let serial = doomed.serial;
+    let revocation = signed_revocation(&account, serial);
+
+    // Bob pins Alice's account key, so a relayed revocation signed by it is stored.
+    let (bob, port) = udp_node(store_pinning(&account), None).await;
+    let mut carrier = SecureMessage::new(
+        BOB,
+        "agent@alice.test",
+        b"carrier".to_vec(),
+        SecurityLevel::Authenticated,
+    );
+    carrier.add_metadata(
+        synapse::certificate::CHAIN_KEY,
+        chain_to_pem(&[cert_for(
+            &account,
+            &alice,
+            "agent@alice.test",
+            vec![Permission::Send],
+            9,
+        )]),
+    );
+    carrier.add_metadata(REVOCATIONS_KEY, revocation.to_pem());
+    alice.sign_secure_message(&mut carrier).expect("sign");
+    send_raw(port, &carrier);
+    assert!(
+        receive_one(&bob).await.sender.is_verified(),
+        "the carrier itself is fine"
+    );
+    assert!(
+        bob.trust_store().await.is_revoked(
+            &synapse::sender_auth::key_id(&account.verifying_key().to_bytes()),
+            &serial
+        ),
+        "the relayed revocation was stored"
+    );
+
+    // The revoked certificate is now refused.
+    send_raw(
+        port,
+        &message_with_chain(
+            &alice,
+            "agent@alice.test",
+            std::slice::from_ref(&doomed),
+            b"revoked",
+        ),
+    );
+    assert!(drain(&bob).await.is_empty());
+
+    // Control: a receiver that has NOT pinned Alice stores nothing from the same relay, and the
+    // certificate the revocation names keeps verifying under a receiver that pins its own root.
+    let other_account = account_key(17);
+    let (stranger, stranger_port) = udp_node(store_pinning(&other_account), None).await;
+    send_raw(stranger_port, &carrier);
+    let _ = drain(&stranger).await;
+    assert_eq!(stranger.trust_store().await.revocation_count(), 0);
 }

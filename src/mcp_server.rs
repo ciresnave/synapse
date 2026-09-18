@@ -294,6 +294,7 @@ fn sender_view(verdict: &SenderVerdict) -> Value {
                 UnverifiableReason::UnknownIssuer => "unknown_issuer",
                 UnverifiableReason::InvalidChain => "invalid_chain",
                 UnverifiableReason::ChainTooLarge => "chain_too_large",
+                UnverifiableReason::NoSendPermission => "no_send_permission",
             },
         }),
         SenderVerdict::Contradicted { reason } => json!({

@@ -166,6 +166,10 @@ pub enum UnverifiableReason {
     InvalidChain,
     /// The chain text or its certificate count exceeds the trust store's bounds.
     ChainTooLarge,
+    /// The chain route validated, but the leaf's permissions do not include
+    /// [`crate::certificate::Permission::Send`]. Direct pinning has no certificate and so no
+    /// permissions to check; this applies only to the chain route.
+    NoSendPermission,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +505,19 @@ impl TrustStore {
         if verified.subject_global_id != message.from_global_id {
             return SenderVerdict::Contradicted {
                 reason: ContradictedReason::IdentityMismatch,
+            };
+        }
+
+        // The one permission Synapse itself enforces: a validated leaf that was never granted
+        // `send` may not originate a message, no matter how valid the rest of its chain is.
+        // Checked here (not in the transport) so every consumer of `verify_at` -- `synapse-mcp`
+        // included -- inherits it from the single verdict path.
+        if !verified
+            .permissions
+            .contains(&certificate::Permission::Send)
+        {
+            return SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::NoSendPermission,
             };
         }
 
