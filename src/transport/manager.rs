@@ -146,6 +146,8 @@ pub struct ReceivedMessage {
     pub sender: SenderVerdict,
     /// The body as this node could read it (P2 slice d): plain, opened, or marked unopenable.
     pub payload: crate::sealing::Payload,
+    /// Whether the signed timestamp could be checked, and what it said (P2 slice e).
+    pub freshness: crate::replay::Freshness,
 }
 
 /// A sent message that asked for an ack (P2 slice b).
@@ -177,10 +179,12 @@ pub struct TransportManager {
     failed_transports: TokioRwLock<HashMap<TransportType, Instant>>,
     /// Pinned sender keys; see `crate::sender_auth`.
     trust_store: TokioRwLock<TrustStore>,
-    /// Messages sent with `request_ack`, by message id. Grows until slice e bounds it.
-    outbound: TokioRwLock<HashMap<String, Outbound>>,
+    /// Messages sent with `request_ack`, by message id, bounded by age and count (P2 slice e).
+    outbound: TokioRwLock<crate::replay::Bounded<Outbound>>,
     /// This node's X25519 sealing key; sealed bodies are opened with it.
     sealing_key: TokioRwLock<Option<crate::sealing::SealingKeyPair>>,
+    /// The delivery gate and the replay record (P2 slice e).
+    inbound: TokioRwLock<crate::replay::InboundState>,
 }
 
 /// Unified metrics across all transports
@@ -268,8 +272,16 @@ impl TransportManager {
             round_robin_index: Arc::new(Mutex::new(0)),
             failed_transports: TokioRwLock::new(HashMap::new()),
             trust_store: TokioRwLock::new(TrustStore::default()),
-            outbound: TokioRwLock::new(HashMap::new()),
+            outbound: TokioRwLock::new(crate::replay::Bounded::new(
+                chrono::Duration::hours(1),
+                10_000,
+            )),
             sealing_key: TokioRwLock::new(None),
+            inbound: TokioRwLock::new(crate::replay::InboundState::new(
+                crate::replay::ReplayConfig::default(),
+                crate::replay::GateConfig::default(),
+                chrono::Utc::now(),
+            )),
         }
     }
 
@@ -521,7 +533,30 @@ impl TransportManager {
     /// Acks are applied inside `receive_messages` and the manager has no background receive loop,
     /// so a status only advances while the application keeps calling `receive_messages`.
     pub async fn delivery_status(&self, message_id: &str) -> Option<DeliveryConfirmation> {
-        self.outbound.read().await.get(message_id).map(|o| o.status)
+        let now = chrono::Utc::now();
+        let outbound = self.outbound.write().await;
+        let ttl = outbound.ttl();
+        let expired = outbound
+            .age_of(message_id, now)
+            .is_some_and(|age| age > ttl);
+        let status = outbound.get(message_id).map(|entry| entry.status);
+        // No sweep here: the spec (§6) says `Expired` is reported for as long as the entry
+        // remains. `tracked_count` and `Bounded::insert` still sweep, so the map stays bounded.
+        match status {
+            // An ack that arrived is final; only an unacknowledged entry expires.
+            Some(DeliveryConfirmation::Sent | DeliveryConfirmation::Delivered) if expired => {
+                Some(DeliveryConfirmation::Expired)
+            }
+            other => other,
+        }
+    }
+
+    /// How many messages are currently tracked for an ack, after sweeping expired entries.
+    pub async fn tracked_count(&self) -> usize {
+        let now = chrono::Utc::now();
+        let mut outbound = self.outbound.write().await;
+        outbound.sweep(now);
+        outbound.len()
     }
 
     async fn track_if_ack_requested(&self, message: &SecureMessage) {
@@ -533,12 +568,12 @@ impl TransportManager {
             digest: delivery_ack::message_digest(message),
             status: DeliveryConfirmation::Sent,
         };
-        // or_insert: resending a message must never downgrade an Acknowledged entry.
-        self.outbound
-            .write()
-            .await
-            .entry(message.message_id.0.to_string())
-            .or_insert(entry);
+        let mut outbound = self.outbound.write().await;
+        // Resending a message must never downgrade an Acknowledged entry. `Bounded` has no
+        // `entry` API, so check first and only insert when absent.
+        if !outbound.contains_key(&message.message_id.0.to_string()) {
+            outbound.insert(message.message_id.0.to_string(), entry, chrono::Utc::now());
+        }
     }
 
     /// Spec §6: upgrade to Acknowledged only for a verified ack, for a tracked message, from its
@@ -623,22 +658,65 @@ impl TransportManager {
 
         let store = self.trust_store.read().await;
         let sealing_key = self.sealing_key.read().await;
+        let mut inbound = self.inbound.write().await;
+        let now = chrono::Utc::now();
         let mut delivered = Vec::with_capacity(all_messages.len());
         for incoming in all_messages {
-            let sender = store.verify(&incoming.message);
-            // Acks are control traffic: applied here, never handed to the application.
-            if delivery_ack::is_ack(&incoming.message) {
-                self.apply_ack(&incoming.message, &sender).await;
+            let message = &incoming.message;
+            let verdict = store.verify(message);
+            let admission = inbound.admit(
+                &verdict,
+                &message.from_global_id,
+                &message.sender_proof.key_id,
+                now,
+            );
+            let freshness = match admission {
+                crate::replay::Admission::Reject => continue,
+                crate::replay::Admission::AdmitUnverified => crate::replay::Freshness::NotChecked,
+                crate::replay::Admission::Admit { key_id } => {
+                    match inbound.check(
+                        &key_id,
+                        &message.message_id.0.to_string(),
+                        message.timestamp.0,
+                        now,
+                    ) {
+                        crate::replay::Decision::Drop => {
+                            debug!(
+                                message_id = %message.message_id.0,
+                                key_id = %key_id,
+                                "dropping replayed message"
+                            );
+                            continue;
+                        }
+                        crate::replay::Decision::Deliver(freshness) => freshness,
+                    }
+                }
+            };
+            // Acks are control traffic: applied here, never handed to the application. `apply_ack`
+            // locks only `outbound`, so holding `inbound`'s write guard here does not double-lock.
+            if delivery_ack::is_ack(message) {
+                self.apply_ack(message, &verdict).await;
                 continue;
             }
-            let payload = crate::sealing::open(&incoming.message, sealing_key.as_ref());
+            let payload = crate::sealing::open(message, sealing_key.as_ref());
             delivered.push(ReceivedMessage {
                 incoming,
-                sender,
+                sender: verdict,
                 payload,
+                freshness,
             });
         }
         Ok(delivered)
+    }
+
+    /// Counts of what was admitted, dropped and marked (P2 slice e).
+    pub async fn inbound_counters(&self) -> crate::replay::InboundCounters {
+        self.inbound.read().await.counters()
+    }
+
+    /// Who tried to reach this node and was kept out. Grants nothing.
+    pub async fn knocks(&self) -> Vec<crate::replay::Knock> {
+        self.inbound.read().await.knocks()
     }
 
     /// Get status of all transports
@@ -1105,6 +1183,10 @@ pub struct TransportManagerBuilder {
     config: TransportManagerConfig,
     trust_store: TrustStore,
     sealing_key: Option<crate::sealing::SealingKeyPair>,
+    replay: crate::replay::ReplayConfig,
+    gate: crate::replay::GateConfig,
+    tracking_ttl: chrono::Duration,
+    tracking_capacity: usize,
 }
 
 impl TransportManagerBuilder {
@@ -1113,6 +1195,10 @@ impl TransportManagerBuilder {
             config: TransportManagerConfig::default(),
             trust_store: TrustStore::default(),
             sealing_key: None,
+            replay: crate::replay::ReplayConfig::default(),
+            gate: crate::replay::GateConfig::default(),
+            tracking_ttl: chrono::Duration::hours(1),
+            tracking_capacity: 10_000,
         }
     }
 
@@ -1165,10 +1251,51 @@ impl TransportManagerBuilder {
         self
     }
 
+    /// Replay window and record size (P2 slice e). An invalid config (see
+    /// [`crate::replay::ReplayConfig::validate`]) is not used: `build()` logs a warning naming the
+    /// reason and falls back to [`crate::replay::ReplayConfig::default`] instead, so replay
+    /// suppression is never silently disabled.
+    pub fn replay_config(mut self, config: crate::replay::ReplayConfig) -> Self {
+        self.replay = config;
+        self
+    }
+
+    /// Which sender verdicts are admitted (P2 slice e).
+    pub fn gate_config(mut self, config: crate::replay::GateConfig) -> Self {
+        self.gate = config;
+        self
+    }
+
+    /// How long a sent message's ack is tracked, and how many at once (P2 slice e).
+    pub fn tracking_limits(mut self, ttl: chrono::Duration, capacity: usize) -> Self {
+        self.tracking_ttl = ttl;
+        self.tracking_capacity = capacity;
+        self
+    }
+
     pub fn build(self) -> TransportManager {
+        let tracking_ttl = self.tracking_ttl;
+        let tracking_capacity = self.tracking_capacity;
         let mut manager = TransportManager::new(self.config);
         manager.trust_store = TokioRwLock::new(self.trust_store);
         manager.sealing_key = TokioRwLock::new(self.sealing_key);
+        manager.outbound =
+            TokioRwLock::new(crate::replay::Bounded::new(tracking_ttl, tracking_capacity));
+        let replay = match self.replay.validate() {
+            Ok(()) => self.replay,
+            Err(reason) => {
+                warn!(
+                    "invalid replay_config ({reason}); using ReplayConfig::default() instead so \
+                     replay suppression is not silently disabled"
+                );
+                crate::replay::ReplayConfig::default()
+            }
+        };
+        manager.inbound = TokioRwLock::new(crate::replay::InboundState::new(
+            replay,
+            self.gate,
+            chrono::Utc::now(),
+        ));
         manager
     }
 }
@@ -1176,5 +1303,117 @@ impl TransportManagerBuilder {
 impl Default for TransportManagerBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::CryptoManager;
+    use crate::delivery_ack;
+    use crate::sender_auth::{ContradictedReason, UnverifiableReason};
+    use crate::types::SecurityLevel;
+
+    fn signer() -> CryptoManager {
+        let mut crypto = CryptoManager::new();
+        crypto.generate_keypair().unwrap();
+        crypto
+    }
+
+    /// A manager with no transports, and one message tracked as if `request_ack` had been sent
+    /// (P2 slice b), so `apply_ack` has an entry to act on.
+    async fn manager_with_tracked_ack() -> (TransportManager, SecureMessage) {
+        let manager = TransportManager::new(TransportManagerConfig::default());
+        let mut original = SecureMessage::new(
+            "bob@t",
+            "alice@t",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        original.request_ack("127.0.0.1:1");
+        manager.track_if_ack_requested(&original).await;
+        (manager, original)
+    }
+
+    // P2e review finding 1: `apply_ack`'s verdict guard (src/transport/manager.rs, "if
+    // !verdict.is_verified()") had lost its only caller once the gate started rejecting
+    // `Contradicted`/`Unverifiable` senders before they ever reach `apply_ack`. This exercises the
+    // guard directly, with a control that proves the same ack DOES apply once it is `Verified`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn apply_ack_ignores_an_unverified_or_contradicted_verdict() {
+        let (manager, original) = manager_with_tracked_ack().await;
+        let bob = signer();
+        let ack = delivery_ack::build_ack(&original, &bob).expect("build ack");
+        let message_id = original.message_id.0.to_string();
+
+        manager
+            .apply_ack(
+                &ack,
+                &SenderVerdict::Unverifiable {
+                    reason: UnverifiableReason::Unsigned,
+                },
+            )
+            .await;
+        assert_eq!(
+            manager.delivery_status(&message_id).await,
+            Some(DeliveryConfirmation::Sent),
+            "an Unverifiable verdict must not apply the ack"
+        );
+
+        manager
+            .apply_ack(
+                &ack,
+                &SenderVerdict::Contradicted {
+                    reason: ContradictedReason::BadSignature,
+                },
+            )
+            .await;
+        assert_eq!(
+            manager.delivery_status(&message_id).await,
+            Some(DeliveryConfirmation::Sent),
+            "a Contradicted verdict must not apply the ack"
+        );
+
+        // Control: the identical ack, now with a Verified verdict, DOES apply — distinguishing the
+        // guard above from a no-op.
+        manager
+            .apply_ack(
+                &ack,
+                &SenderVerdict::Verified {
+                    key_id: "irrelevant".to_string(),
+                },
+            )
+            .await;
+        assert_eq!(
+            manager.delivery_status(&message_id).await,
+            Some(DeliveryConfirmation::Acknowledged)
+        );
+    }
+
+    // P2e review finding 2: an invalid `ReplayConfig` (e.g. `capacity: 0`) must not silently
+    // disable replay suppression for a direct library consumer who bypasses the MCP config
+    // boundary. `build()` falls back to `ReplayConfig::default()` and logs why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_invalid_replay_config_falls_back_to_default_instead_of_disabling_suppression() {
+        let invalid = crate::replay::ReplayConfig {
+            capacity: 0,
+            ..crate::replay::ReplayConfig::default()
+        };
+        assert!(invalid.validate().is_err(), "the fixture must be invalid");
+
+        let manager = TransportManagerBuilder::new()
+            .replay_config(invalid)
+            .build();
+        let now = chrono::Utc::now();
+        let mut inbound = manager.inbound.write().await;
+        assert!(matches!(
+            inbound.check("k", "m", now, now),
+            crate::replay::Decision::Deliver(_)
+        ));
+        assert_eq!(
+            inbound.check("k", "m", now, now),
+            crate::replay::Decision::Drop,
+            "a repeat must still be dropped, so capacity: 0 did not disable suppression"
+        );
     }
 }

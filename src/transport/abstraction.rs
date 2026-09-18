@@ -223,6 +223,9 @@ pub enum DeliveryConfirmation {
     /// The receiving application acknowledged the message with a verified, signed ack whose
     /// digest matches what was sent (P2 slice b).
     Acknowledged,
+    /// No acknowledgement arrived within the tracking window (P2 slice e). It says nothing about
+    /// whether the message was delivered.
+    Expired,
 }
 
 /// Incoming message with transport context
