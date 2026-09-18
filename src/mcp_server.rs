@@ -291,6 +291,10 @@ fn sender_view(verdict: &SenderVerdict) -> Value {
             "reason": match reason {
                 UnverifiableReason::Unsigned => "unsigned",
                 UnverifiableReason::UnknownSender => "unknown_sender",
+                UnverifiableReason::UnknownIssuer => "unknown_issuer",
+                UnverifiableReason::InvalidChain => "invalid_chain",
+                UnverifiableReason::ChainTooLarge => "chain_too_large",
+                UnverifiableReason::NoSendPermission => "no_send_permission",
             },
         }),
         SenderVerdict::Contradicted { reason } => json!({
@@ -299,6 +303,7 @@ fn sender_view(verdict: &SenderVerdict) -> Value {
                 ContradictedReason::NonCanonicalTimestamp => "non_canonical_timestamp",
                 ContradictedReason::KeyMismatch => "key_mismatch",
                 ContradictedReason::BadSignature => "bad_signature",
+                ContradictedReason::IdentityMismatch => "identity_mismatch",
             },
         }),
     }

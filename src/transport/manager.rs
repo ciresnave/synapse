@@ -6,6 +6,7 @@
 //! automatic failover, and unified metrics.
 
 use super::abstraction::*;
+use crate::certificate;
 use crate::crypto::CryptoManager;
 use crate::delivery_ack;
 use crate::error::SynapseError;
@@ -148,6 +149,12 @@ pub struct ReceivedMessage {
     pub payload: crate::sealing::Payload,
     /// Whether the signed timestamp could be checked, and what it said (P2 slice e).
     pub freshness: crate::replay::Freshness,
+    /// The certificate chain's summary (P2 slice f1) -- present only when the chain it describes
+    /// is the very chain that authenticated `sender` as `Verified`: its subject names this
+    /// message's claimed sender, and its subject signing key is the key `sender`'s `key_id`
+    /// names. `None` for a directly pinned sender (even one whose message happens to carry an
+    /// unrelated or stale chain for the same id), and for any sender that is not `Verified`.
+    pub certificate: Option<crate::certificate::VerifiedChain>,
 }
 
 /// A sent message that asked for an ack (P2 slice b).
@@ -630,6 +637,18 @@ impl TransportManager {
         *self.trust_store.write().await = store;
     }
 
+    /// Offer `revocations` to the trust store, taking its write lock. Returns how many were newly
+    /// stored -- `TrustStore::add_revocation` already refuses anything not signed by a pinned
+    /// account key, so a relay (see [`Self::receive_messages`]) can deliver a revocation but never
+    /// forge one.
+    pub async fn add_revocations(&self, revocations: &[crate::certificate::Revocation]) -> usize {
+        let mut store = self.trust_store.write().await;
+        revocations
+            .iter()
+            .filter(|revocation| store.add_revocation((*revocation).clone()))
+            .count()
+    }
+
     /// Receive messages from all active transports, each paired with a sender verdict.
     pub async fn receive_messages(&self) -> Result<Vec<ReceivedMessage>> {
         let mut all_messages = Vec::new();
@@ -661,9 +680,23 @@ impl TransportManager {
         let mut inbound = self.inbound.write().await;
         let now = chrono::Utc::now();
         let mut delivered = Vec::with_capacity(all_messages.len());
+        let mut relayed_revocations = Vec::new();
         for incoming in all_messages {
             let message = &incoming.message;
-            let verdict = store.verify(message);
+            let verdict = store.verify_at(message, now);
+            // A verified sender may relay revocations it learned about, in metadata alongside the
+            // message itself. `add_revocation` refuses anything not signed by a pinned account
+            // key, so a relay can deliver a revocation but never forge one; the cap below (mirrors
+            // the chain field's own cap) bounds attacker-supplied input before it is parsed at
+            // all. Collected here and applied after this loop, once the read lock on the trust
+            // store this loop is holding is dropped.
+            if verdict.is_verified()
+                && let Some(field) = message.metadata.get(certificate::REVOCATIONS_KEY)
+                && field.len() <= store.max_chain_bytes
+                && let Ok(parsed) = certificate::revocations_from_pem(field)
+            {
+                relayed_revocations.extend(parsed);
+            }
             let admission = inbound.admit(
                 &verdict,
                 &message.from_global_id,
@@ -699,12 +732,38 @@ impl TransportManager {
                 continue;
             }
             let payload = crate::sealing::open(message, sealing_key.as_ref());
+            // Only ever attach a chain summary when the chain it describes is the SAME one that
+            // authenticated this message: `verified_chain_at` resolves any well-formed
+            // `CHAIN_KEY` metadata independently of which route produced the verdict (it performs
+            // no binding check itself -- see its doc comment), so a directly pinned sender whose
+            // message also carries an unrelated or stale chain for the same `global_id` must not
+            // have that chain's (possibly different) key and permissions attached. Matching both
+            // the subject id and the subject's signing key against the verdict's own `key_id`
+            // (which `verify_at`'s chain route only reaches after checking exactly this) closes
+            // that gap; on the chain route the check is a no-op; on the direct-pin route it can
+            // reject a chain that authenticated nothing.
+            let certificate = match &verdict {
+                SenderVerdict::Verified { key_id } => {
+                    store.verified_chain_at(message, now).filter(|chain| {
+                        chain.subject_global_id == message.from_global_id
+                            && crate::sender_auth::key_id(&chain.subject_signing_key) == *key_id
+                    })
+                }
+                _ => None,
+            };
             delivered.push(ReceivedMessage {
                 incoming,
                 sender: verdict,
                 payload,
                 freshness,
+                certificate,
             });
+        }
+        drop(store);
+        drop(sealing_key);
+        drop(inbound);
+        if !relayed_revocations.is_empty() {
+            self.add_revocations(&relayed_revocations).await;
         }
         Ok(delivered)
     }

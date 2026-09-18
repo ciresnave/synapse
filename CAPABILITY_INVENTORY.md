@@ -436,6 +436,21 @@ mis-read an early return as the whole body.
 > the router's email path (`SynapseRouter`) remains unauthenticated both before and after this
 > branch, because it holds no trust store.
 
+> **Added 2026-09-17: account keys and agent certificates are built, on branch
+> `feat/agent-certificates` (P2 slice f1, held, not on `main`).** An account holder's key signs
+> certificates for the agents it runs, so a receiver pins **one** account key instead of every
+> agent's own key. `TrustStore::verify_at` accepts a certificate chain rooted in a pinned account
+> key as an alternative to pinning the agent directly, checks the chain's validity window,
+> permissions and delegation budget, and enforces the one permission Synapse itself acts on: a
+> validated leaf without `Permission::Send` is `Unverifiable { NoSendPermission }`, whatever else
+> the chain grants it. Revocations relayed in a verified sender's own message metadata are
+> accepted into the trust store only when signed by a pinned account key -- a relay can deliver a
+> revocation but never forge one. **Direct per-agent pinning still works unchanged and is removed
+> in slice f2**, which is scoped to that removal plus the delegation and identity work this slice
+> deferred. This does not change the finding above: the router's email path remains
+> unauthenticated, because `SynapseRouter` holds no trust store either before or after this
+> branch.
+
 Checked because the OverMind lane — which drives non-Claude models through MCP tools behind a
 refusal gate — asked directly whether Synapse carries a sender identity a recipient can verify
 without trusting the relay. **It does not, and the shape of the "no" matters.**

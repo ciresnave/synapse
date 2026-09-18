@@ -418,6 +418,7 @@ async fn acknowledge_refuses_without_reply_to_and_refuses_acks() {
         },
         payload: synapse::sealing::Payload::Plain(Vec::new()),
         freshness: synapse::replay::Freshness::Fresh,
+        certificate: None,
     };
     let err = p.alice.acknowledge(&by_hand, &p.alice_c).await.unwrap_err();
     assert!(
