@@ -193,9 +193,21 @@ allowance than a pinned root's — and must not simply relax step 2.
   `pin_sealing_key_pem` are removed** (decision 9).
 - `ReceivedMessage` gains `pub certificate: Option<VerifiedChainSummary>` — the subject label, the
   account key id, the permissions, and the chain length. Never the key bytes.
-- `synapse-mcp`: config peers carry `account_public_key` instead of `public_key_pem` and
-  `sealing_public_key`; `list` reports each peer's account key id; `poll` reports each message's
-  certificate summary; a new optional `revocations_path`.
+- `synapse-mcp`: config peers carry `account_public_key` **and `certificate_pem`** instead of
+  `public_key_pem` and `sealing_public_key`; `list` reports each peer's account key id; `poll`
+  reports each message's certificate summary; a new optional `revocations_path`.
+
+**Where an outbound sealing key comes from (decided by CireSnave, 2026-09-18).** Removing direct
+pinning removes sealing-key pinning too, and a certificate only arrives on an INBOUND message — but a
+node must encrypt to a peer before it has heard from them. So **a peer's config entry carries that
+peer's certificate chain** alongside the account key it roots in. The node validates the chain under
+the pinned account key and takes both the signing key and the sealing key from it. One artifact is
+exchanged, and it is exactly what the introduction app hands over: an account key and a current
+certificate.
+
+**An expired certificate in config refuses the send**, naming the peer and the expiry, rather than
+encrypting to a key whose owner may have rotated away. The operator refreshes the certificate; short
+validity windows mean that is routine, which is why `synapse-cert` makes re-minting a single command.
 - `synapse-cert` binary: `init` (account key, agent keys and a certificate in one command, printing
   the config block), `mint`, `delegate`, `revoke`, `inspect`, `import` (convert a pinned-keys config).
 
