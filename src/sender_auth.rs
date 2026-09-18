@@ -250,7 +250,11 @@ impl TrustStore {
     }
 
     /// Pin an account key under a caller-chosen label (kept only for reporting; lookup is always
-    /// by `key_id`). A chain rooted in this key becomes trusted for any agent it certifies.
+    /// by `key_id`). A chain rooted in this key becomes trusted for any agent it certifies -- in
+    /// plain terms, pinning an account key means that account holder may speak as ANY identity
+    /// this node has not directly pinned, not merely the agents it happens to know about today. A
+    /// directly pinned identity always wins outright and can never be claimed by a chain, no
+    /// matter which account key roots it (see [`TrustStore::verify_at`]).
     pub fn pin_account_key(&mut self, label: impl Into<String>, key: [u8; 32]) {
         self.account_keys.insert(
             key_id(&key),
@@ -284,6 +288,9 @@ impl TrustStore {
     /// the most, so one busy issuer cannot cost another issuer its own revocations -- always from
     /// the existing entries, never the one about to be inserted.
     pub fn add_revocation(&mut self, revocation: Revocation) -> bool {
+        if revocation.version != 1 {
+            return false;
+        }
         let Some(entry) = self.account_keys.get(&revocation.issuer_key_id) else {
             return false;
         };
@@ -508,6 +515,19 @@ impl TrustStore {
             };
         }
 
+        // The pinned route binds `sender_proof.key_id` to the pinned key before checking the
+        // signature (`verify_against_pinned_key`); the chain route must do the same against the
+        // leaf's signing key. The verdict below is safe either way, since it is recomputed from
+        // the chain rather than trusting the proof's `key_id` -- but the raw proof still travels
+        // on `ReceivedMessage`, and `receive_messages` hands `sender_proof.key_id` to the gate for
+        // knock attribution. Without this check a chain-routed sender could put any key_id in its
+        // own proof and control what gets recorded about it in another peer's knock records.
+        if message.sender_proof.key_id != key_id(&verified.subject_signing_key) {
+            return SenderVerdict::Contradicted {
+                reason: ContradictedReason::KeyMismatch,
+            };
+        }
+
         // The one permission Synapse itself enforces: a validated leaf that was never granted
         // `send` may not originate a message, no matter how valid the rest of its chain is.
         // Checked here (not in the transport) so every consumer of `verify_at` -- `synapse-mcp`
@@ -642,15 +662,15 @@ mod tests {
     fn a_pinned_account_key_verifies_an_agent_it_has_never_seen() {
         // Alice's account key signs a certificate for an agent key; Bob pins only the account key.
         let account = SigningKey::from_bytes(&[11u8; 32]);
-        let agent = CryptoManager::new_with_keypair();
+        let mut agent = CryptoManager::new_with_keypair();
         let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        agent.set_certificate_chain(vec![cert]);
         let mut message = SecureMessage::new(
             "bob@test",
             "agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
         );
-        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
         agent.sign_secure_message(&mut message).unwrap();
 
         let mut store = TrustStore::new();
@@ -674,16 +694,16 @@ mod tests {
         // A resource guard: 65 links exceeds the default max_chain_links of 64. The certificates do
         // not need to be valid — the refusal happens before any of them is verified.
         let account = SigningKey::from_bytes(&[11u8; 32]);
-        let agent = CryptoManager::new_with_keypair();
+        let mut agent = CryptoManager::new_with_keypair();
         let one = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
         let chain: Vec<_> = std::iter::repeat_with(|| one.clone()).take(65).collect();
+        agent.set_certificate_chain(chain);
         let mut message = SecureMessage::new(
             "bob@test",
             "agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
         );
-        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&chain));
         agent.sign_secure_message(&mut message).unwrap();
         let mut store = TrustStore::new();
         store.pin_account_key("alice", account.verifying_key().to_bytes());
@@ -718,23 +738,32 @@ mod tests {
         // The chain is valid, but the message is signed by a different key than the leaf names.
         let account = SigningKey::from_bytes(&[11u8; 32]);
         let agent = CryptoManager::new_with_keypair();
-        let impostor = CryptoManager::new_with_keypair();
+        let mut impostor = CryptoManager::new_with_keypair();
         let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        // The impostor carries and signs with Alice's chain, but the signature is the impostor's
+        // own -- exactly the scenario this test checks.
+        impostor.set_certificate_chain(vec![cert]);
         let mut message = SecureMessage::new(
             "bob@test",
             "agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
         );
-        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
         impostor.sign_secure_message(&mut message).unwrap();
 
         let mut store = TrustStore::new();
         store.pin_account_key("alice", account.verifying_key().to_bytes());
+        // FIX 4 (P2f1 fix wave): the chain route now binds `sender_proof.key_id` to the leaf's
+        // signing key before it ever reaches the signature check, exactly like the pinned route.
+        // The impostor's own `sign_secure_message` call sets `key_id` to ITS OWN key, which does
+        // not name the leaf, so this is now caught as `KeyMismatch` rather than reaching (and
+        // failing) the signature check as `BadSignature`. Both reasons are "not verified"; this
+        // reason is more specific and is what `the_chain_route_rejects_a_proof_key_id_that_does_
+        // not_name_the_leaf` exercises directly.
         assert_eq!(
             store.verify(&message),
             SenderVerdict::Contradicted {
-                reason: ContradictedReason::BadSignature
+                reason: ContradictedReason::KeyMismatch
             }
         );
     }
@@ -776,16 +805,16 @@ mod tests {
     #[test]
     fn a_revoked_certificate_stops_verifying() {
         let account = SigningKey::from_bytes(&[11u8; 32]);
-        let agent = CryptoManager::new_with_keypair();
+        let mut agent = CryptoManager::new_with_keypair();
         let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
         let serial = cert.serial;
+        agent.set_certificate_chain(vec![cert]);
         let mut message = SecureMessage::new(
             "bob@test",
             "agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
         );
-        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
         agent.sign_secure_message(&mut message).unwrap();
 
         let mut store = TrustStore::new();
@@ -808,17 +837,14 @@ mod tests {
     #[test]
     fn a_chain_cannot_vouch_for_a_different_claimed_sender() {
         let account = SigningKey::from_bytes(&[11u8; 32]);
-        let agent = CryptoManager::new_with_keypair();
+        let mut agent = CryptoManager::new_with_keypair();
         let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        agent.set_certificate_chain(vec![cert]);
         let mut message = SecureMessage::new(
             "bob@test",
             "ceo@bob.test", // not the chain's subject
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
-        );
-        message.add_metadata(
-            certificate::CHAIN_KEY,
-            certificate::chain_to_pem(std::slice::from_ref(&cert)),
         );
         agent.sign_secure_message(&mut message).unwrap();
         let mut store = TrustStore::new();
@@ -837,7 +863,6 @@ mod tests {
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
         );
-        matching.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
         agent.sign_secure_message(&mut matching).unwrap();
         assert!(store.verify(&matching).is_verified());
     }
@@ -847,15 +872,15 @@ mod tests {
     #[test]
     fn the_chain_route_also_refuses_a_non_canonical_timestamp() {
         let account = SigningKey::from_bytes(&[11u8; 32]);
-        let agent = CryptoManager::new_with_keypair();
+        let mut agent = CryptoManager::new_with_keypair();
         let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        agent.set_certificate_chain(vec![cert]);
         let mut message = SecureMessage::new(
             "bob@test",
             "agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
         );
-        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
         agent.sign_secure_message(&mut message).unwrap();
         // Add sub-microsecond digits after signing: an unauthenticated field a relay could add.
         let ts = message.timestamp.0;
@@ -965,7 +990,7 @@ mod tests {
     fn an_account_key_revokes_a_certificate_it_did_not_issue_directly() {
         let account = SigningKey::from_bytes(&[11u8; 32]);
         let agent = SigningKey::from_bytes(&[12u8; 32]); // intermediate: delegates to the worker
-        let worker = CryptoManager::new_with_keypair();
+        let mut worker = CryptoManager::new_with_keypair();
         let now = t_now();
 
         let root = certificate::AgentCertificate::sign(
@@ -1004,15 +1029,12 @@ mod tests {
             &agent,
         );
 
+        worker.set_certificate_chain(vec![leaf, root]);
         let mut message = SecureMessage::new(
             "bob@test",
             "worker.agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
-        );
-        message.add_metadata(
-            certificate::CHAIN_KEY,
-            certificate::chain_to_pem(&[leaf, root]),
         );
         worker.sign_secure_message(&mut message).unwrap();
 
@@ -1042,7 +1064,7 @@ mod tests {
         let account = SigningKey::from_bytes(&[11u8; 32]);
         let agent = SigningKey::from_bytes(&[12u8; 32]);
         let worker = SigningKey::from_bytes(&[13u8; 32]);
-        let subworker = CryptoManager::new_with_keypair();
+        let mut subworker = CryptoManager::new_with_keypair();
         let now = t_now();
 
         let root = certificate::AgentCertificate::sign(
@@ -1100,15 +1122,12 @@ mod tests {
             &worker,
         );
 
+        subworker.set_certificate_chain(vec![leaf, middle, root]);
         let mut message = SecureMessage::new(
             "bob@test",
             "sub.worker.agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
-        );
-        message.add_metadata(
-            certificate::CHAIN_KEY,
-            certificate::chain_to_pem(&[leaf, middle, root]),
         );
         subworker.sign_secure_message(&mut message).unwrap();
 
@@ -1165,16 +1184,16 @@ mod tests {
     fn a_revocation_cannot_cross_issuers() {
         let account_a = SigningKey::from_bytes(&[11u8; 32]);
         let account_b = SigningKey::from_bytes(&[22u8; 32]);
-        let agent = CryptoManager::new_with_keypair();
+        let mut agent = CryptoManager::new_with_keypair();
         let cert = signed_cert_for(&account_a, &agent, "agent@alice.test", t_now());
         let serial = cert.serial;
+        agent.set_certificate_chain(vec![cert]);
         let mut message = SecureMessage::new(
             "bob@test",
             "agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
         );
-        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
         agent.sign_secure_message(&mut message).unwrap();
 
         let mut store = TrustStore::new();
@@ -1231,16 +1250,16 @@ mod tests {
     #[test]
     fn expiry_is_testable_at_a_fixed_clock_and_agrees_across_both_entry_points() {
         let account = SigningKey::from_bytes(&[11u8; 32]);
-        let agent = CryptoManager::new_with_keypair();
+        let mut agent = CryptoManager::new_with_keypair();
         let now = t_now();
         let cert = signed_cert_for(&account, &agent, "agent@alice.test", now);
+        agent.set_certificate_chain(vec![cert]);
         let mut message = SecureMessage::new(
             "bob@test",
             "agent@alice.test",
             b"hi".to_vec(),
             SecurityLevel::Authenticated,
         );
-        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
         agent.sign_secure_message(&mut message).unwrap();
 
         let mut store = TrustStore::new();
@@ -1258,6 +1277,59 @@ mod tests {
             }
         );
         assert!(store.verified_chain_at(&message, after_expiry).is_none());
+    }
+
+    // FIX 4 (P2f1 fix wave): the chain route must bind `sender_proof.key_id` to the leaf's signing
+    // key, exactly as the pinned route binds it to the pinned key. Without this a chain-routed
+    // sender could put any key_id in its own proof, which `receive_messages` hands to the gate for
+    // knock attribution.
+    #[test]
+    fn the_chain_route_rejects_a_proof_key_id_that_does_not_name_the_leaf() {
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let mut agent = CryptoManager::new_with_keypair();
+        let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        agent.set_certificate_chain(vec![cert]);
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        agent.sign_secure_message(&mut message).unwrap();
+        // Tamper with the proof's key_id after signing, without touching the signature bytes --
+        // the signature will then fail to verify against the leaf's key too, but the key_id check
+        // must be what actually catches it (checked via the reason).
+        message.sender_proof.key_id = key_id(&[0xAAu8; 32]);
+
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Contradicted {
+                reason: ContradictedReason::KeyMismatch
+            }
+        );
+    }
+
+    // FIX 5 (P2f1 fix wave): `Revocation.version` is checked, just as certificates already refuse
+    // an unknown version in two places -- a future v2 revocation must not be stored and applied
+    // under v1 semantics.
+    #[test]
+    fn add_revocation_refuses_an_unknown_version() {
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+
+        let mut bad = signed_revocation(&account, [7u8; 16]);
+        bad.version = 2;
+        // Re-sign so it fails on the version check, not on a stale signature over version 1.
+        let bad = Revocation::sign(bad, &account);
+        assert!(!store.add_revocation(bad));
+        assert_eq!(store.revocation_count(), 0);
+
+        // Control: the same revocation at version 1 is accepted.
+        assert!(store.add_revocation(signed_revocation(&account, [7u8; 16])));
+        assert_eq!(store.revocation_count(), 1);
     }
 
     #[test]

@@ -5,9 +5,7 @@
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use synapse::CryptoManager;
-use synapse::certificate::{
-    AgentCertificate, Permission, REVOCATIONS_KEY, Revocation, chain_to_pem,
-};
+use synapse::certificate::{AgentCertificate, Permission, REVOCATIONS_KEY, Revocation};
 use synapse::sender_auth::TrustStore;
 use synapse::types::{SecureMessage, SecurityLevel};
 
@@ -106,15 +104,18 @@ fn cert_for(
     )
 }
 
-/// A signed message from `holder` carrying `chain`, sent to Bob.
+/// A signed message from `holder` carrying `chain`, sent to Bob. Goes through the real send-side
+/// mechanism (`set_certificate_chain` + `sign_secure_message`, exercised directly by FIX 1's test
+/// below) rather than hand-adding `CHAIN_KEY` metadata: after FIX 2, a manager with no chain set
+/// strips any `CHAIN_KEY` entry on sign, so hand-added metadata would not survive signing here.
 fn message_with_chain(
-    holder: &CryptoManager,
+    holder: &mut CryptoManager,
     from: &str,
     chain: &[AgentCertificate],
     text: &[u8],
 ) -> SecureMessage {
+    holder.set_certificate_chain(chain.to_vec());
     let mut m = SecureMessage::new(BOB, from, text.to_vec(), SecurityLevel::Authenticated);
-    m.add_metadata(synapse::certificate::CHAIN_KEY, chain_to_pem(chain));
     holder.sign_secure_message(&mut m).expect("sign");
     m
 }
@@ -137,11 +138,15 @@ async fn drain(
     out
 }
 
-// §10 test 7
+// FIX 1 (P2f1 fix wave): the send-side mechanism (`CryptoManager::set_certificate_chain` +
+// `sign_secure_message` attaching it) had zero callers and zero tests before this -- every other
+// test in this file attaches CHAIN_KEY by hand. This exercises the actual send path, then proves
+// the chain is signature-covered: stripping CHAIN_KEY out of the received message's metadata and
+// re-verifying must NOT verify, because the metadata is inside the signed bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_agent_is_verified_from_its_account_keys_certificate() {
-    let account = account_key(11);
-    let alice = agent();
+async fn the_send_side_chain_mechanism_signs_and_verifies_with_no_hand_added_metadata() {
+    let account = account_key(21);
+    let mut alice = agent();
     let cert = cert_for(
         &account,
         &alice,
@@ -149,7 +154,71 @@ async fn an_agent_is_verified_from_its_account_keys_certificate() {
         vec![Permission::Send],
         1,
     );
-    let message = message_with_chain(&alice, "agent@alice.test", &[cert], b"hello");
+    // The mechanism under test: tell the manager its chain, then sign normally. No
+    // `add_metadata(CHAIN_KEY, ...)` anywhere in this test.
+    alice.set_certificate_chain(vec![cert]);
+
+    let mut message = SecureMessage::new(
+        BOB,
+        "agent@alice.test",
+        b"hello".to_vec(),
+        SecurityLevel::Authenticated,
+    );
+    alice.sign_secure_message(&mut message).expect("sign");
+    assert!(
+        message
+            .metadata
+            .contains_key(synapse::certificate::CHAIN_KEY),
+        "signing with a chain set must attach CHAIN_KEY on its own"
+    );
+
+    let (bob, port) = udp_node(store_pinning(&account), None).await;
+    send_raw(port, &message);
+    let received = receive_one(&bob).await;
+    assert!(received.sender.is_verified());
+    let summary = received.certificate.expect("a certificate summary");
+    assert_eq!(summary.subject_global_id, "agent@alice.test");
+
+    // Control: strip CHAIN_KEY from the message's metadata (as a relay stripping the chain would)
+    // and re-run verify_at directly. Pin Alice's own key directly here too (spec: direct pinning
+    // always wins when both apply), so the recomputed canonical input -- which folds in metadata
+    // -- is checked against the ORIGINAL signature, which was computed over metadata that included
+    // the chain. Because the chain is inside the signed bytes, removing it changes the recomputed
+    // input and must break the signature outright, not merely fall back to "no chain": that is what
+    // proves a relay cannot strip the chain undetected.
+    let mut stripped = message.clone();
+    stripped
+        .metadata
+        .remove(synapse::certificate::CHAIN_KEY)
+        .expect("the chain key was present");
+    let mut store = store_pinning(&account);
+    store.pin(
+        "agent@alice.test",
+        alice.public_key_bytes().expect("public key"),
+    );
+    let verdict = store.verify(&stripped);
+    assert_eq!(
+        verdict,
+        synapse::sender_auth::SenderVerdict::Contradicted {
+            reason: synapse::sender_auth::ContradictedReason::BadSignature
+        },
+        "stripping the signed-in chain must break verification, not just lose the chain summary"
+    );
+}
+
+// §10 test 7
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_is_verified_from_its_account_keys_certificate() {
+    let account = account_key(11);
+    let mut alice = agent();
+    let cert = cert_for(
+        &account,
+        &alice,
+        "agent@alice.test",
+        vec![Permission::Send],
+        1,
+    );
+    let message = message_with_chain(&mut alice, "agent@alice.test", &[cert], b"hello");
 
     // Bob pins the ACCOUNT key only; he has never seen this agent's key.
     let (bob, port) = udp_node(store_pinning(&account), None).await;
@@ -179,7 +248,7 @@ async fn an_agent_is_verified_from_its_account_keys_certificate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_chain_rooting_in_an_unpinned_key_costs_no_signature_work() {
     let account = account_key(12);
-    let alice = agent();
+    let mut alice = agent();
     // The certificate's signature is deliberately invalid.
     let mut cert = cert_for(
         &account,
@@ -189,7 +258,7 @@ async fn a_chain_rooting_in_an_unpinned_key_costs_no_signature_work() {
         2,
     );
     cert.signature = [0u8; 64];
-    let message = message_with_chain(&alice, "agent@alice.test", &[cert], b"hello");
+    let message = message_with_chain(&mut alice, "agent@alice.test", &[cert], b"hello");
 
     // Unpinned root: the reason must be unknown_issuer, NOT invalid_chain. Reporting
     // invalid_chain would prove the node verified a signature on a stranger's behalf.
@@ -209,7 +278,7 @@ async fn a_chain_rooting_in_an_unpinned_key_costs_no_signature_work() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_revoked_certificate_stops_being_accepted() {
     let account = account_key(13);
-    let alice = agent();
+    let mut alice = agent();
     let cert = cert_for(
         &account,
         &alice,
@@ -223,7 +292,7 @@ async fn a_revoked_certificate_stops_being_accepted() {
     send_raw(
         port,
         &message_with_chain(
-            &alice,
+            &mut alice,
             "agent@alice.test",
             std::slice::from_ref(&cert),
             b"first",
@@ -238,7 +307,7 @@ async fn a_revoked_certificate_stops_being_accepted() {
 
     send_raw(
         port,
-        &message_with_chain(&alice, "agent@alice.test", &[cert], b"second"),
+        &message_with_chain(&mut alice, "agent@alice.test", &[cert], b"second"),
     );
     assert!(drain(&bob).await.is_empty(), "denied after the revocation");
     assert!(
@@ -253,7 +322,7 @@ async fn a_revoked_certificate_stops_being_accepted() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rotating_an_agent_key_needs_no_change_at_the_receiver() {
     let account = account_key(14);
-    let (old_agent, new_agent) = (agent(), agent());
+    let (mut old_agent, mut new_agent) = (agent(), agent());
     let (bob, port) = udp_node(store_pinning(&account), None).await;
 
     let old_cert = cert_for(
@@ -265,7 +334,7 @@ async fn rotating_an_agent_key_needs_no_change_at_the_receiver() {
     );
     send_raw(
         port,
-        &message_with_chain(&old_agent, "agent@alice.test", &[old_cert], b"before"),
+        &message_with_chain(&mut old_agent, "agent@alice.test", &[old_cert], b"before"),
     );
     assert!(receive_one(&bob).await.sender.is_verified());
 
@@ -279,7 +348,7 @@ async fn rotating_an_agent_key_needs_no_change_at_the_receiver() {
     );
     send_raw(
         port,
-        &message_with_chain(&new_agent, "agent@alice.test", &[new_cert], b"after"),
+        &message_with_chain(&mut new_agent, "agent@alice.test", &[new_cert], b"after"),
     );
     let rotated = receive_one(&bob).await;
     assert!(rotated.sender.is_verified());
@@ -306,7 +375,7 @@ async fn rotating_an_agent_key_needs_no_change_at_the_receiver() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_directly_pinned_sender_does_not_inherit_an_unrelated_chains_summary() {
     let account = account_key(15);
-    let alice = agent();
+    let mut alice = agent();
     // A different key than Alice's -- standing in for a key that has since rotated away, whose
     // certificate is stale but still sitting in metadata somewhere upstream.
     let stale_agent = agent();
@@ -321,7 +390,7 @@ async fn a_directly_pinned_sender_does_not_inherit_an_unrelated_chains_summary()
     // Signed by ALICE's key (the one Bob pins directly), but carrying a chain for the SAME
     // global id naming the STALE key.
     let message = message_with_chain(
-        &alice,
+        &mut alice,
         "agent@alice.test",
         std::slice::from_ref(&stale_cert),
         b"hi",
@@ -381,7 +450,7 @@ fn signed_revocation(account: &SigningKey, serial: [u8; 16]) -> Revocation {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_leaf_without_send_is_refused_at_the_transport() {
     let account = account_key(15);
-    let alice = agent();
+    let mut alice = agent();
     // Granted `ack` only: this agent may acknowledge, but may not originate messages.
     let narrowed = cert_for(
         &account,
@@ -393,7 +462,7 @@ async fn a_leaf_without_send_is_refused_at_the_transport() {
     let (bob, port) = udp_node(store_pinning(&account), None).await;
     send_raw(
         port,
-        &message_with_chain(&alice, "agent@alice.test", &[narrowed], b"denied"),
+        &message_with_chain(&mut alice, "agent@alice.test", &[narrowed], b"denied"),
     );
     assert!(drain(&bob).await.is_empty());
     assert_eq!(bob.knocks().await[0].reason, "no_send_permission");
@@ -408,7 +477,7 @@ async fn a_leaf_without_send_is_refused_at_the_transport() {
     );
     send_raw(
         port,
-        &message_with_chain(&alice, "agent@alice.test", &[allowed], b"allowed"),
+        &message_with_chain(&mut alice, "agent@alice.test", &[allowed], b"allowed"),
     );
     assert!(receive_one(&bob).await.sender.is_verified());
 }
@@ -416,7 +485,7 @@ async fn a_leaf_without_send_is_refused_at_the_transport() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_relayed_revocation_is_accepted_only_for_a_pinned_account_key() {
     let account = account_key(16);
-    let alice = agent();
+    let mut alice = agent();
     let doomed = cert_for(
         &account,
         &alice,
@@ -429,21 +498,18 @@ async fn a_relayed_revocation_is_accepted_only_for_a_pinned_account_key() {
 
     // Bob pins Alice's account key, so a relayed revocation signed by it is stored.
     let (bob, port) = udp_node(store_pinning(&account), None).await;
+    alice.set_certificate_chain(vec![cert_for(
+        &account,
+        &alice,
+        "agent@alice.test",
+        vec![Permission::Send],
+        9,
+    )]);
     let mut carrier = SecureMessage::new(
         BOB,
         "agent@alice.test",
         b"carrier".to_vec(),
         SecurityLevel::Authenticated,
-    );
-    carrier.add_metadata(
-        synapse::certificate::CHAIN_KEY,
-        chain_to_pem(&[cert_for(
-            &account,
-            &alice,
-            "agent@alice.test",
-            vec![Permission::Send],
-            9,
-        )]),
     );
     carrier.add_metadata(REVOCATIONS_KEY, revocation.to_pem());
     alice.sign_secure_message(&mut carrier).expect("sign");
@@ -464,7 +530,7 @@ async fn a_relayed_revocation_is_accepted_only_for_a_pinned_account_key() {
     send_raw(
         port,
         &message_with_chain(
-            &alice,
+            &mut alice,
             "agent@alice.test",
             std::slice::from_ref(&doomed),
             b"revoked",

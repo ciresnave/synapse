@@ -18,6 +18,10 @@ pub const REVOCATION_DOMAIN_TAG: &[u8] = b"synapse/agent-revocation/v1";
 pub const CERT_PEM_LABEL: &str = "SYNAPSE AGENT CERT";
 /// PEM label for an encoded [`Revocation`].
 pub const REVOCATION_PEM_LABEL: &str = "SYNAPSE REVOCATION";
+/// Spec bound: `AgentCertificate::subject_label` longer than this is refused as malformed.
+const MAX_SUBJECT_LABEL_LEN: usize = 128;
+/// Spec bound: `Revocation::reason` longer than this is refused as malformed.
+const MAX_REVOCATION_REASON_LEN: usize = 128;
 /// Signed metadata carrying the sender's chain, leaf first.
 pub const CHAIN_KEY: &str = "synapse.cert.chain";
 /// Signed metadata carrying relayed revocations.
@@ -72,7 +76,6 @@ pub enum ChainError {
     PermissionWidened,
     DelegationNotAllowed,
     IdentityNotNarrowed,
-    SubjectMismatch,
     Revoked,
 }
 
@@ -90,7 +93,6 @@ impl fmt::Display for ChainError {
             ChainError::PermissionWidened => "permission_widened",
             ChainError::DelegationNotAllowed => "delegation_not_allowed",
             ChainError::IdentityNotNarrowed => "identity_not_narrowed",
-            ChainError::SubjectMismatch => "subject_mismatch",
             ChainError::Revoked => "revoked",
         })
     }
@@ -291,6 +293,9 @@ impl AgentCertificate {
         let serial = field_array::<16>(read_field(data, &mut pos)?)?;
         let issuer_key_id = field_str(read_field(data, &mut pos)?)?;
         let subject_label = field_str(read_field(data, &mut pos)?)?;
+        if subject_label.chars().count() > MAX_SUBJECT_LABEL_LEN {
+            return Err(ChainError::Malformed);
+        }
         let subject_global_id = field_str(read_field(data, &mut pos)?)?;
         let subject_signing_key = field_array::<32>(read_field(data, &mut pos)?)?;
         let subject_sealing_key = field_array::<32>(read_field(data, &mut pos)?)?;
@@ -389,6 +394,9 @@ impl Revocation {
         let issuer_key_id = field_str(read_field(data, &mut pos)?)?;
         let issued_at = field_timestamp(read_field(data, &mut pos)?)?;
         let reason = field_str(read_field(data, &mut pos)?)?;
+        if reason.chars().count() > MAX_REVOCATION_REASON_LEN {
+            return Err(ChainError::Malformed);
+        }
         if data.len() != pos + 64 {
             return Err(ChainError::Malformed);
         }
@@ -516,6 +524,12 @@ pub fn validate_chain(
     // Every certificate, including the root, must be a version this module knows how to apply
     // these rules to.
     if root.version != 1 {
+        return Err(ChainError::Malformed);
+    }
+    // An empty root id would key every downstream record (knock attribution, the replay guard)
+    // by the empty string once a single-link chain verifies it as `from_global_id`.
+    // `identity_narrows` guards every link below the root, but never the root's own id.
+    if root.subject_global_id.is_empty() {
         return Err(ChainError::Malformed);
     }
 
@@ -1235,6 +1249,72 @@ mod tests {
         chain[0].version = 2;
         assert_eq!(
             validate_chain(&chain, &pinned(account), &NoRevocations, t(10)),
+            Err(ChainError::Malformed)
+        );
+    }
+
+    // FIX 3 (P2f1 fix wave): the spec's 128-char bound on `subject_label` is enforced on parse.
+    #[test]
+    fn a_subject_label_over_128_chars_is_rejected() {
+        let (issuer, subject) = (key(1), key(2));
+        let mut cert = unsigned(&issuer, &subject, "agent@host");
+        cert.subject_label = "a".repeat(129);
+        let signed = AgentCertificate::sign(cert, &issuer);
+        assert!(matches!(
+            AgentCertificate::from_pem(&signed.to_pem()),
+            Err(ChainError::Malformed)
+        ));
+
+        // Control: exactly 128 chars parses fine.
+        let mut ok_cert = unsigned(&issuer, &subject, "agent@host");
+        ok_cert.subject_label = "a".repeat(128);
+        let ok_signed = AgentCertificate::sign(ok_cert, &issuer);
+        assert!(AgentCertificate::from_pem(&ok_signed.to_pem()).is_ok());
+    }
+
+    // FIX 3 (P2f1 fix wave): the spec's 128-char bound on `Revocation::reason` is enforced on
+    // parse.
+    #[test]
+    fn a_revocation_reason_over_128_chars_is_rejected() {
+        let issuer = key(1);
+        let mut revocation = Revocation {
+            version: 1,
+            serial: [7u8; 16],
+            issuer_key_id: crate::sender_auth::key_id(&public(&issuer)),
+            issued_at: t(10),
+            reason: "a".repeat(129),
+            signature: [0u8; 64],
+        };
+        revocation = Revocation::sign(revocation, &issuer);
+        assert!(matches!(
+            Revocation::from_pem(&revocation.to_pem()),
+            Err(ChainError::Malformed)
+        ));
+
+        // Control: exactly 128 chars parses fine.
+        let ok = Revocation::sign(
+            Revocation {
+                version: 1,
+                serial: [7u8; 16],
+                issuer_key_id: crate::sender_auth::key_id(&public(&issuer)),
+                issued_at: t(10),
+                reason: "a".repeat(128),
+                signature: [0u8; 64],
+            },
+            &issuer,
+        );
+        assert!(Revocation::from_pem(&ok.to_pem()).is_ok());
+    }
+
+    // FIX 6 (P2f1 fix wave): a root certificate with an empty `subject_global_id` must not verify
+    // -- otherwise a single-link chain roots an empty `from_global_id`, which then keys knock
+    // records and the replay guard.
+    #[test]
+    fn a_root_with_an_empty_subject_global_id_is_malformed() {
+        let (account, agent) = (key(1), key(2));
+        let root = AgentCertificate::sign(unsigned(&account, &agent, ""), &account);
+        assert_eq!(
+            validate_chain(&[root], &pinned(public(&account)), &NoRevocations, t(10)),
             Err(ChainError::Malformed)
         );
     }

@@ -190,7 +190,9 @@ impl CryptoManager {
             .ok_or_else(|| CryptoError::KeyNotFound("No private key loaded".to_string()))?;
         let public = self.public_key_bytes()?;
         truncate_timestamp_to_micros(message);
-        if !self.chain.is_empty() {
+        if self.chain.is_empty() {
+            message.metadata.remove(crate::certificate::CHAIN_KEY);
+        } else {
             message.add_metadata(
                 crate::certificate::CHAIN_KEY,
                 crate::certificate::chain_to_pem(&self.chain),
@@ -310,5 +312,31 @@ mod tests {
             .unwrap();
 
         assert!(verified);
+    }
+
+    // FIX 2 (P2f1 fix wave): a manager with no chain must not leave a stale CHAIN_KEY signed into
+    // a message that already carried one (e.g. relayed, or re-signed after clearing the chain).
+    #[test]
+    fn signing_with_no_chain_strips_a_pre_existing_chain_key() {
+        let mut crypto = CryptoManager::new();
+        crypto.generate_keypair().unwrap();
+        assert!(crypto.certificate_chain().is_empty());
+
+        let mut message = crate::types::SecureMessage::new(
+            "bob@test",
+            "alice@test",
+            b"hi".to_vec(),
+            crate::types::SecurityLevel::Authenticated,
+        );
+        // Someone else's chain, sitting in metadata before this manager signs.
+        message.add_metadata(crate::certificate::CHAIN_KEY, "stale-chain-pem");
+        assert!(message.metadata.contains_key(crate::certificate::CHAIN_KEY));
+
+        crypto.sign_secure_message(&mut message).unwrap();
+
+        assert!(
+            !message.metadata.contains_key(crate::certificate::CHAIN_KEY),
+            "a chainless manager must remove any pre-existing CHAIN_KEY entry, not sign it in"
+        );
     }
 }
