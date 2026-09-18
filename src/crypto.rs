@@ -26,6 +26,9 @@ pub struct CryptoManager {
     rng: SystemRandom,
     /// Our X25519 sealing key pair (P2 slice d), independent of the Ed25519 key
     sealing_key: Option<crate::sealing::SealingKeyPair>,
+    /// The certificate chain vouching for this agent's signing key (P2 slice f1), attached to
+    /// every message this manager signs.
+    chain: Vec<crate::certificate::AgentCertificate>,
 }
 
 impl CryptoManager {
@@ -36,7 +39,19 @@ impl CryptoManager {
             known_keys: HashMap::new(),
             rng: SystemRandom::new(),
             sealing_key: None,
+            chain: Vec::new(),
         }
+    }
+
+    /// Set the certificate chain this manager attaches to every message it signs from now on
+    /// (P2 slice f1). Replaces any chain set previously.
+    pub fn set_certificate_chain(&mut self, chain: Vec<crate::certificate::AgentCertificate>) {
+        self.chain = chain;
+    }
+
+    /// The certificate chain currently attached to signed messages, if any.
+    pub fn certificate_chain(&self) -> &[crate::certificate::AgentCertificate] {
+        &self.chain
     }
 
     /// Generate a new Ed25519 keypair for this entity
@@ -175,6 +190,12 @@ impl CryptoManager {
             .ok_or_else(|| CryptoError::KeyNotFound("No private key loaded".to_string()))?;
         let public = self.public_key_bytes()?;
         truncate_timestamp_to_micros(message);
+        if !self.chain.is_empty() {
+            message.add_metadata(
+                crate::certificate::CHAIN_KEY,
+                crate::certificate::chain_to_pem(&self.chain),
+            );
+        }
         message.sender_proof = SenderProof {
             alg: ProofAlg::Ed25519,
             key_id: key_id(&public),

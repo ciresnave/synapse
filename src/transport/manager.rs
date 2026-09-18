@@ -148,6 +148,11 @@ pub struct ReceivedMessage {
     pub payload: crate::sealing::Payload,
     /// Whether the signed timestamp could be checked, and what it said (P2 slice e).
     pub freshness: crate::replay::Freshness,
+    /// The certificate chain's summary, when `sender` is `Verified` via a chain rooted in a
+    /// pinned account key (P2 slice f1). `None` for a directly pinned sender, and for any sender
+    /// that is not `Verified` -- this never carries a chain whose leaf identity was not bound to
+    /// this message's claimed sender.
+    pub certificate: Option<crate::certificate::VerifiedChain>,
 }
 
 /// A sent message that asked for an ack (P2 slice b).
@@ -699,11 +704,24 @@ impl TransportManager {
                 continue;
             }
             let payload = crate::sealing::open(message, sealing_key.as_ref());
+            // Only ever attach a chain summary alongside a verdict that actually bound this
+            // chain's subject to this message's claimed sender: `verify_at`'s chain route checks
+            // that binding before it returns `Verified`, and the `filter` below re-checks it here
+            // rather than trusting that invariant silently -- `verified_chain_at` itself performs
+            // no such check (see its doc comment), so this is the one place that must.
+            let certificate = if verdict.is_verified() {
+                store
+                    .verified_chain_at(message, now)
+                    .filter(|chain| chain.subject_global_id == message.from_global_id)
+            } else {
+                None
+            };
             delivered.push(ReceivedMessage {
                 incoming,
                 sender: verdict,
                 payload,
                 freshness,
+                certificate,
             });
         }
         Ok(delivered)
