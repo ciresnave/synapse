@@ -64,6 +64,8 @@ url = "2.0"
 
 # Cryptography
 ring = { version = "0.17", optional = true }
+# Sealing (P2 slice d): HPKE base mode, X25519 + HKDF-SHA256 + ChaCha20-Poly1305.
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"], optional = true }
 rsa = { version = "0.9", optional = true }
 aes-gcm = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -347,6 +349,7 @@ core = [
 # Feature definitions for subsystems and implementations
 crypto = [
     "dep:ring",
+    "dep:hpke",
     "dep:rsa",
     "dep:aes-gcm",
     "dep:sha2",

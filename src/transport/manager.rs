@@ -144,6 +144,8 @@ impl Default for SelectionWeights {
 pub struct ReceivedMessage {
     pub incoming: IncomingMessage,
     pub sender: SenderVerdict,
+    /// The body as this node could read it (P2 slice d): plain, opened, or marked unopenable.
+    pub payload: crate::sealing::Payload,
 }
 
 /// A sent message that asked for an ack (P2 slice b).
@@ -177,6 +179,8 @@ pub struct TransportManager {
     trust_store: TokioRwLock<TrustStore>,
     /// Messages sent with `request_ack`, by message id. Grows until slice e bounds it.
     outbound: TokioRwLock<HashMap<String, Outbound>>,
+    /// This node's X25519 sealing key; sealed bodies are opened with it.
+    sealing_key: TokioRwLock<Option<crate::sealing::SealingKeyPair>>,
 }
 
 /// Unified metrics across all transports
@@ -265,6 +269,7 @@ impl TransportManager {
             failed_transports: TokioRwLock::new(HashMap::new()),
             trust_store: TokioRwLock::new(TrustStore::default()),
             outbound: TokioRwLock::new(HashMap::new()),
+            sealing_key: TokioRwLock::new(None),
         }
     }
 
@@ -486,6 +491,12 @@ impl TransportManager {
                 original.message_id, received.sender
             )));
         }
+        if let crate::sealing::Payload::CouldNotOpen(reason) = &received.payload {
+            return Err(SynapseError::InvalidMessageFormat(format!(
+                "refusing to acknowledge {}: its body could not be opened ({reason})",
+                original.message_id
+            )));
+        }
         if delivery_ack::is_ack(original) {
             return Err(SynapseError::InvalidMessageFormat(format!(
                 "{} is an ack; acks are never acknowledged",
@@ -569,6 +580,11 @@ impl TransportManager {
         entry.status = DeliveryConfirmation::Acknowledged;
     }
 
+    /// Replace this node's sealing key.
+    pub async fn set_sealing_key(&self, key: crate::sealing::SealingKeyPair) {
+        *self.sealing_key.write().await = Some(key);
+    }
+
     /// A snapshot of the pinned sender keys.
     pub async fn trust_store(&self) -> TrustStore {
         self.trust_store.read().await.clone()
@@ -606,6 +622,7 @@ impl TransportManager {
         }
 
         let store = self.trust_store.read().await;
+        let sealing_key = self.sealing_key.read().await;
         let mut delivered = Vec::with_capacity(all_messages.len());
         for incoming in all_messages {
             let sender = store.verify(&incoming.message);
@@ -614,7 +631,12 @@ impl TransportManager {
                 self.apply_ack(&incoming.message, &sender).await;
                 continue;
             }
-            delivered.push(ReceivedMessage { incoming, sender });
+            let payload = crate::sealing::open(&incoming.message, sealing_key.as_ref());
+            delivered.push(ReceivedMessage {
+                incoming,
+                sender,
+                payload,
+            });
         }
         Ok(delivered)
     }
@@ -1082,6 +1104,7 @@ impl TransportManager {
 pub struct TransportManagerBuilder {
     config: TransportManagerConfig,
     trust_store: TrustStore,
+    sealing_key: Option<crate::sealing::SealingKeyPair>,
 }
 
 impl TransportManagerBuilder {
@@ -1089,6 +1112,7 @@ impl TransportManagerBuilder {
         Self {
             config: TransportManagerConfig::default(),
             trust_store: TrustStore::default(),
+            sealing_key: None,
         }
     }
 
@@ -1135,9 +1159,16 @@ impl TransportManagerBuilder {
         self
     }
 
+    /// This node's sealing key, used to open sealed bodies.
+    pub fn sealing_key(mut self, key: crate::sealing::SealingKeyPair) -> Self {
+        self.sealing_key = Some(key);
+        self
+    }
+
     pub fn build(self) -> TransportManager {
         let mut manager = TransportManager::new(self.config);
         manager.trust_store = TokioRwLock::new(self.trust_store);
+        manager.sealing_key = TokioRwLock::new(self.sealing_key);
         manager
     }
 }

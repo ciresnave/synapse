@@ -31,6 +31,8 @@ use tokio::sync::Mutex;
 pub struct McpConfig {
     pub global_id: String,
     pub private_key_pem_path: PathBuf,
+    /// This node's X25519 sealing key (PKCS#8 PEM). Required: every message is sealed.
+    pub sealing_key_path: PathBuf,
     pub udp_bind_port: u16,
     /// Where peers send acks; defaults to `127.0.0.1:<udp_bind_port>`.
     #[serde(default)]
@@ -43,6 +45,9 @@ pub struct McpConfig {
 pub struct PeerConfig {
     pub global_id: String,
     pub public_key_pem: String,
+    /// The peer's X25519 sealing key (SubjectPublicKeyInfo PEM). Without one, the peer can't be sent to.
+    #[serde(default)]
+    pub sealing_public_key: Option<String>,
     pub address: String,
 }
 
@@ -64,11 +69,13 @@ pub(crate) struct PeerView {
     pub(crate) global_id: String,
     pub(crate) address: String,
     pub(crate) key_id: String,
+    pub(crate) sealing_key: Option<crate::sealing::SealingPublicKey>,
 }
 
 pub(crate) struct Inner {
     pub(crate) global_id: String,
     pub(crate) key_id: String,
+    pub(crate) sealing_key_id: String,
     pub(crate) crypto: CryptoManager,
     pub(crate) manager: TransportManager,
     pub(crate) peers: Vec<PeerView>,
@@ -98,6 +105,13 @@ impl SynapseMcpServer {
         let own_key = crypto
             .public_key_bytes()
             .map_err(|_| config_error("the private key could not be loaded"))?;
+        let sealing_pem = std::fs::read_to_string(&config.sealing_key_path)
+            .map_err(|_| config_error("cannot read the sealing key file"))?;
+        let sealing_key =
+            crate::sealing::SealingKeyPair::from_pkcs8_pem(&sealing_pem).map_err(|_| {
+                config_error("the sealing key file does not hold a usable X25519 PKCS#8 key")
+            })?;
+        let sealing_key_id = sealing_key.public_key().key_id();
 
         let mut store = TrustStore::new();
         let mut peers = Vec::with_capacity(config.peers.len());
@@ -110,12 +124,24 @@ impl SynapseMcpServer {
                         peer.global_id
                     ))
                 })?;
+            let peer_sealing_key = match &peer.sealing_public_key {
+                None => None,
+                Some(pem) => Some(
+                    crate::sealing::SealingPublicKey::from_spki_pem(pem).map_err(|_| {
+                        config_error(format!(
+                            "peer {}: sealing_public_key is not an X25519 public key",
+                            peer.global_id
+                        ))
+                    })?,
+                ),
+            };
             peers.push(PeerView {
                 global_id: peer.global_id.clone(),
                 address: peer.address.clone(),
                 key_id: store
                     .pinned_key_id(&peer.global_id)
                     .expect("pinned on the line above"),
+                sealing_key: peer_sealing_key,
             });
         }
 
@@ -128,6 +154,7 @@ impl SynapseMcpServer {
             .disable_transport(TransportType::AutoDiscovery)
             .transport_config(TransportType::Udp, udp)
             .trust_store(store)
+            .sealing_key(sealing_key)
             .build();
         manager
             .register_factory(Box::new(UdpTransportFactory))
@@ -156,6 +183,7 @@ impl SynapseMcpServer {
             inner: Arc::new(Inner {
                 global_id: config.global_id.clone(),
                 key_id: crate::sender_auth::key_id(&own_key),
+                sealing_key_id,
                 crypto,
                 manager,
                 peers,
@@ -223,12 +251,20 @@ fn sender_view(verdict: &SenderVerdict) -> Value {
 
 fn message_view(received: &ReceivedMessage) -> Value {
     let message = &received.incoming.message;
-    let (text, text_lossy) = match std::str::from_utf8(&message.encrypted_content) {
-        Ok(text) => (text.to_string(), false),
-        Err(_) => (
-            String::from_utf8_lossy(&message.encrypted_content).into_owned(),
-            true,
-        ),
+    let (text, text_lossy, open_error) = match &received.payload {
+        crate::sealing::Payload::Plain(bytes) | crate::sealing::Payload::Opened(bytes) => {
+            match std::str::from_utf8(bytes) {
+                Ok(text) => (Value::from(text), false, Value::Null),
+                Err(_) => (
+                    Value::from(String::from_utf8_lossy(bytes).into_owned()),
+                    true,
+                    Value::Null,
+                ),
+            }
+        }
+        crate::sealing::Payload::CouldNotOpen(reason) => {
+            (Value::Null, false, Value::from(reason.to_string()))
+        }
     };
     json!({
         "message_id": message.message_id.0.to_string(),
@@ -236,6 +272,8 @@ fn message_view(received: &ReceivedMessage) -> Value {
         "to": message.to_global_id,
         "text": text,
         "text_lossy": text_lossy,
+        "sealed": message.metadata.contains_key(crate::sealing::SEALED_KEY),
+        "open_error": open_error,
         "sender": sender_view(&received.sender),
         "received_at": received.incoming.received_timestamp,
     })
@@ -244,7 +282,7 @@ fn message_view(received: &ReceivedMessage) -> Value {
 #[tool_router(server_handler, vis = "pub")]
 impl SynapseMcpServer {
     #[tool(
-        description = "Send a signed message to a configured peer (see list). Messages are signed but NOT encrypted; do not send secrets (encryption is P2 slice d). Returns the message_id. With request_ack (the default), the message's delivery status appears in poll's deliveries."
+        description = "Send a signed message to a configured peer (see list). Messages are signed and encrypted to the recipient's pinned key; metadata (ids, timestamps) is not encrypted. Returns the message_id. With request_ack (the default), the message's delivery status appears in poll's deliveries."
     )]
     pub async fn send(
         &self,
@@ -257,14 +295,24 @@ impl SynapseMcpServer {
                 args.to
             ));
         };
+        let Some(recipient_key) = &peer.sealing_key else {
+            return refuse(format!(
+                "peer {} has no sealing key configured; messages are only sent encrypted",
+                args.to
+            ));
+        };
         let mut message = SecureMessage::new(
             args.to.clone(),
             inner.global_id.clone(),
             args.text.into_bytes(),
-            SecurityLevel::Authenticated,
+            SecurityLevel::Secure,
         );
         if args.request_ack {
             message.request_ack(inner.reply_address.clone());
+        }
+        // Seal, then sign, so the signature covers the sealed body.
+        if crate::sealing::seal(&mut message, recipient_key).is_err() {
+            return Err(ErrorData::internal_error("sealing failed", None));
         }
         if inner.crypto.sign_secure_message(&mut message).is_err() {
             return Err(ErrorData::internal_error("signing failed", None));
@@ -315,10 +363,21 @@ impl SynapseMcpServer {
         let peers: Vec<Value> = inner
             .peers
             .iter()
-            .map(|p| json!({"global_id": p.global_id, "address": p.address, "key_id": p.key_id}))
+            .map(|p| {
+                json!({
+                    "global_id": p.global_id,
+                    "address": p.address,
+                    "key_id": p.key_id,
+                    "sealing_key_id": p.sealing_key.as_ref().map(|k| k.key_id()),
+                })
+            })
             .collect();
         reply(json!({
-            "self": {"global_id": inner.global_id, "key_id": inner.key_id},
+            "self": {
+                "global_id": inner.global_id,
+                "key_id": inner.key_id,
+                "sealing_key_id": inner.sealing_key_id,
+            },
             "peers": peers,
         }))
     }

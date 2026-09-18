@@ -42,7 +42,8 @@ else in this document.
 
 🔴 **Added 2026-09-17: on `main`, "encrypted" messages can be read by anyone who has the bytes.**
 `encrypt_message` stores the AES key inside its own output. This is not in any published release
-(§2.2, "ENCRYPTION ON `main` IS NOT CONFIDENTIAL").
+(§2.2, "ENCRYPTION ON `main` IS NOT CONFIDENTIAL"). **Fixed on branch `feat/sealing`** (held, not yet on
+`main`).
 
 ---
 
@@ -543,10 +544,14 @@ registry copy and from `7b80ca4`, encrypts to the recipient's RSA public key wit
 That older scheme carries its own advisory, RUSTSEC-2023-0071 (already in the audit list). **No
 crates.io consumer has ever received the self-decrypting version.**
 
-**Not fixed here.** The fix is real recipient-key sealing (X25519/HPKE) with a key that is **never**
-derived from an Ed25519 key; that derivation produces ciphertext the recipient cannot open
-(OverMind MEASUREMENTS §20). It is scheduled as its own slice. **Publishing 2.0.0 is blocked until it
-lands** (the PM recorded this on CireSnave's board, 2026-09-17).
+**Status, 2026-09-17: fixed on branch `feat/sealing` (P2 slice d, held), still present on `main`.**
+That branch removes `encrypt_message`, `encrypt_with_aes` and `decrypt_message`. In their place it
+seals the body to the recipient's pinned X25519 key with HPKE (RFC 9180 base mode). The sealing key
+is generated on its own and is **never** derived from an Ed25519 key; that derivation produces
+ciphertext the recipient cannot open (OverMind MEASUREMENTS §20). An independent Python RFC 9180
+implementation opened a Rust-sealed message. Design:
+`docs/superpowers/specs/2026-09-17-sealing-design.md`. **Publishing 2.0.0 stays blocked until that
+branch reaches `main`** (the PM recorded the block on CireSnave's board, 2026-09-17).
 
 #### What this means for a non-Rust agent runtime
 
