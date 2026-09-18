@@ -351,6 +351,9 @@ pub fn verdict_reason(verdict: &SenderVerdict) -> &'static str {
         SenderVerdict::Unverifiable { reason } => match reason {
             UnverifiableReason::Unsigned => "unsigned",
             UnverifiableReason::UnknownSender => "unknown_sender",
+            UnverifiableReason::UnknownIssuer => "unknown_issuer",
+            UnverifiableReason::InvalidChain => "invalid_chain",
+            UnverifiableReason::ChainTooLarge => "chain_too_large",
         },
         SenderVerdict::Contradicted { reason } => match reason {
             ContradictedReason::NonCanonicalTimestamp => "non_canonical_timestamp",

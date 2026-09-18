@@ -5,13 +5,17 @@
 //! pinned itself into exactly one [`SenderVerdict`]; the verdict is never read from the wire.
 //! Design: `docs/superpowers/specs/2026-09-17-sender-authentication-design.md`.
 
+use crate::certificate::{
+    self, Revocation, RevocationLookup, VerifiedChain, chain_from_pem, validate_chain,
+};
 use crate::error::{CryptoError, Result};
 use crate::types::{SecureMessage, SecurityLevel};
-use chrono::Timelike;
+use chrono::{Timelike, Utc};
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt;
 
 /// The signature algorithm a sender used. Any other value fails to parse.
 #[derive(
@@ -153,8 +157,15 @@ impl SenderVerdict {
 pub enum UnverifiableReason {
     /// The sender declared `alg: none`.
     Unsigned,
-    /// No key is pinned for `from_global_id`.
+    /// No key is pinned for `from_global_id`, and the message carries no certificate chain.
     UnknownSender,
+    /// The chain's root names an account key that is not pinned. No signature in the chain is
+    /// checked before this verdict is reached.
+    UnknownIssuer,
+    /// The chain parsed but failed [`validate_chain`]'s rules (or named a revoked certificate).
+    InvalidChain,
+    /// The chain text or its certificate count exceeds the trust store's bounds.
+    ChainTooLarge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,18 +178,157 @@ pub enum ContradictedReason {
     BadSignature,
 }
 
+/// An account key pinned by its `key_id`, with the operator's own label kept only for reporting
+/// (never for lookup, and never printed with the key itself).
+#[derive(Clone)]
+struct AccountKeyEntry {
+    key: [u8; 32],
+    label: String,
+}
+
+impl fmt::Debug for AccountKeyEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AccountKeyEntry")
+            .field("label", &self.label)
+            .finish()
+    }
+}
+
 /// Ed25519 public keys pinned out of band, by global id. Nothing in a received message can add or
 /// change an entry.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TrustStore {
     keys: HashMap<String, [u8; 32]>,
     /// X25519 sealing keys (P2 slice d), pinned separately from the signing keys.
     sealing: HashMap<String, crate::sealing::SealingPublicKey>,
+    /// Pinned account keys, by `key_id`. A chain whose root names one of these is trusted for
+    /// however many agents that account signs certificates for.
+    account_keys: HashMap<String, AccountKeyEntry>,
+    /// Accepted revocations, by serial.
+    revocations: HashMap<[u8; 16], Revocation>,
+    /// A chain's PEM text longer than this is refused before parsing.
+    pub max_chain_bytes: usize,
+    /// A parsed chain with more certificates than this is refused before any signature in it is
+    /// checked.
+    pub max_chain_links: usize,
+}
+
+/// At most this many revocations are held; the oldest by `issued_at` is evicted beyond it.
+const MAX_REVOCATIONS: usize = 4096;
+
+impl Default for TrustStore {
+    fn default() -> Self {
+        Self {
+            keys: HashMap::new(),
+            sealing: HashMap::new(),
+            account_keys: HashMap::new(),
+            revocations: HashMap::new(),
+            max_chain_bytes: 16 * 1024,
+            max_chain_links: 64,
+        }
+    }
 }
 
 impl TrustStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Pin an account key under a caller-chosen label (kept only for reporting; lookup is always
+    /// by `key_id`). A chain rooted in this key becomes trusted for any agent it certifies.
+    pub fn pin_account_key(&mut self, label: impl Into<String>, key: [u8; 32]) {
+        self.account_keys.insert(
+            key_id(&key),
+            AccountKeyEntry {
+                key,
+                label: label.into(),
+            },
+        );
+    }
+
+    /// Pin an account key in the PEM form `CryptoManager::get_public_key_pem` produces.
+    pub fn pin_account_key_pem(&mut self, label: &str, pem: &str) -> Result<()> {
+        let block = pem::parse(pem).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        let key: [u8; 32] = block.contents().try_into().map_err(|_| {
+            CryptoError::InvalidKey("Ed25519 public key must be exactly 32 bytes".to_string())
+        })?;
+        self.pin_account_key(label, key);
+        Ok(())
+    }
+
+    /// The `key_id` of every pinned account key.
+    pub fn account_key_ids(&self) -> Vec<String> {
+        self.account_keys.keys().cloned().collect()
+    }
+
+    /// Accept `revocation` if its issuer is a pinned account key, its signature verifies against
+    /// that key, and its serial is not already held. Returns whether it was stored. Evicts the
+    /// oldest `issued_at` entry once storage exceeds [`MAX_REVOCATIONS`].
+    pub fn add_revocation(&mut self, revocation: Revocation) -> bool {
+        let Some(entry) = self.account_keys.get(&revocation.issuer_key_id) else {
+            return false;
+        };
+        if !revocation.verify_signature(&entry.key) {
+            return false;
+        }
+        if self.revocations.contains_key(&revocation.serial) {
+            return false;
+        }
+        self.revocations.insert(revocation.serial, revocation);
+        if self.revocations.len() > MAX_REVOCATIONS
+            && let Some(oldest) = self
+                .revocations
+                .iter()
+                .min_by_key(|(_, r)| r.issued_at)
+                .map(|(serial, _)| *serial)
+        {
+            self.revocations.remove(&oldest);
+        }
+        true
+    }
+
+    /// Whether a certificate serial has been revoked.
+    pub fn is_revoked(&self, serial: &[u8; 16]) -> bool {
+        self.revocations.contains_key(serial)
+    }
+
+    /// How many revocations are currently held.
+    pub fn revocation_count(&self) -> usize {
+        self.revocations.len()
+    }
+
+    /// Steps 3-6 of [`TrustStore::verify`]'s chain route: bound the chain's size before parsing,
+    /// bound its link count before any signature is checked, refuse an unpinned root without
+    /// verifying any signature in the chain, then hand it to [`validate_chain`].
+    fn resolve_chain(
+        &self,
+        chain_text: &str,
+    ) -> std::result::Result<VerifiedChain, UnverifiableReason> {
+        if chain_text.len() > self.max_chain_bytes {
+            return Err(UnverifiableReason::ChainTooLarge);
+        }
+        let chain = chain_from_pem(chain_text).map_err(|_| UnverifiableReason::InvalidChain)?;
+        if chain.len() > self.max_chain_links {
+            return Err(UnverifiableReason::ChainTooLarge);
+        }
+        // `chain_from_pem` never returns an empty vec on success, but this stays honest rather
+        // than indexing on that assumption.
+        let root = chain.last().ok_or(UnverifiableReason::InvalidChain)?;
+        if !self.account_keys.contains_key(&root.issuer_key_id) {
+            return Err(UnverifiableReason::UnknownIssuer);
+        }
+        let account_keys = &self.account_keys;
+        let lookup = move |id: &str| account_keys.get(id).map(|entry| entry.key);
+        validate_chain(&chain, &lookup, self, Utc::now())
+            .map_err(|_| UnverifiableReason::InvalidChain)
+    }
+
+    /// The verified chain summary behind a `Verified` or would-be-`Verified` message, independent
+    /// of `verify`'s own signature check. `None` for any reason `verify`'s chain route would
+    /// reject it, including one with no chain at all.
+    pub fn verified_chain(&self, message: &SecureMessage) -> Option<VerifiedChain> {
+        let chain_text = message.metadata.get(certificate::CHAIN_KEY)?;
+        self.resolve_chain(chain_text).ok()
     }
 
     pub fn pin(&mut self, global_id: impl Into<String>, public_key: [u8; 32]) {
@@ -230,8 +380,50 @@ impl TrustStore {
         self.keys.get(global_id).map(key_id)
     }
 
-    /// Spec §5: the rules apply in order and the first match wins.
+    /// Spec §5, extended by the P2f1 chain route (task-3 brief): a key pinned for
+    /// `from_global_id` still wins outright and behaves exactly as before; only when there is none
+    /// does a certificate chain rooted in a pinned account key get a chance to verify the sender.
     pub fn verify(&self, message: &SecureMessage) -> SenderVerdict {
+        if let Some(pinned) = self.keys.get(&message.from_global_id) {
+            return Self::verify_against_pinned_key(message, pinned);
+        }
+
+        let Some(chain_text) = message.metadata.get(certificate::CHAIN_KEY) else {
+            // No certificate to fall back on: an explicit "no algorithm" proof is `Unsigned`
+            // (today's behaviour, unchanged), and any other unrecognised sender is `UnknownSender`.
+            return match message.sender_proof.alg {
+                ProofAlg::None => SenderVerdict::Unverifiable {
+                    reason: UnverifiableReason::Unsigned,
+                },
+                ProofAlg::Ed25519 => SenderVerdict::Unverifiable {
+                    reason: UnverifiableReason::UnknownSender,
+                },
+            };
+        };
+
+        let verified = match self.resolve_chain(chain_text) {
+            Ok(verified) => verified,
+            Err(reason) => return SenderVerdict::Unverifiable { reason },
+        };
+
+        // The chain is valid, but that alone proves nothing about who signed this message: the
+        // sender must also hold the leaf's private key. A chain paired with any other signature
+        // has no innocent reading.
+        match UnparsedPublicKey::new(&ED25519, &verified.subject_signing_key)
+            .verify(&canonical_input(message), &message.sender_proof.sig)
+        {
+            Ok(()) => SenderVerdict::Verified {
+                key_id: key_id(&verified.subject_signing_key),
+            },
+            Err(_) => SenderVerdict::Contradicted {
+                reason: ContradictedReason::BadSignature,
+            },
+        }
+    }
+
+    /// Today's direct-pin verification, unchanged: a message from a sender whose key is pinned
+    /// directly must behave exactly as it did before certificates existed.
+    fn verify_against_pinned_key(message: &SecureMessage, pinned: &[u8; 32]) -> SenderVerdict {
         let proof = &message.sender_proof;
         match proof.alg {
             ProofAlg::None => {
@@ -241,11 +433,6 @@ impl TrustStore {
             }
             ProofAlg::Ed25519 => {}
         }
-        let Some(pinned) = self.keys.get(&message.from_global_id) else {
-            return SenderVerdict::Unverifiable {
-                reason: UnverifiableReason::UnknownSender,
-            };
-        };
         if has_sub_micro_digits(message) {
             return SenderVerdict::Contradicted {
                 reason: ContradictedReason::NonCanonicalTimestamp,
@@ -272,10 +459,237 @@ impl TrustStore {
     }
 }
 
+impl RevocationLookup for TrustStore {
+    fn is_revoked(&self, serial: &[u8; 16]) -> bool {
+        self.revocations.contains_key(serial)
+    }
+}
+
+/// Test-only convenience: a manager with a freshly generated Ed25519 keypair, so cert/chain tests
+/// don't have to thread key generation through by hand.
+#[cfg(test)]
+impl crate::crypto::CryptoManager {
+    pub(crate) fn new_with_keypair() -> Self {
+        let mut manager = Self::new();
+        manager.generate_keypair().expect("keypair generation");
+        manager
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::CryptoManager;
     use crate::types::SecurityLevel;
+    use chrono::DateTime;
+    use ed25519_dalek::SigningKey;
+
+    /// A time comfortably inside a freshly minted test certificate's validity window.
+    fn t_now() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    /// A one-link certificate: `account` vouches for `agent`'s signing (and an unused sealing) key
+    /// under `subject_id`, valid for an hour either side of `now`.
+    fn signed_cert_for(
+        account: &SigningKey,
+        agent: &CryptoManager,
+        subject_id: &str,
+        now: DateTime<Utc>,
+    ) -> certificate::AgentCertificate {
+        let unsigned = certificate::AgentCertificate {
+            version: 1,
+            serial: [7u8; 16],
+            issuer_key_id: key_id(&account.verifying_key().to_bytes()),
+            subject_label: "test agent".to_string(),
+            subject_global_id: subject_id.to_string(),
+            subject_signing_key: agent.public_key_bytes().expect("agent has a public key"),
+            subject_sealing_key: [9u8; 32],
+            not_before: now - chrono::Duration::hours(1),
+            not_after: now + chrono::Duration::hours(1),
+            permissions: vec![certificate::Permission::Send],
+            may_delegate: 0,
+            signature: [0u8; 64],
+        };
+        certificate::AgentCertificate::sign(unsigned, account)
+    }
+
+    /// A revocation for `serial`, signed by `account`.
+    fn signed_revocation(account: &SigningKey, serial: [u8; 16]) -> Revocation {
+        let unsigned = Revocation {
+            version: 1,
+            serial,
+            issuer_key_id: key_id(&account.verifying_key().to_bytes()),
+            issued_at: t_now(),
+            reason: "test".to_string(),
+            signature: [0u8; 64],
+        };
+        Revocation::sign(unsigned, account)
+    }
+
+    #[test]
+    fn a_pinned_account_key_verifies_an_agent_it_has_never_seen() {
+        // Alice's account key signs a certificate for an agent key; Bob pins only the account key.
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let agent = CryptoManager::new_with_keypair();
+        let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
+        agent.sign_secure_message(&mut message).unwrap();
+
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert!(store.verify(&message).is_verified());
+        let chain = store.verified_chain(&message).expect("a summary");
+        assert_eq!(chain.subject_global_id, "agent@alice.test");
+        assert_eq!(chain.links, 1);
+
+        // Control: with the account key unpinned, the same message is unverifiable.
+        assert_eq!(
+            TrustStore::new().verify(&message),
+            SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::UnknownIssuer
+            }
+        );
+    }
+
+    #[test]
+    fn a_chain_with_too_many_links_is_refused() {
+        // A resource guard: 65 links exceeds the default max_chain_links of 64. The certificates do
+        // not need to be valid — the refusal happens before any of them is verified.
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let agent = CryptoManager::new_with_keypair();
+        let one = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        let chain: Vec<_> = std::iter::repeat_with(|| one.clone()).take(65).collect();
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&chain));
+        agent.sign_secure_message(&mut message).unwrap();
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::ChainTooLarge
+            }
+        );
+    }
+
+    #[test]
+    fn an_oversized_chain_is_refused_without_parsing() {
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        message.add_metadata(certificate::CHAIN_KEY, "A".repeat(17 * 1024));
+        let store = TrustStore::new();
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::ChainTooLarge
+            }
+        );
+    }
+
+    #[test]
+    fn a_chain_that_does_not_match_the_signing_key_is_contradicted() {
+        // The chain is valid, but the message is signed by a different key than the leaf names.
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let agent = CryptoManager::new_with_keypair();
+        let impostor = CryptoManager::new_with_keypair();
+        let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
+        impostor.sign_secure_message(&mut message).unwrap();
+
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Contradicted {
+                reason: ContradictedReason::BadSignature
+            }
+        );
+    }
+
+    #[test]
+    fn direct_pinning_still_wins_and_still_works() {
+        // An existing deployment: no certificate anywhere, a pinned agent key.
+        let agent = CryptoManager::new_with_keypair();
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "alice@test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        agent.sign_secure_message(&mut message).unwrap();
+        let mut store = TrustStore::new();
+        store.pin("alice@test", agent.public_key_bytes().unwrap());
+        assert!(store.verify(&message).is_verified());
+    }
+
+    #[test]
+    fn a_revocation_is_stored_once_and_refuses_an_unknown_issuer() {
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let mut store = TrustStore::new();
+        let revocation = signed_revocation(&account, [7u8; 16]);
+        // Not pinned yet: refused, and nothing stored.
+        assert!(!store.add_revocation(revocation.clone()));
+        assert_eq!(store.revocation_count(), 0);
+        // Pinned: accepted once, and the duplicate is ignored.
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert!(store.add_revocation(revocation.clone()));
+        assert!(!store.add_revocation(revocation));
+        assert_eq!(store.revocation_count(), 1);
+        assert!(store.is_revoked(&[7u8; 16]));
+        assert!(!store.is_revoked(&[8u8; 16]));
+    }
+
+    #[test]
+    fn a_revoked_certificate_stops_verifying() {
+        let account = SigningKey::from_bytes(&[11u8; 32]);
+        let agent = CryptoManager::new_with_keypair();
+        let cert = signed_cert_for(&account, &agent, "agent@alice.test", t_now());
+        let serial = cert.serial;
+        let mut message = SecureMessage::new(
+            "bob@test",
+            "agent@alice.test",
+            b"hi".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        message.add_metadata(certificate::CHAIN_KEY, certificate::chain_to_pem(&[cert]));
+        agent.sign_secure_message(&mut message).unwrap();
+
+        let mut store = TrustStore::new();
+        store.pin_account_key("alice", account.verifying_key().to_bytes());
+        assert!(
+            store.verify(&message).is_verified(),
+            "valid before revocation"
+        );
+        assert!(store.add_revocation(signed_revocation(&account, serial)));
+        assert_eq!(
+            store.verify(&message),
+            SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::InvalidChain
+            }
+        );
+    }
 
     #[test]
     fn security_level_names_match_their_serde_names() {

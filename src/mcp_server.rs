@@ -291,6 +291,9 @@ fn sender_view(verdict: &SenderVerdict) -> Value {
             "reason": match reason {
                 UnverifiableReason::Unsigned => "unsigned",
                 UnverifiableReason::UnknownSender => "unknown_sender",
+                UnverifiableReason::UnknownIssuer => "unknown_issuer",
+                UnverifiableReason::InvalidChain => "invalid_chain",
+                UnverifiableReason::ChainTooLarge => "chain_too_large",
             },
         }),
         SenderVerdict::Contradicted { reason } => json!({
