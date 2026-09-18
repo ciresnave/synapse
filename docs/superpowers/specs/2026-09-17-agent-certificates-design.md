@@ -84,6 +84,10 @@ looking fine.
 
 **PEM label:** `SYNAPSE AGENT CERT`. A chain is a concatenation of PEM blocks, leaf first, root last.
 
+**Note on the two bounds:** a minimal certificate PEM block is about 385 bytes, so `max_chain_bytes`
+(16 KiB) admits roughly 42 blocks and `max_chain_links` (64) is therefore unreachable unless the byte
+bound is raised. The link cap is a backstop for that case, not the binding constraint today.
+
 ## 5. The chain
 
 `AgentChain` is an ordered list of certificates, leaf first. It is valid when **all** hold:
@@ -145,7 +149,12 @@ pub struct Revocation {
 - **Bounded per issuer and overall:** at most 512 revocations per account key and 4096 in total,
   deduplicated by `(issuer_key_id, serial)`, oldest `issued_at` evicted first WITHIN the issuer that
   overflowed. A per-issuer bound is what stops one account evicting another's entries by minting
-  revocations with distant `issued_at` values, since `issued_at` is chosen by the issuer. The store
+  revocations with distant `issued_at` values, since `issued_at` is chosen by the issuer. **At the
+  global bound the eviction comes from whichever issuer currently holds the most entries**, which may
+  be a different account than the one inserting (recorded 2026-09-18, during the f1 final review).
+  That is the least-bad policy available: reaching 4096 requires at least eight accounts near their
+  own 512 limit, so it is not a two-party attack, and evicting the largest bucket is fairer than
+  evicting the globally oldest. The store
   is in memory plus the config file; nothing is written back to disk.
 - **A revoked certificate invalidates everything below it** in a chain.
 - Short validity windows remain the primary mechanism. The CLI's default is **24 hours**, and
