@@ -427,6 +427,150 @@ pub fn chain_from_pem(text: &str) -> Result<Vec<AgentCertificate>, ChainError> {
         .collect()
 }
 
+/// A verified certificate chain's subject: the identity, keys and permissions a receiver may act
+/// on, plus which account key rooted the trust.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedChain {
+    pub account_key_id: String,
+    pub subject_label: String,
+    pub subject_global_id: String,
+    pub subject_signing_key: [u8; 32],
+    pub subject_sealing_key: [u8; 32],
+    pub permissions: Vec<Permission>,
+    /// The number of certificates in the validated chain.
+    pub links: usize,
+}
+
+/// Whether a certificate's serial has been revoked. Kept as a trait so this module never depends
+/// on the trust store's storage: it is unit-testable with an in-memory fake.
+pub trait RevocationLookup {
+    fn is_revoked(&self, serial: &[u8; 16]) -> bool;
+}
+
+/// A child's id is its parent's with exactly one label prepended: `worker.agent@host` under
+/// `agent@host`. Without this, a delegate could mint itself a certificate for any id, including its
+/// own account holder's (spec §5 rule 8).
+#[must_use]
+pub fn identity_narrows(parent: &str, child: &str) -> bool {
+    let Some(prefix) = child.strip_suffix(parent) else {
+        return false;
+    };
+    let Some(label) = prefix.strip_suffix('.') else {
+        return false;
+    };
+    !label.is_empty() && !label.contains('.')
+}
+
+/// Validate a certificate chain, leaf first (`chain[0]` is the leaf, `chain[chain.len() - 1]` is
+/// the root), against the rules in spec §5. Walks from the root down to the leaf, carrying the
+/// parent's public key, validity window, permission set and delegation budget, and returns the
+/// first error encountered. On success, returns the leaf's identity, keys and permissions.
+pub fn validate_chain(
+    chain: &[AgentCertificate],
+    account_keys: &dyn Fn(&str) -> Option<[u8; 32]>,
+    revoked: &dyn RevocationLookup,
+    now: DateTime<Utc>,
+) -> Result<VerifiedChain, ChainError> {
+    // Rule 1: the chain is non-empty.
+    let Some(root) = chain.last() else {
+        return Err(ChainError::Malformed);
+    };
+
+    // Rule 2: the root's issuer resolves through the account-key lookup, and its signature
+    // verifies against that key.
+    let account_key = account_keys(&root.issuer_key_id).ok_or(ChainError::UnknownIssuer)?;
+    let account_key_id = root.issuer_key_id.clone();
+    if !root.verify_signature(&account_key) {
+        return Err(ChainError::BadSignature);
+    }
+
+    // Carried state, seeded from the root and narrowed at each step down to the leaf. The parent
+    // key for the certificate directly under the root is the root's own subject signing key, not
+    // the account key that vouches for the root.
+    let mut parent_key = root.subject_signing_key;
+    let mut parent_not_before = root.not_before;
+    let mut parent_not_after = root.not_after;
+    let mut parent_permissions = root.permissions.clone();
+    let mut parent_may_delegate = root.may_delegate;
+    let mut parent_global_id = root.subject_global_id.clone();
+
+    // Rule 4 (window) and rule 8 (revocation) apply to the root itself too.
+    if now < root.not_before {
+        return Err(ChainError::NotYetValid);
+    }
+    if now > root.not_after {
+        return Err(ChainError::Expired);
+    }
+    if revoked.is_revoked(&root.serial) {
+        return Err(ChainError::Revoked);
+    }
+
+    // Walk from the root (last element) down to the leaf (first element), skipping the root
+    // itself since it was already checked above.
+    for cert in chain[..chain.len() - 1].iter().rev() {
+        // Rule 3: the certificate's signature verifies against its parent's signing key.
+        if !cert.verify_signature(&parent_key) {
+            return Err(ChainError::BadSignature);
+        }
+
+        // Rule 4: `now` within this certificate's own window, and nested inside the parent's.
+        if now < cert.not_before {
+            return Err(ChainError::NotYetValid);
+        }
+        if now > cert.not_after {
+            return Err(ChainError::Expired);
+        }
+        if cert.not_before < parent_not_before || cert.not_after > parent_not_after {
+            return Err(ChainError::ValidityNotNested);
+        }
+
+        // Rule 5: every child permission appears in its parent (a containment test -- Task 1
+        // sorts permission names when encoding, so a parsed certificate's permission order is
+        // not the order it was written in).
+        if !cert
+            .permissions
+            .iter()
+            .all(|permission| parent_permissions.contains(permission))
+        {
+            return Err(ChainError::PermissionWidened);
+        }
+
+        // Rule 6: a parent with may_delegate == 0 may not issue, and the child's budget must be
+        // strictly less than its parent's.
+        if parent_may_delegate == 0 || cert.may_delegate >= parent_may_delegate {
+            return Err(ChainError::DelegationNotAllowed);
+        }
+
+        // Rule 7: the child's id is its parent's with exactly one label prepended.
+        if !identity_narrows(&parent_global_id, &cert.subject_global_id) {
+            return Err(ChainError::IdentityNotNarrowed);
+        }
+
+        // Rule 8: no certificate's serial is revoked.
+        if revoked.is_revoked(&cert.serial) {
+            return Err(ChainError::Revoked);
+        }
+
+        parent_key = cert.subject_signing_key;
+        parent_not_before = cert.not_before;
+        parent_not_after = cert.not_after;
+        parent_permissions = cert.permissions.clone();
+        parent_may_delegate = cert.may_delegate;
+        parent_global_id = cert.subject_global_id.clone();
+    }
+
+    let leaf = &chain[0];
+    Ok(VerifiedChain {
+        account_key_id,
+        subject_label: leaf.subject_label.clone(),
+        subject_global_id: leaf.subject_global_id.clone(),
+        subject_signing_key: leaf.subject_signing_key,
+        subject_sealing_key: leaf.subject_sealing_key,
+        permissions: leaf.permissions.clone(),
+        links: chain.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,5 +768,211 @@ mod tests {
         assert!(parsed.verify_signature(&public(&issuer)));
         // Control: a different key does not verify it.
         assert!(!parsed.verify_signature(&public(&key(4))));
+    }
+
+    struct NoRevocations;
+    impl RevocationLookup for NoRevocations {
+        fn is_revoked(&self, _serial: &[u8; 16]) -> bool {
+            false
+        }
+    }
+
+    struct Revoked([u8; 16]);
+    impl RevocationLookup for Revoked {
+        fn is_revoked(&self, serial: &[u8; 16]) -> bool {
+            serial == &self.0
+        }
+    }
+
+    /// A two-link chain: account -> agent -> worker. Returns (leaf-first chain, account public key).
+    ///
+    /// The two certificates are given different serials (root `[7u8; 16]` from `unsigned`, leaf
+    /// `[8u8; 16]` here) so that revocation tests can distinguish which certificate was revoked --
+    /// with a shared serial, revoking one would always revoke both, and the "unaffected" half of
+    /// each revocation test would pass without testing anything.
+    fn two_link_chain() -> (Vec<AgentCertificate>, [u8; 32]) {
+        let (account, agent, worker) = (key(1), key(2), key(3));
+        let upper = AgentCertificate::sign(unsigned(&account, &agent, "agent@host"), &account);
+        let mut lower_unsigned = unsigned(&agent, &worker, "worker.agent@host");
+        lower_unsigned.issuer_key_id = crate::sender_auth::key_id(&public(&agent));
+        lower_unsigned.may_delegate = 1;
+        lower_unsigned.serial = [8u8; 16];
+        let lower = AgentCertificate::sign(lower_unsigned, &agent);
+        (vec![lower, upper], public(&account))
+    }
+
+    fn pinned(account_key: [u8; 32]) -> impl Fn(&str) -> Option<[u8; 32]> {
+        let id = crate::sender_auth::key_id(&account_key);
+        move |key_id: &str| (key_id == id).then_some(account_key)
+    }
+
+    #[test]
+    fn a_valid_two_link_chain_verifies() {
+        let (chain, account) = two_link_chain();
+        let verified =
+            validate_chain(&chain, &pinned(account), &NoRevocations, t(10)).expect("valid");
+        assert_eq!(verified.subject_global_id, "worker.agent@host");
+        assert_eq!(verified.links, 2);
+        assert_eq!(
+            verified.account_key_id,
+            crate::sender_auth::key_id(&account)
+        );
+    }
+
+    #[test]
+    fn a_chain_whose_root_is_not_pinned_is_refused() {
+        let (chain, _account) = two_link_chain();
+        let nobody = |_key_id: &str| None;
+        assert_eq!(
+            validate_chain(&chain, &nobody, &NoRevocations, t(10)),
+            Err(ChainError::UnknownIssuer)
+        );
+    }
+
+    #[test]
+    fn validity_must_nest_inside_the_parents() {
+        let (account, agent) = (key(1), key(2));
+        let mut child = unsigned(&account, &agent, "worker.agent@host");
+        child.not_after = t(999_999); // outside the parent's window
+        let (mut chain, account_key) = two_link_chain();
+        child.issuer_key_id = chain[1].issuer_key_id.clone();
+        chain[0] = AgentCertificate::sign(child, &account);
+        assert!(matches!(
+            validate_chain(&chain, &pinned(account_key), &NoRevocations, t(10)),
+            Err(ChainError::ValidityNotNested) | Err(ChainError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn an_expired_or_not_yet_valid_certificate_is_refused() {
+        let (chain, account) = two_link_chain();
+        assert_eq!(
+            validate_chain(&chain, &pinned(account), &NoRevocations, t(-1)),
+            Err(ChainError::NotYetValid)
+        );
+        assert_eq!(
+            validate_chain(&chain, &pinned(account), &NoRevocations, t(86_401)),
+            Err(ChainError::Expired)
+        );
+        // Control: exactly on each boundary is valid.
+        assert!(validate_chain(&chain, &pinned(account), &NoRevocations, t(0)).is_ok());
+        assert!(validate_chain(&chain, &pinned(account), &NoRevocations, t(86_400)).is_ok());
+    }
+
+    #[test]
+    fn a_child_cannot_widen_its_permissions() {
+        let (account, agent, worker) = (key(1), key(2), key(3));
+        let upper_unsigned = {
+            let mut c = unsigned(&account, &agent, "agent@host");
+            c.permissions = vec![Permission::Send];
+            c
+        };
+        let upper = AgentCertificate::sign(upper_unsigned, &account);
+        let lower = {
+            let mut c = unsigned(&agent, &worker, "worker.agent@host");
+            c.issuer_key_id = crate::sender_auth::key_id(&public(&agent));
+            c.may_delegate = 1;
+            c.permissions = vec![Permission::Send, Permission::Ack]; // Ack was never granted
+            AgentCertificate::sign(c, &agent)
+        };
+        assert_eq!(
+            validate_chain(
+                &[lower, upper],
+                &pinned(public(&account)),
+                &NoRevocations,
+                t(10)
+            ),
+            Err(ChainError::PermissionWidened)
+        );
+    }
+
+    #[test]
+    fn delegation_budgets_must_decrease_and_zero_cannot_issue() {
+        let (account, agent, worker) = (key(1), key(2), key(3));
+        // A parent with may_delegate 0 may not issue at all.
+        let upper = {
+            let mut c = unsigned(&account, &agent, "agent@host");
+            c.may_delegate = 0;
+            AgentCertificate::sign(c, &account)
+        };
+        let lower = {
+            let mut c = unsigned(&agent, &worker, "worker.agent@host");
+            c.issuer_key_id = crate::sender_auth::key_id(&public(&agent));
+            c.may_delegate = 0;
+            AgentCertificate::sign(c, &agent)
+        };
+        assert_eq!(
+            validate_chain(
+                &[lower, upper],
+                &pinned(public(&account)),
+                &NoRevocations,
+                t(10)
+            ),
+            Err(ChainError::DelegationNotAllowed)
+        );
+    }
+
+    #[test]
+    fn a_child_cannot_claim_an_id_outside_its_parents_namespace() {
+        // The impersonation case: a delegate mints itself a certificate for its account holder's id.
+        let (account, agent, worker) = (key(1), key(2), key(3));
+        let upper = AgentCertificate::sign(unsigned(&account, &agent, "agent@host"), &account);
+        let lower = {
+            let mut c = unsigned(&agent, &worker, "ciresnave@host"); // not under agent@host
+            c.issuer_key_id = crate::sender_auth::key_id(&public(&agent));
+            c.may_delegate = 1;
+            AgentCertificate::sign(c, &agent)
+        };
+        assert_eq!(
+            validate_chain(
+                &[lower, upper],
+                &pinned(public(&account)),
+                &NoRevocations,
+                t(10)
+            ),
+            Err(ChainError::IdentityNotNarrowed)
+        );
+    }
+
+    #[test]
+    fn identity_narrowing_accepts_one_prepended_label_only() {
+        assert!(identity_narrows("agent@host", "worker.agent@host"));
+        assert!(identity_narrows(
+            "worker.agent@host",
+            "task.worker.agent@host"
+        ));
+        assert!(!identity_narrows("agent@host", "agent@host"));
+        assert!(
+            !identity_narrows("agent@host", "a.b.agent@host"),
+            "one label at a time"
+        );
+        assert!(!identity_narrows("agent@host", "evil@host"));
+        assert!(
+            !identity_narrows("agent@host", "workeragent@host"),
+            "the dot is required"
+        );
+        assert!(!identity_narrows("agent@host", "worker.agent@other"));
+    }
+
+    #[test]
+    fn a_revoked_certificate_invalidates_the_chain() {
+        let (chain, account) = two_link_chain();
+        let leaf_serial = chain[0].serial;
+        assert_eq!(
+            validate_chain(&chain, &pinned(account), &Revoked(leaf_serial), t(10)),
+            Err(ChainError::Revoked)
+        );
+        // Control: revoking an unrelated serial leaves the chain valid.
+        assert!(validate_chain(&chain, &pinned(account), &Revoked([1u8; 16]), t(10)).is_ok());
+    }
+
+    #[test]
+    fn a_revoked_parent_invalidates_everything_below_it() {
+        let (chain, account) = two_link_chain();
+        let root_serial = chain[1].serial;
+        assert_eq!(
+            validate_chain(&chain, &pinned(account), &Revoked(root_serial), t(10)),
+            Err(ChainError::Revoked)
+        );
     }
 }
