@@ -138,8 +138,15 @@ pub struct Revocation {
 - **Sources:** a `revocations` file named in config, and revocations relayed in message metadata.
 - **A relayed revocation is accepted only when its `issuer_key_id` is a pinned account key or a
   certificate already validated under one.** Everything else is dropped without verification work.
-- **Bounded:** at most 4096 revocations are held, deduplicated by serial, oldest `issued_at` evicted
-  first. The store is in memory plus the config file; nothing is written back to disk.
+- **Scoped to its issuer.** A revocation is keyed by `(issuer_key_id, serial)`, and a certificate is
+  only revoked by a revocation from the key that issued it. Serials travel in every chain, so
+  without this any pinned account could silently un-trust another account's agents by publishing a
+  revocation for a serial it merely observed (added 2026-09-17, during the f1 review).
+- **Bounded per issuer and overall:** at most 512 revocations per account key and 4096 in total,
+  deduplicated by `(issuer_key_id, serial)`, oldest `issued_at` evicted first WITHIN the issuer that
+  overflowed. A per-issuer bound is what stops one account evicting another's entries by minting
+  revocations with distant `issued_at` values, since `issued_at` is chosen by the issuer. The store
+  is in memory plus the config file; nothing is written back to disk.
 - **A revoked certificate invalidates everything below it** in a chain.
 - Short validity windows remain the primary mechanism. The CLI's default is **24 hours**, and
   certificates are expected to be re-minted rather than long-lived.
