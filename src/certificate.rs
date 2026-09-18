@@ -1134,4 +1134,20 @@ mod tests {
             Err(ChainError::Malformed)
         );
     }
+
+    #[test]
+    fn an_unknown_root_certificate_version_is_malformed() {
+        // chain[1] is the root in this crate's leaf-first ordering. Mutating `version` changes
+        // the signing input, so the root must be re-signed afterwards -- otherwise this would
+        // pass for the wrong reason, by hitting BadSignature instead of the version check.
+        let (mut chain, account_key) = two_link_chain();
+        let account = key(1);
+        let mut root = chain[1].clone();
+        root.version = 2;
+        chain[1] = AgentCertificate::sign(root, &account);
+        assert_eq!(
+            validate_chain(&chain, &pinned(account_key), &NoRevocations, t(10)),
+            Err(ChainError::Malformed)
+        );
+    }
 }
