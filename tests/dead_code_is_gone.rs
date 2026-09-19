@@ -10,7 +10,6 @@ const DELETED: &[&str] = &[
     "src/transport/email_enhanced.rs",
     "src/transport/email_unified.rs",
     "src/transport/websocket.rs",
-    "src/transport/mdns.rs",
     "src/transport/production_http.rs",
     "src/wasm/browser.rs",
     "src/wasm/crypto.rs",

@@ -36,26 +36,16 @@ async fn test_transport_error_handling() -> Result<()> {
     }
 
     // Test email transport error handling
-    match provider.create_email_transport(&config).await {
-        Ok(Some(email_transport)) => {
-            // Test invalid email handling
-            let target = TransportTarget::new("invalid@".to_string());
-            let result = email_transport.test_connectivity(&target).await;
-            match result {
-                Ok(connectivity) => {
-                    assert!(!connectivity.connected, "Should fail with invalid email");
-                }
-                Err(_) => {
-                    // Also acceptable - some transports may return Err for invalid emails
-                    println!("✓ Email transport returned error for invalid email as expected");
-                }
-            }
-        }
-        Ok(None) | Err(_) => {
-            // Email transport creation failed - expected without proper config
-            println!("✓ Email transport creation failed as expected without config");
-        }
-    }
+    let email_transport = provider
+        .create_email_transport(&config)
+        .await?
+        .expect("email transport must construct: its validator is real");
+    let target = TransportTarget::new("invalid@".to_string());
+    let connectivity = email_transport.test_connectivity(&target).await?;
+    assert!(
+        !connectivity.connected,
+        "Should fail to connect with an invalid email address"
+    );
 
     println!("✓ Transport error handling test completed");
     Ok(())
