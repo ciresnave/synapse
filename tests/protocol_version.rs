@@ -25,10 +25,8 @@ fn store_for(alice: &CryptoManager) -> TrustStore {
     store
 }
 
-fn free_udp_port() -> u16 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
-    socket.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::free_udp_port;
 
 /// Follows the loopback pattern in `tests/replay_suppression.rs`: bind `127.0.0.1` only, never a
 /// wildcard address, which raises a Windows Firewall prompt on this machine.

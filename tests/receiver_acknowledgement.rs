@@ -35,10 +35,8 @@ fn pinned(entries: &[(&str, &CryptoManager)]) -> TrustStore {
     store
 }
 
-fn free_udp_port() -> u16 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
-    socket.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::free_udp_port;
 
 async fn node(store: TrustStore) -> (TransportManager, u16) {
     node_with_gate(store, synapse::replay::GateConfig::default()).await

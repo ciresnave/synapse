@@ -30,10 +30,8 @@ struct Process {
     config_text: String,
 }
 
-fn free_udp_port() -> u16 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
-    socket.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::free_udp_port;
 
 fn slash(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")

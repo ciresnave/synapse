@@ -112,17 +112,19 @@ impl UdpTransportImpl {
                                     .metadata
                                     .insert("packet_size".to_string(), len.to_string());
 
-                                if let Ok(mut messages) = received_messages.try_lock() {
-                                    messages.push(incoming);
-                                    debug!("Queued UDP message, total: {}", messages.len());
-                                }
-
                                 // Update metrics
-                                if let Ok(mut metrics) = metrics.try_write() {
+                                if let Ok(mut metrics) = metrics.write() {
                                     metrics.messages_received += 1;
                                     metrics.bytes_received += len as u64;
                                     metrics.touch();
                                 }
+
+                                // Wait for the queue: `receive_raw` holds it while draining,
+                                // and a `try_lock` here silently discarded any datagram that
+                                // arrived in that window.
+                                let mut messages = received_messages.lock().await;
+                                messages.push(incoming);
+                                debug!("Queued UDP message, total: {}", messages.len());
                             } else {
                                 warn!("Failed to parse UDP message from {}", addr);
                             }
@@ -475,5 +477,91 @@ impl TransportFactory for UdpTransportFactory {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SecurityLevel;
+
+    /// A transport listening on an OS-chosen loopback port, and that address.
+    async fn listening() -> (UdpTransportImpl, SocketAddr) {
+        let mut transport = UdpTransportImpl::new(&HashMap::new()).await.unwrap();
+        transport.start_server().await.unwrap();
+        let addr = transport.socket.as_ref().unwrap().local_addr().unwrap();
+        (transport, addr)
+    }
+
+    fn message(text: &str) -> SecureMessage {
+        SecureMessage::new(
+            "bob@synapse.test",
+            "alice@synapse.test",
+            text.as_bytes().to_vec(),
+            SecurityLevel::Public,
+        )
+    }
+
+    /// Poll `receive_raw` until something arrives or `wait` passes.
+    async fn receive_within(transport: &UdpTransportImpl, wait: Duration) -> Vec<IncomingMessage> {
+        let deadline = Instant::now() + wait;
+        let mut inbox = RawInbox::new();
+        loop {
+            transport.receive_raw(&mut inbox).await.unwrap();
+            if inbox.len() > 0 || Instant::now() >= deadline {
+                return inbox.drain();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    // `receive_raw` holds the queue while it drains it. A datagram that arrives in that window
+    // must wait for the lock and be queued, not be discarded. The lock is held here for the whole
+    // arrival, so this is deterministic: `messages_received` counts the datagram as read, and only
+    // then is the lock released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_datagram_that_arrives_while_the_queue_is_locked_is_kept() {
+        let (transport, addr) = listening().await;
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        {
+            let _held = transport.received_messages.lock().await;
+            sender
+                .send_to(&serde_json::to_vec(&message("while locked")).unwrap(), addr)
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while transport.metrics().await.messages_received == 0 {
+                assert!(Instant::now() < deadline, "the datagram was never read");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        let got = receive_within(&transport, Duration::from_secs(2)).await;
+        assert_eq!(
+            got.len(),
+            1,
+            "a datagram read while the queue was locked was discarded"
+        );
+    }
+
+    // On Windows, sending to a closed port makes the sending socket's next recv_from fail with
+    // WSAECONNRESET (os error 10054). The receive loop must survive that and keep receiving.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn receiving_continues_after_sending_to_a_closed_port() {
+        let (transport, addr) = listening().await;
+        let closed = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        transport
+            .send_to(&closed, &message("into the void"))
+            .await
+            .expect("send");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(&serde_json::to_vec(&message("after")).unwrap(), addr)
+            .unwrap();
+        let got = receive_within(&transport, Duration::from_secs(2)).await;
+        assert_eq!(got.len(), 1, "the receive loop stopped after a reset");
     }
 }

@@ -14,11 +14,8 @@ use synapse::transport::{
     TransportManager, TransportManagerConfig, TransportStatus, TransportType, UdpTransportFactory,
 };
 
-/// A free loopback UDP port: bind :0, read the port, release it.
-fn free_udp_port() -> u16 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
-    socket.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::free_udp_port;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_returns_when_a_udp_factory_is_registered() {
