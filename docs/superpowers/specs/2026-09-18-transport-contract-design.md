@@ -3,7 +3,7 @@
 **Status:** draft for CireSnave's review. The four decisions in §2 are his; everything else is
 proposed.
 **Branch:** `design/transport-contract`, from `main` at `bbd4bf0` (after P2 slices a–e and f1).
-**Precedes:** email authentication on the unified path, then f2 (certificates-only trust).
+**Precedes:** QUIC, then email (authenticated by construction), then f2 (certificates-only trust).
 **Ruled into the 2.0 set** (CireSnave, 2026-09-18, EXPECTATIONS §5.1b): *"Receiving messages needs to
 be unified and that should be done sooner rather than later. QUIC shoud not report "delivered" until
 delivery."*
@@ -142,14 +142,18 @@ CireSnave's decision 3 was *"Fix every one to actually receive."* With §6 in ha
 | QUIC | write it on `quinn` | large |
 | Email | write real SMTP sending and IMAP receiving; neither exists | large |
 
-Two of the six are new transports, not repairs. **The question for CireSnave is whether 2.0 waits for
-all six**, or whether 2.0 ships the ones that can be made real inside the slice and marks the rest
-honestly unavailable — refusing to construct rather than pretending — with QUIC and email as their own
-slices after.
+Two of the six are new transports, not repairs.
 
-This matters for the order he approved: *email authentication* was the next slice after this one, on
-the premise that email would inherit verification once on the unified path. There is currently no
-email transport that sends or receives email, so there is nothing yet for it to authenticate.
+**Decided (CireSnave, 2026-09-18), selecting:** *"Repair four now; QUIC and email as their own slices
+before 2.0."* So **this slice repairs TCP, WebSocket, HTTP and NAT traversal.** QUIC and email each get
+their own spec and slice, both still before publishing. Until they land, their transports **refuse to
+construct**, returning an error that names the missing slice, rather than pretending — so no build of
+this branch ever reports a delivery that did not happen.
+
+**Email authentication folds into the email slice** (CireSnave, selecting *"Fold it into the email
+transport slice"*). The approved order had email authentication next, on the premise that email would
+inherit verification once on the unified path; there is no email transport that sends or receives
+yet, so email is built on the unified path from the start and is authenticated by construction.
 
 ## 8. The email `invalid@` defect
 
@@ -168,11 +172,46 @@ writes to the browser console. There is no browser transport, no WebCrypto, and 
 verification in any WASM build. The other six files under `src/wasm/` (2,838 lines, including a
 `WebCrypto` wrapper and a WebSocket transport) are not declared as modules and never compile.
 
-So a WASM section in 2.0 is a new transport, not a repair — a browser WebSocket or WebTransport client
-that goes through the same manager, verification and sealing as every other transport, with
-`ed25519-dalek` and HPKE compiled to wasm (both are pure Rust). That is its own slice, and belongs with
-the §7 question.
+So a WASM transport is a new build, not a repair: a browser WebSocket or WebTransport client that goes
+through the same manager, verification and sealing as every other transport, with `ed25519-dalek` and
+HPKE compiled to wasm (both are pure Rust, so this is feasible). **This slice deletes the six
+uncompiled WASM files** — they cannot be built and are not a foundation to keep — and leaves
+`simple.rs` as it is. **Whether a real WASM transport is pre-2.0 is the one scope question still open
+for CireSnave** (§12).
 
 ## 10. Testing
 
-Written once §7 is decided, because it determines which transports the tests must drive.
+- **One end-to-end test per repaired transport** — TCP, WebSocket, HTTP, NAT traversal, alongside the
+  existing UDP ones — that sends a signed, sealed message through a real loopback socket and receives
+  it through `TransportManager::receive_messages` with a `Verified` verdict. This is the test none of
+  them has today, and it is the one that would have caught every defect in §6.
+- **A receive-path test per transport that a message arrives with no application call to the
+  transport itself**: proves receive is plumbing, not a public API (§3).
+- **A compile-time test that the transport receive cannot be called from outside the crate**, as a
+  doc-test marked `compile_fail`.
+- **`Delivered` audit**: a source scan asserting every `DeliveryConfirmation::Delivered` construction
+  has a comment naming its protocol event (§4), with a control that the scan finds the constructions.
+- **`protocol_version`**: a message with version 2 is `Unverifiable { UnsupportedVersion }`; a relay
+  rewriting the version invalidates the signature; the mDNS record carries the integer.
+- **The email validator**: `"invalid@"` is refused by `can_reach`, `test_connectivity` and
+  `send_message` alike. This makes `test_transport_error_handling` pass — `main`'s first fully green run.
+- **QUIC and email refuse to construct** with an error naming their slice.
+- **Every test binds loopback only**; the full run happens in a fresh target directory with the
+  Windows Firewall event 2097 count reported, as for every slice so far.
+
+## 11. What this slice deletes
+
+The old `Transport` trait in `transport/mod.rs`; the nine uncompiled transport files (§6); the
+fabricated `quic_unified.rs`; `tcp_simple.rs` and the shadowing `TcpTransportFactory` in
+`abstraction.rs`; the orphaned `production_http.rs`; the dead `create_standard_factories`; and the six
+uncompiled files under `src/wasm/`. Each deletion is checked by building, since an uncompiled file can
+only be deleted safely once nothing refers to it.
+
+## 12. Open for CireSnave
+
+1. **Is a real WASM transport pre-2.0?** It is a new build like QUIC and email (§9). Recommended: its
+   own slice, after 2.0, because nothing in the 2.0 set depends on it and it would be the first code
+   in the crate to run in a browser.
+2. **Everything else in this document** — the receive API (§3), the delivery claims (§4) and
+   `protocol_version` on the wire (§5) — is proposed within decisions he has already made, and needs
+   only his review of the spec as a whole.
