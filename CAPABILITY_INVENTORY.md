@@ -127,7 +127,9 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > 18. The `2.625M` per connection (2.63 MiB at `M` = 1 MiB, a fragmented message's transient peak;
 > 2.06 MiB held for one whole frame) and the 11 KiB each connection holds after its handshake were
 > measured with a counting allocator, release build, Windows, 16 connections at once; the 64 KiB
-> write-buffer cap, and the scaling to other `M`, are derived. (As first built, `22e68c5` stated
+> write-buffer cap, and the scaling to other `M`, are derived. `2.625M` is the largest of the four
+> frame shapes measured, not a proven maximum: a shape not tried could grow tungstenite's buffers
+> further. (As first built, `22e68c5` stated
 > `C × (4M + 80 KiB)`, about 333 MiB, an estimate from reading tungstenite 0.30 that the
 > measurement showed was high.) Fix round 1 also closed a hole the formula did not cover: the
 > receiver answered pings, with an unbounded write buffer, so one peer that pinged and never read
@@ -137,6 +139,11 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > 0.2 MiB had been sent). `idle_timeout_ms` is a gap between reads, as TCP's is, not a deadline for
 > a whole message, and a target with any scheme but `ws://`, an empty host, or a missing, zero or
 > invalid port is refused (`22e68c5` accepted `http://host:80` and dialled `ws://http://host:80/`).
+> A target is checked by the parser that dials it (`http::Uri`, through tungstenite's
+> `IntoClientRequest`), so what is accepted is exactly what is dialled; `c604d57` checked with the
+> `url` crate, which accepted `ws://a\b:9000`, `ws://%61:80`, `ws://bücher.test:80` and a path
+> with a space, all then refused at send, read `ws://0x7f.1:80` as 127.0.0.1 where the dialler
+> resolves the name, and dropped a fragment. The scheme matches in any case (`WS://h:80`).
 > The sender refuses an oversize message with `SynapseError::MessageRefused` before connecting.
 > `test_connectivity` reports connected, with the handshake's measured round trip, only after a
 > real handshake; `estimate_metrics` probes the same way and reports observed values (a failed probe

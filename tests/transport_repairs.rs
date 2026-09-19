@@ -429,6 +429,12 @@ async fn tcp_carries_a_large_verified_message() {
 /// busy the queue is when it arrives. The messages are signed but not sealed: the other two tests carry
 /// sealing, and sealing plus opening costs tens of milliseconds per message in a debug build
 /// (300 sealed messages took 19 s in one run here, against about 5 s signed only).
+///
+/// It catches the old `try_lock` bug only by chance: against that code it lost 1 to 3 of the 400
+/// messages in a run, and passed about 1 run in 11, so a regressed build has roughly a 9% chance
+/// of passing it. The deterministic check is the unit test
+/// `a_message_ready_while_the_queue_is_locked_is_queued_once_the_lock_is_released` in
+/// `src/transport/tcp_unified.rs`, which holds the queue lock across a send.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn tcp_loses_no_message_under_concurrent_sends() {
     loses_no_message_under_concurrent_sends(TransportType::Tcp, tcp, 400).await;

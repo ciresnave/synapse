@@ -73,10 +73,11 @@
 //!   measured:** the write buffer adds at most [`SERVER_MAX_WRITE_BUFFER`] (64 KiB), its cap; that
 //!   the peak scales as `2.625 M` for other values of `M`, since the buffers that grow are sized
 //!   by the frame; and the handshake buffer, which tungstenite refuses to grow past 64 KiB, is not
-//!   added, because it is released before any frame is read. So each connection holds at most
-//!   about `2.625 M + 11 KiB + 64 KiB`. The earlier `4M + 80 KiB`, read from tungstenite's code
-//!   rather than measured, assumed every buffer doubled at once, which the measurement did not
-//!   show.
+//!   added, because it is released before any frame is read. So each connection holds about
+//!   `2.625 M + 11 KiB + 64 KiB`: the largest of the four frame shapes measured, not a proven
+//!   maximum, since a shape not tried could grow tungstenite's buffers further. The earlier
+//!   `4M + 80 KiB`, read from tungstenite's code rather than measured, assumed every buffer
+//!   doubled at once, which the measurement did not show.
 //! - **parsed messages:** `B × f`. Before parsing, a handler takes budget for its message's JSON
 //!   length, and the queued message keeps that budget until the application drains it, so every
 //!   message being parsed or waiting in the queue holds budget for its own raw bytes, and together
@@ -153,10 +154,9 @@ use tokio::{
 };
 use tokio_tungstenite::{
     WebSocketStream, accept_async_with_config, connect_async_with_config,
-    tungstenite::{Message, protocol::WebSocketConfig},
+    tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
 };
 use tracing::{debug, error, info, warn};
-use url::Url;
 
 /// The config key for the port `start` listens on. `0`, the default, lets the OS choose.
 pub const LOCAL_PORT_KEY: &str = "local_port";
@@ -347,40 +347,112 @@ fn bad_target(address: &str, why: &str) -> SynapseError {
     ))
 }
 
-/// `host:port` checked: a non-empty host and a port from 1 to 65535. The host must not contain a
-/// character that would end the authority of a URL, or `a/b:80` would dial `a` on port 80's
-/// default instead.
-fn check_authority(address: &str, authority: &str) -> Result<()> {
-    let Some((host, port)) = authority.rsplit_once(':') else {
-        return Err(bad_target(address, "it has no port"));
+/// `host:port` checked, returning the host and port: a non-empty host and a port from 1 to 65535.
+/// The host must not contain a character that would end the authority of a URL, or `a/b:80`
+/// would dial `a` on port 80's default instead, nor `\`, `%` or a non-ASCII character, which the
+/// `url` crate reads one way and the parser that dials (`http::Uri`) refuses. A missing port is
+/// reported before a misplaced colon, so `ws://[::1]` says that it has no port.
+fn check_authority<'a>(address: &str, authority: &'a str) -> Result<(&'a str, u16)> {
+    let (host, port) = if let Some(inside) = authority.strip_prefix('[') {
+        // A bracketed IPv6 host: the port follows the closing bracket.
+        let Some((ip, after)) = inside.split_once(']') else {
+            return Err(bad_target(address, "its IPv6 host has no closing bracket"));
+        };
+        if ip.is_empty() {
+            return Err(bad_target(address, "its host is empty"));
+        }
+        let Some(port) = after.strip_prefix(':') else {
+            return Err(bad_target(address, "it has no port"));
+        };
+        if ip.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(bad_target(
+                address,
+                "its bracketed host is not an IPv6 address",
+            ));
+        }
+        (&authority[..ip.len() + 2], port)
+    } else {
+        let Some((host, port)) = authority.rsplit_once(':') else {
+            return Err(bad_target(address, "it has no port"));
+        };
+        (host, port)
     };
-    if host.is_empty() || host == "[]" {
+    if host.is_empty() {
         return Err(bad_target(address, "its host is empty"));
     }
-    if host.contains(['/', '?', '#', '@']) || host.chars().any(char::is_whitespace) {
+    if host.contains(['/', '?', '#', '@', '\\', '%'])
+        || host.chars().any(|c| c.is_whitespace() || !c.is_ascii())
+    {
         return Err(bad_target(
             address,
             "its host is not a host name or address",
         ));
     }
-    // An IPv6 address must be bracketed, or its last group would be read as the port.
-    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
-        return Err(bad_target(address, "an IPv6 host must be in brackets"));
+    let port = match port.parse::<u16>() {
+        Ok(0) => return Err(bad_target(address, "port 0 cannot be dialled")),
+        Ok(port) => port,
+        Err(_) => {
+            return Err(bad_target(
+                address,
+                &format!("its port {port:?} is not a number from 1 to 65535"),
+            ));
+        }
+    };
+    if host.starts_with('[') {
+        return Ok((host, port));
     }
-    match port.parse::<u16>() {
-        Ok(0) => Err(bad_target(address, "port 0 cannot be dialled")),
-        Ok(_) => Ok(()),
-        Err(_) => Err(bad_target(
+    if host.contains(':') {
+        // An IPv6 address must be bracketed, or its last group would be read as the port.
+        if host.parse::<std::net::Ipv6Addr>().is_ok()
+            || authority.parse::<std::net::Ipv6Addr>().is_ok()
+        {
+            return Err(bad_target(address, "an IPv6 host must be in brackets"));
+        }
+        // `ws:host:80`: a scheme without its `//`.
+        let first = host.split(':').next().unwrap_or_default();
+        if first.eq_ignore_ascii_case("ws") || first.eq_ignore_ascii_case("wss") {
+            return Err(bad_target(address, "a ws URL needs `//` after its scheme"));
+        }
+        return Err(bad_target(
             address,
-            &format!("its port {port:?} is not a number from 1 to 65535"),
-        )),
+            "its host is not a host name or address",
+        ));
     }
+    // A host whose last label is a number is an IPv4 address to the `url` crate, which reads
+    // `0x7f.1` and `127.1` as 127.0.0.1, but a name to the dialler, which hands it to the
+    // resolver. Only a plain dotted quad means the same address to both.
+    let last = host
+        .strip_suffix('.')
+        .unwrap_or(host)
+        .rsplit('.')
+        .next()
+        .unwrap_or_default();
+    let hex = last
+        .strip_prefix("0x")
+        .or_else(|| last.strip_prefix("0X"))
+        .is_some_and(|h| h.chars().all(|c| c.is_ascii_hexdigit()));
+    let numeric = !last.is_empty() && (hex || last.chars().all(|c| c.is_ascii_digit()));
+    if numeric && host.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err(bad_target(
+            address,
+            "a numeric host must be a dotted-quad IPv4 address such as 127.0.0.1",
+        ));
+    }
+    Ok((host, port))
 }
 
-/// The `ws://` URL for `target`'s address: a `ws://` URL as given, or `host:port`. Either form must
-/// name a host and a port; no default port is guessed. Any other scheme is refused: `wss://`
-/// because this build has no TLS, and `http://`, `https://` and the rest because they are not
-/// WebSocket URLs (`http://host:80` once became `ws://http://host:80/`).
+/// The `ws://` URL for `target`'s address: a `ws://` URL as given (its scheme matched in any case
+/// and written in lowercase), or `host:port`. Either form must name a host and a port; no default
+/// port is guessed. Any other scheme is refused: `wss://` because this build has no TLS, and
+/// `http://`, `https://` and the rest because they are not WebSocket URLs (`http://host:80` once
+/// became `ws://http://host:80/`). A fragment is refused rather than silently dropped.
+///
+/// The URL is checked by the parser that dials it. [`connect`](WebSocketTransportImpl::connect)
+/// hands it to `connect_async`, which parses it into an `http::Uri` through
+/// [`IntoClientRequest`] and dials that `Uri`'s host and port. This does the same, and requires
+/// that host and port to be the ones checked, so what is accepted here is exactly what is
+/// dialled: a target that cannot be dialled is refused here, rather than failing at send, where
+/// the failure would count against the transport's health.
 fn ws_url(target: &TransportTarget) -> Result<String> {
     let address = target.address.as_deref().ok_or_else(|| {
         SynapseError::TransportError(format!(
@@ -388,14 +460,20 @@ fn ws_url(target: &TransportTarget) -> Result<String> {
             target.identifier
         ))
     })?;
-    let url = match address.split_once("://") {
-        Some(("ws", rest)) => {
-            // The authority ends at the first `/`, `?` or `#`.
-            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-            check_authority(address, authority)?;
-            address.to_string()
+    let (url, (host, port)) = match address.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("ws") => {
+            if rest.contains('#') {
+                return Err(bad_target(
+                    address,
+                    "it has a fragment, which would not be sent",
+                ));
+            }
+            // The authority ends at the first `/` or `?`.
+            let authority = rest.split(['/', '?']).next().unwrap_or_default();
+            let checked = check_authority(address, authority)?;
+            (format!("ws://{rest}"), checked)
         }
-        Some(("wss", _)) => {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("wss") => {
             return Err(SynapseError::TransportError(format!(
                 "WebSocket target {address}: wss:// is not supported, because this build of the \
                  WebSocket transport has no TLS"
@@ -408,15 +486,27 @@ fn ws_url(target: &TransportTarget) -> Result<String> {
             ));
         }
         None => {
-            check_authority(address, address)?;
-            format!("ws://{address}/")
+            let checked = check_authority(address, address)?;
+            (format!("ws://{address}/"), checked)
         }
     };
-    let parsed = Url::parse(&url).map_err(|e| {
-        SynapseError::TransportError(format!("WebSocket target {address:?} is not a URL: {e}"))
+    let request = url.as_str().into_client_request().map_err(|e| {
+        bad_target(
+            address,
+            &format!("the WebSocket client cannot dial it ({e})"),
+        )
     })?;
-    if parsed.host_str().is_none_or(str::is_empty) {
-        return Err(bad_target(address, "its host is empty"));
+    let uri = request.uri();
+    if uri.host() != Some(host) || uri.port_u16() != Some(port) {
+        return Err(bad_target(
+            address,
+            &format!(
+                "it would be dialled at host {:?} port {:?}, not the host {host:?} port {port} it \
+                 names",
+                uri.host(),
+                uri.port_u16()
+            ),
+        ));
     }
     Ok(url)
 }
@@ -1369,28 +1459,45 @@ mod tests {
     /// A target address is a `ws://` URL or `host:port`, and either must name a host and a port:
     /// no default port is guessed. `wss://` is refused, since this build has no TLS, and so is
     /// every other scheme: `http://example.test:80` once became `ws://http://example.test:80/`.
+    /// Whatever is accepted is exactly what `connect_async` dials: each address in the second
+    /// list once passed validation by the `url` crate and then failed at send, because the
+    /// dialler parses with `http::Uri`, or was dialled as something other than what was checked.
     #[test]
     fn target_addresses() {
         let target =
             |address: &str| TransportTarget::new("t".to_string()).with_address(address.to_string());
-        assert_eq!(
-            ws_url(&target("127.0.0.1:9000")).unwrap(),
-            "ws://127.0.0.1:9000/"
-        );
-        assert_eq!(ws_url(&target("[::1]:9000")).unwrap(), "ws://[::1]:9000/");
-        assert_eq!(
-            ws_url(&target("ws://example.test:81/x")).unwrap(),
-            "ws://example.test:81/x"
-        );
-        // A port equal to ws's default is still a port the address names.
-        assert_eq!(
-            ws_url(&target("ws://example.test:80")).unwrap(),
-            "ws://example.test:80"
-        );
-        assert_eq!(
-            ws_url(&target("ws://[::1]:9000/")).unwrap(),
-            "ws://[::1]:9000/"
-        );
+        let refusal = |address: &str| match ws_url(&target(address)) {
+            Ok(url) => panic!("{address} must be refused, but became {url}"),
+            Err(e) => e.to_string(),
+        };
+        for (address, url) in [
+            ("127.0.0.1:9000", "ws://127.0.0.1:9000/"),
+            ("[::1]:9000", "ws://[::1]:9000/"),
+            ("ws://example.test:81/x", "ws://example.test:81/x"),
+            // A port equal to ws's default is still a port the address names.
+            ("ws://example.test:80", "ws://example.test:80"),
+            ("ws://[::1]:9000/", "ws://[::1]:9000/"),
+            // The scheme is matched in any case, and written as `ws`, which the dialler requires.
+            ("WS://h:80", "ws://h:80"),
+            ("Ws://h:80/p", "ws://h:80/p"),
+            // Positive controls beside the refusals below: a plain name, a hyphenated one, a
+            // dotted quad, a path and a query, and a name whose last label is not a number.
+            ("ws://a-b.test:9000", "ws://a-b.test:9000"),
+            ("ws://bucher.test:80", "ws://bucher.test:80"),
+            ("ws://127.0.0.1:80", "ws://127.0.0.1:80"),
+            (
+                "ws://h:80/path%20with%20space",
+                "ws://h:80/path%20with%20space",
+            ),
+            ("ws://h:80/p?q=1", "ws://h:80/p?q=1"),
+            ("ws://node.1a:80", "ws://node.1a:80"),
+            ("a.b:9000", "ws://a.b:9000/"),
+        ] {
+            assert_eq!(ws_url(&target(address)).unwrap(), url, "{address}");
+            // What is accepted is what the dialler parses: the same host and port.
+            let request = url.into_client_request().unwrap();
+            assert!(request.uri().port_u16().is_some(), "{address}");
+        }
         for bad in [
             // Not WebSocket schemes.
             "http://example.test:80",
@@ -1399,6 +1506,7 @@ mod tests {
             "ftp://x:1",
             "wss://example.test",
             "wss://example.test:443",
+            "WSS://example.test:443",
             // A missing, empty or invalid port, or an empty host.
             "example.test",
             "ws://example.test",
@@ -1414,9 +1522,29 @@ mod tests {
             // A host that is not one: it would dial `a`, on no port it names.
             "a/b:80",
             "::1:9000",
+            // Each passed the `url` crate and was then refused by the dialler's `http::Uri`, or
+            // was dialled as something other than what was checked.
+            "ws://a\\b:9000",
+            "a\\b:9000",
+            "ws://%61:80",
+            "ws://bücher.test:80",
+            "ws://h:80/path with space",
+            "ws://0x7f.1:80",
+            "ws://127.1:80",
+            "ws://h.0x7f:80",
+            "ws://h:80/#fragment",
+            "ws://h:80#f",
         ] {
-            assert!(ws_url(&target(bad)).is_err(), "{bad} must be refused");
+            refusal(bad);
         }
+        // The reason given is the one that applies: a missing port is reported before a colon in
+        // the host, and a scheme missing its `//` is not taken for an IPv6 address.
+        assert!(refusal("ws://[::1]").contains("it has no port"));
+        assert!(refusal("ws:h.test:80").contains("needs `//` after its scheme"));
+        assert!(refusal("::1:9000").contains("an IPv6 host must be in brackets"));
+        assert!(refusal("ws://0x7f.1:80").contains("dotted-quad"));
+        assert!(refusal("ws://h:80/#fragment").contains("fragment"));
+        assert!(refusal("ws://h:80/path with space").contains("cannot dial it"));
         assert!(ws_url(&TransportTarget::new("no-address".to_string())).is_err());
     }
 

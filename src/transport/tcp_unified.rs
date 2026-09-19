@@ -1127,6 +1127,87 @@ mod tests {
         );
     }
 
+    /// A handler whose message is ready while the queue lock is held waits for the lock instead of
+    /// dropping the message. The test holds `received_messages`' lock, as `receive_raw` or another
+    /// handler would, completes one send to the listener, and waits until the handler has taken
+    /// queue budget for it: from then on its only steps are parsing and taking the lock, so it is
+    /// at the lock or on its way there. The message must not be queued while the lock is held,
+    /// and must be queued exactly once after the lock is released. With `try_lock` in place of
+    /// `lock().await`, the handler dropped the message and this fails on every run, unlike
+    /// `tcp_loses_no_message_under_concurrent_sends` in `tests/transport_repairs.rs`, which hits
+    /// the contention only by chance.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_message_ready_while_the_queue_is_locked_is_queued_once_the_lock_is_released() {
+        use crate::types::{SecureMessage, SecurityLevel};
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        let config = HashMap::from([
+            ("listen_port".to_string(), port.to_string()),
+            (
+                crate::network_scope::BIND_SCOPE_KEY.to_string(),
+                crate::network_scope::BindScope::Loopback
+                    .config_value()
+                    .to_string(),
+            ),
+        ]);
+        let bob = TcpTransportImpl::new(&config).await.expect("construct");
+        assert!(bob.listener.is_some(), "127.0.0.1:{port} must be bound");
+        bob.start().await.expect("start");
+        let alice = TcpTransportImpl::new(&HashMap::new())
+            .await
+            .expect("construct the sender");
+        let target =
+            TransportTarget::new("bob".to_string()).with_address(format!("127.0.0.1:{port}"));
+        let message = SecureMessage::new("bob", "alice", Vec::new(), SecurityLevel::Authenticated);
+        let budget = bob.queue_budget.available_permits();
+
+        let queue = bob.received_messages.lock().await;
+        alice
+            .send_message(&target, &message)
+            .await
+            .expect("the send completes");
+        // Wait until the handler holds budget for the message (it is at the lock), or has got
+        // past the queue without waiting for it (the bug: it counts the message as received).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while bob.queue_budget.available_permits() == budget
+            && bob.metrics.read().unwrap().messages_received == 0
+            && Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            bob.queue_budget.available_permits() < budget,
+            "the handler must have taken queue budget for the message"
+        );
+        // Positive evidence that it is waiting rather than done: still not counted, still queued
+        // nowhere, a pause later.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(bob.metrics.read().unwrap().messages_received, 0);
+        assert!(queue.is_empty());
+        drop(queue);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while bob.received_messages.lock().await.is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut inbox = RawInbox::new();
+        bob.receive_raw(&mut inbox).await.expect("receive");
+        let ids: Vec<_> = inbox
+            .drain()
+            .into_iter()
+            .map(|m| m.message.message_id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![message.message_id.to_string()],
+            "queued exactly once"
+        );
+        assert_eq!(bob.metrics.read().unwrap().messages_received, 1);
+    }
+
     /// `validate_config` applies the same rule as `new`.
     #[test]
     fn validate_config_refuses_what_new_refuses() {

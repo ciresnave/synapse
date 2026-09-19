@@ -439,8 +439,16 @@ confidence 0.3. The memory bound's first term is now taken from a measurement, n
 about `C × (2.625M + 75 KiB) + B × f`, about 245 MiB at peak with the defaults and `f` = 18.
 The `2.625M` (a fragmented message's transient peak; 2.06 MiB held for one whole frame at `M` =
 1 MiB) and 11 KiB per connection after the handshake are measured (counting allocator, release
-build, Windows); the 64 KiB write-buffer cap and the scaling to other `M` are derived. As first
-built it stated `C × (4M + 80 KiB)`, about 333 MiB, read from tungstenite's code, which was high.
+build, Windows); the 64 KiB write-buffer cap and the scaling to other `M` are derived. `2.625M` is
+the largest of the four frame shapes measured, not a proven maximum. As first built it stated
+`C × (4M + 80 KiB)`, about 333 MiB, read from tungstenite's code, which was high.
+Polish (review of `c604d57`): a target is validated by the parser that dials it (`http::Uri`,
+through `IntoClientRequest`), whose host and port must be the ones checked, so what is accepted is
+exactly what is dialled; `\`, `%` and non-ASCII characters in the host, a fragment, and a numeric
+host that is not a dotted quad (`0x7f.1`, which the `url` crate read as 127.0.0.1) are refused;
+the scheme matches in any case; a missing port is reported before a colon in the host. TCP gained
+a deterministic unit test for its queue lock, which fails on every run against the old `try_lock`
+code, where the concurrency test in `transport_repairs.rs` passed about 1 run in 11.
 
 #### Breaking changes (unreleased 2.0.0), from Task 8
 
