@@ -237,9 +237,15 @@ match arm each), `src/transport/mdns_enhanced.rs` and `src/transport/discovery.r
 `src/transport/providers.rs`, a new `tests/delivery_claims.rs`
 
 After Tasks 1 and 3, the remaining `Delivered` constructions are WebSocket (claimed off a bare TCP
-connect with the handshake skipped), mDNS (a simulated send) and the test mock. WebSocket becomes
-`Sent` here; Task 8 gives it a real handshake. mDNS's `send_message` returns an error — it is
-discovery, not messaging. The mock keeps `Delivered` with a comment saying it is a test double.
+connect with the handshake skipped), mDNS (a simulated send) and the test mock. WebSocket's
+`send_message` **refuses** here, with an error saying WebSocket send is not implemented yet, until
+Task 8: `Sent` requires a write to a real socket that returned success (spec §4), and today's path
+writes nothing — the connect is a bare TCP connect with no handshake, and
+`send_via_existing_connection` ignores its data. mDNS's `send_message`, and auto-discovery's
+(`discovery.rs`), return an error — they are discovery, not messaging — and their estimates and
+metrics stop advertising them as available or reliable. Email's fake `send_connection_offer` goes, so
+the trait default's refusal applies. The mock keeps `Delivered` with a comment saying it is a test
+double.
 
 - [ ] **Test:** a source scan over `src/transport/` asserting every `DeliveryConfirmation::Delivered`
   construction has a comment within three lines naming its protocol event, and that no transport file
@@ -384,6 +390,11 @@ Fix the double bind the way `tcp_unified` did: `start()` binds once, stores the 
 spawned accept loop uses that same `Arc<TcpListener>` rather than binding again. Replace the skipped
 handshake with `tokio_tungstenite::accept_async` on the server and `connect_async` on the client.
 `Delivered` only if the peer returns an application-level frame acknowledging it; otherwise `Sent`.
+Task 6 left `send_message` refusing; this task replaces the refusal with the real send, and removes
+the `#[allow(dead_code)]` markers Task 6 put on the now-unreachable send helpers.
+`send_via_existing_connection` ignores its `data` argument (it sleeps 1 ms and returns `Ok`): the
+repair must actually write the frame to the connection's stream, which means keeping the stream, not
+just a `WebSocketConnection` record, per connection.
 
 - [ ] **Test:** `websocket_carries_a_verified_message_end_to_end`. Control: record that it fails
   before the double-bind fix, because the accept loop never starts.
@@ -410,7 +421,10 @@ since the peer's HTTP stack confirmed receipt — say so in the comment.
 
 It has no `TransportType` and no factory, so nothing can register it. Add both. Fix its double bind:
 `receive_raw` reuses the socket bound into `self.socket` instead of binding a second one on the same
-address.
+address. Its send also corrupts ciphertext: `send_message` builds its JSON with
+`"content": String::from_utf8_lossy(&message.encrypted_content)`, which replaces every invalid UTF-8
+sequence with U+FFFD, so sealed bytes do not survive. The repair must send the raw bytes (the
+serialized `SecureMessage`, as the other transports do), not a lossy string.
 
 - [ ] **Test:** `nat_traversal_carries_a_verified_message_end_to_end`, over loopback. (The traversal
   itself needs a real NAT to exercise; this test proves the transport sends and receives, which is the

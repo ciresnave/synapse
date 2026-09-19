@@ -7,7 +7,7 @@
 //! path returns an explicit "not implemented yet" error instead of a faked
 //! success.
 
-use super::{abstraction::*, router::ConnectionOffer};
+use super::abstraction::*;
 use crate::{
     error::{Result, SynapseError},
     types::{EmailConfig, SecureMessage},
@@ -97,15 +97,16 @@ impl Transport for SimpleEmailTransport {
         valid_address(&target.identifier)
     }
 
-    async fn estimate_metrics(&self, target: &TransportTarget) -> Result<TransportEstimate> {
-        let can_reach = self.can_reach(target).await;
+    async fn estimate_metrics(&self, _target: &TransportTarget) -> Result<TransportEstimate> {
+        // Every send refuses until the email slice lands, so this transport is not available
+        // for any target, however well-formed its address (matching `metrics()`).
         Ok(TransportEstimate {
-            latency: Duration::from_secs(60), // Email typically has minute-level latency
-            reliability: if can_reach { 0.95 } else { 0.0 },
-            bandwidth: 1024, // Not really applicable for email
-            cost: 0.1,       // Very low cost
-            available: can_reach,
-            confidence: if can_reach { 0.8 } else { 0.9 },
+            latency: Duration::from_secs(60),
+            reliability: 0.0,
+            bandwidth: 0,
+            cost: 0.1,
+            available: false,
+            confidence: 0.9,
         })
     }
 
@@ -176,8 +177,9 @@ impl Transport for SimpleEmailTransport {
             bytes_sent: 0,
             bytes_received: 0,
             average_latency_ms: 60000, // 60 seconds
-            // Every send/receive/connect path refuses until the email slice lands, so nothing
-            // this transport does succeeds.
+            // Every send/receive/connect path refuses until the email slice lands, and connection
+            // offers take the trait default, which refuses too, so nothing this transport does
+            // succeeds.
             reliability_score: 0.0,
             active_connections: 0,
             last_updated_timestamp: std::time::SystemTime::now()
@@ -186,12 +188,6 @@ impl Transport for SimpleEmailTransport {
                 .as_secs(),
             custom_metrics: HashMap::new(),
         }
-    }
-
-    async fn send_connection_offer(&self, target: &str, _offer: ConnectionOffer) -> Result<String> {
-        // Email doesn't support real-time connection offers, but we can send an email
-        info!("Sending connection offer via email to: {}", target);
-        Ok(format!("email_offer_{}", uuid::Uuid::new_v4()))
     }
 }
 
@@ -309,5 +305,32 @@ mod tests {
         assert!(transport.receive_raw(&mut RawInbox::new()).await.is_err());
         // The transport must never claim a connection it did not make.
         assert!(transport.test_connectivity(&target).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_connection_offer_is_refused_rather_than_faked() {
+        use crate::transport::router::ConnectionOffer;
+        let transport = SimpleEmailTransport::new(test_config()).unwrap();
+        let offer = ConnectionOffer {
+            from_entity: "me@example.com".to_string(),
+            to_entity: "user@example.com".to_string(),
+            transport_type: TransportType::Email,
+            capabilities: transport.capabilities(),
+            valid_until: 0,
+        };
+        let err = transport
+            .send_connection_offer("user@example.com", offer)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn estimates_do_not_advertise_a_transport_that_cannot_send() {
+        let transport = SimpleEmailTransport::new(test_config()).unwrap();
+        let target = TransportTarget::new("user@example.com".to_string());
+        let estimate = transport.estimate_metrics(&target).await.unwrap();
+        assert!(!estimate.available);
+        assert_eq!(estimate.reliability, 0.0);
     }
 }

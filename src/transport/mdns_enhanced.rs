@@ -534,16 +534,17 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
     }
 
     fn capabilities(&self) -> crate::transport::abstraction::TransportCapabilities {
+        // Discovery only: `send_message` refuses, so no message capability is advertised.
         crate::transport::abstraction::TransportCapabilities {
-            max_message_size: 1024 * 1024,
-            reliable: true,
+            max_message_size: 0,
+            reliable: false,
             real_time: false,
-            broadcast: true,
-            bidirectional: true,
+            broadcast: false,
+            bidirectional: false,
             encrypted: false,
-            network_spanning: true,
-            supported_urgencies: vec![crate::transport::abstraction::MessageUrgency::Interactive],
-            features: vec!["mdns_discovery".to_string()],
+            network_spanning: false,
+            supported_urgencies: Vec::new(),
+            features: vec!["mdns_discovery".to_string(), "discovery_only".to_string()],
         }
     }
 
@@ -556,13 +557,14 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
         &self,
         _target: &crate::transport::abstraction::TransportTarget,
     ) -> crate::error::Result<crate::transport::abstraction::TransportEstimate> {
+        // mDNS carries no messages (`send_message` refuses), so no target is available through it.
         Ok(crate::transport::abstraction::TransportEstimate {
             latency: std::time::Duration::from_millis(50),
-            reliability: 0.99,
-            bandwidth: 1_000_000,
+            reliability: 0.0,
+            bandwidth: 0,
             cost: 0.0,
-            available: true,
-            confidence: 0.9,
+            available: false,
+            confidence: 1.0,
         })
     }
 
@@ -606,7 +608,12 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
     }
 
     async fn metrics(&self) -> crate::transport::abstraction::TransportMetrics {
-        crate::transport::abstraction::TransportMetrics::default()
+        // The default reports reliability 1.0; a transport whose every send refuses reports 0.0.
+        crate::transport::abstraction::TransportMetrics {
+            transport_type: crate::transport::abstraction::TransportType::AutoDiscovery,
+            reliability_score: 0.0,
+            ..Default::default()
+        }
     }
 }
 

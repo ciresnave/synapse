@@ -125,6 +125,11 @@ manager, or not networked.
 | QUIC | `quic_unified` | factory never registered | always empty | fabricated, claims `Delivered` |
 | NAT traversal | `nat_traversal` | no factory at all | its own double bind | real |
 
+The table is the state at `bbd4bf0`. PR A changes the send column for WebSocket: its `send_message`
+refuses until the WebSocket repair (plan Task 8), because the measured path wrote nothing to report as
+`Sent` — the connect is a bare TCP connect with no handshake, and `send_via_existing_connection`
+discards its data. WebSocket does not send in PR A.
+
 **Nine transport files are not compiled at all** — `tcp.rs`, `tcp_enhanced.rs`, `udp.rs`, `quic.rs`,
 `nat_traversal_clean.rs`, `email_enhanced.rs`, `email_unified.rs`, `websocket.rs`, `mdns.rs` — and six
 of the seven files under `src/wasm/` are likewise never compiled in any configuration.

@@ -34,6 +34,8 @@ pub struct WebSocketTransportImpl {
     /// TCP listener for WebSocket server
     listener: Arc<RwLock<Option<TcpListener>>>,
     /// Connection timeout
+    // Unreachable while `send_message` refuses; the WebSocket repair (plan Task 8) rewires it.
+    #[allow(dead_code)]
     connection_timeout: Duration,
     /// Active connections
     connections: Arc<Mutex<HashMap<String, WebSocketConnection>>>,
@@ -55,7 +57,11 @@ struct WebSocketConnection {
     id: String,
     #[allow(dead_code)] // Reserved for future connection tracking
     remote_addr: SocketAddr,
+    // Unreachable while `send_message` refuses; the WebSocket repair (plan Task 8) rewires it.
+    #[allow(dead_code)]
     connected_at: Instant,
+    // Unreachable while `send_message` refuses; the WebSocket repair (plan Task 8) rewires it.
+    #[allow(dead_code)]
     last_activity: Instant,
     #[allow(dead_code)] // Reserved for future connection tracking
     is_server: bool, // True if we accepted the connection, false if we initiated it
@@ -184,6 +190,8 @@ impl WebSocketTransportImpl {
     }
 
     /// Send message via WebSocket
+    // Unreachable while `send_message` refuses; the WebSocket repair (plan Task 8) rewires it.
+    #[allow(dead_code)]
     async fn send_websocket_message(
         &self,
         connection_id: &str,
@@ -365,6 +373,8 @@ impl WebSocketTransportImpl {
     }
 
     /// Send message via existing WebSocket connection
+    // Unreachable while `send_message` refuses; the WebSocket repair (plan Task 8) rewires it.
+    #[allow(dead_code)]
     async fn send_via_existing_connection(
         &self,
         conn: &WebSocketConnection,
@@ -389,6 +399,8 @@ impl WebSocketTransportImpl {
     }
 
     /// Establish new WebSocket connection and send message
+    // Unreachable while `send_message` refuses; the WebSocket repair (plan Task 8) rewires it.
+    #[allow(dead_code)]
     async fn connect_and_send(&self, target: &str, data: Vec<u8>) -> Result<()> {
         // Parse target as WebSocket URL or construct it
         let ws_url = if target.starts_with("ws://") || target.starts_with("wss://") {
@@ -496,6 +508,8 @@ impl WebSocketTransportImpl {
     }
 
     /// Maintain an active WebSocket connection
+    // Unreachable while `send_message` refuses; the WebSocket repair (plan Task 8) rewires it.
+    #[allow(dead_code)]
     async fn maintain_websocket_connection(
         mut ws_stream: tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<TcpStream>,
@@ -722,108 +736,33 @@ impl Transport for WebSocketTransportImpl {
         connections.contains_key(&target.identifier)
     }
 
-    async fn estimate_metrics(&self, target: &TransportTarget) -> Result<TransportEstimate> {
-        let can_reach = self.can_reach(target).await;
-
-        if can_reach {
-            Ok(TransportEstimate {
-                latency: Duration::from_millis(50), // Low latency for WebSocket
-                reliability: 0.95,                  // High reliability due to TCP
-                bandwidth: 10 * 1024 * 1024,        // 10Mbps typical
-                cost: 2.0,                          // Medium cost
-                available: true,
-                confidence: 0.85, // Good confidence
-            })
-        } else {
-            Ok(TransportEstimate {
-                latency: Duration::from_secs(5),
-                reliability: 0.0,
-                bandwidth: 0,
-                cost: 1000.0,
-                available: false,
-                confidence: 0.95,
-            })
-        }
+    async fn estimate_metrics(&self, _target: &TransportTarget) -> Result<TransportEstimate> {
+        // `send_message` refuses until the WebSocket repair (plan Task 8), so no target is
+        // available through this transport, however reachable its address looks.
+        Ok(TransportEstimate {
+            latency: Duration::from_secs(5),
+            reliability: 0.0,
+            bandwidth: 0,
+            cost: 1000.0,
+            available: false,
+            confidence: 1.0,
+        })
     }
 
     async fn send_message(
         &self,
-        target: &TransportTarget,
-        message: &SecureMessage,
+        _target: &TransportTarget,
+        _message: &SecureMessage,
     ) -> Result<DeliveryReceipt> {
-        // Try to find existing connection or establish new one
-        let connection_id = {
-            let connections = self.connections.lock().await;
-            if connections.contains_key(&target.identifier) {
-                target.identifier.clone()
-            } else {
-                drop(connections); // Release lock before async operation
-
-                // Try to establish new connection
-                if let Some(address) = &target.address {
-                    let connection = self.connect_to_server(address).await?;
-                    connection.id
-                } else {
-                    return Err(crate::error::SynapseError::TransportError(
-                        "No address provided for WebSocket connection".to_string(),
-                    ));
-                }
-            }
-        };
-
-        // Use circuit breaker to protect against failures
-        if !self.circuit_breaker.can_proceed().await {
-            return Err(crate::error::SynapseError::TransportError(
-                "Circuit breaker is open - rejecting request".to_string(),
-            ));
-        }
-
-        let send_result = timeout(
-            self.connection_timeout,
-            self.send_websocket_message(&connection_id, message),
-        )
-        .await
-        .map_err(|_| crate::error::SynapseError::NetworkError("Request timeout".to_string()))?;
-
-        match send_result {
-            Ok(duration) => {
-                self.circuit_breaker
-                    .record_outcome(crate::circuit_breaker::RequestOutcome::Success)
-                    .await;
-                self.update_metrics("send", duration, true).await;
-
-                Ok(DeliveryReceipt {
-                    message_id: message.message_id.to_string(),
-                    transport_used: TransportType::WebSocket,
-                    delivery_time: duration,
-                    target_reached: connection_id.clone(),
-                    // `Sent`, not `Delivered`: the connection is a bare TCP connect with the
-                    // WebSocket handshake skipped, so no protocol event shows the peer received
-                    // anything (spec §4). Even `Sent` overstates the existing-connection path:
-                    // `send_via_existing_connection` discards the bytes unwritten. Task 8 adds a
-                    // real handshake.
-                    confirmation: DeliveryConfirmation::Sent,
-                    metadata: {
-                        let mut map = HashMap::new();
-                        map.insert("connection_id".to_string(), connection_id);
-                        if let Some(addr) = &target.address {
-                            map.insert("target_url".to_string(), addr.clone());
-                        }
-                        map
-                    },
-                })
-            }
-            Err(e) => {
-                self.circuit_breaker
-                    .record_outcome(crate::circuit_breaker::RequestOutcome::Failure(
-                        e.to_string(),
-                    ))
-                    .await;
-                self.update_metrics("send", Duration::from_secs(0), false)
-                    .await;
-                Err(e)
-            }
-        }
+        // Refused, not faked (spec §4): `Sent` requires a write to a real socket that returned
+        // success, and this transport has none to offer. `connect_to_server` is a bare TCP connect
+        // with no WebSocket handshake, and `send_via_existing_connection` never writes its data.
+        // Real sending arrives with the WebSocket repair (plan Task 8); the body this replaced is
+        // at commit 88e045e.
+        Err(crate::error::SynapseError::TransportError(
+            "WebSocket send is not implemented yet (no handshake); it arrives with the WebSocket repair"
+                .to_string(),
+        ))
     }
 
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
@@ -1015,7 +954,11 @@ impl Transport for WebSocketTransportImpl {
     }
 
     async fn metrics(&self) -> TransportMetrics {
-        self.metrics.read().unwrap().clone()
+        let mut metrics = self.metrics.read().unwrap().clone();
+        // Every send refuses until the WebSocket repair (plan Task 8); the stored score starts at
+        // the default 1.0 and must not advertise a reliability no send has earned.
+        metrics.reliability_score = 0.0;
+        metrics
     }
 }
 
@@ -1043,5 +986,33 @@ impl TransportReceive for WebSocketTransportImpl {
 
         inbox.extend(messages);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn send_refuses_even_when_the_peer_accepts_a_tcp_connection() {
+        // A loopback listener, so the old bare-TCP-connect path would have succeeded and
+        // returned `Sent` with nothing written: the refusal, not a failed connect, must be what
+        // this test observes. `new` binds nothing; only `start` listens.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let transport = WebSocketTransportImpl::new(&HashMap::new()).await.unwrap();
+        let target = TransportTarget::new("peer".to_string()).with_address(format!("ws://{addr}"));
+        let message = SecureMessage::new(
+            "peer",
+            "probe",
+            b"hi".to_vec(),
+            crate::types::SecurityLevel::Public,
+        );
+        let err = transport.send_message(&target, &message).await.unwrap_err();
+        assert!(err.to_string().contains("not implemented yet"), "{err}");
+        let estimate = transport.estimate_metrics(&target).await.unwrap();
+        assert!(!estimate.available);
+        assert_eq!(estimate.reliability, 0.0);
+        assert_eq!(transport.metrics().await.reliability_score, 0.0);
     }
 }
