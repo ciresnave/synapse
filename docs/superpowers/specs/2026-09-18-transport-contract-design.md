@@ -48,8 +48,18 @@ freshness mark, and the certificate summary.
 **The `Transport` trait's receive becomes crate-private.** It keeps returning raw
 `Vec<IncomingMessage>` — the transport's job is to produce bytes from the wire and say where they came
 from — but it can no longer be called from outside the crate. The trait itself stays public so a
-downstream crate can *implement* a transport; it cannot *read* one past the manager. Concretely, the
-receive method moves to a sealed supertrait that only the manager can call.
+downstream crate can *implement* a transport; it cannot *read* one past the manager.
+
+**The mechanism is a write-only inbox, not a token** (revised 2026-09-19, during review of the first
+implementation). The receive method moves to a supertrait whose signature is
+`async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()>`. `RawInbox` can be pushed into by
+anyone who holds one, but only this crate can construct one or read from it. The first design passed
+implementors a by-value `Token` instead, and review found it leaks: the manager must hand every
+transport a fresh token on every poll, so an external transport registered with the manager is simply
+given one, and can store it and then call `receive_raw` on any other transport to read raw, unverified
+messages. With an inbox there is nothing to steal: forwarding the inbox to another transport only
+puts that transport's messages into the manager's inbox, where they are verified. Decorating and
+wrapping transports still work.
 
 **Why the transport does not verify.** Verification needs the trust store, the replay guard, the
 delivery gate and the sealing key — all of which the manager owns and threads one clock through.
