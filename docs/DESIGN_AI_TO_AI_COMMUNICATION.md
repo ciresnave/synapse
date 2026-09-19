@@ -1,7 +1,8 @@
 # Design proposal: negotiated AI-to-AI communication in Synapse
 
-**Status: PROPOSAL. Stops for CireSnave's review before any prototype.** No code accompanies this
-document.
+**Status: APPROVED by CireSnave, 2026-09-18** (§11). §12's language registry is a proposal awaiting
+his review. No code accompanies this document; work starts when the PM judges it ready, after
+Synapse 2.0.
 
 **Base:** `ciresnave/synapse` `main` `1e6898bd` (2026-09-16), and FAM's
 `DESIGN-SYNAPSE-HANDOVER.md` at `ciresnave/FAM` `main` `5111f2b`. Every "today" statement below
@@ -470,14 +471,103 @@ From FAM's handover and Synapse's inventory, restated as constraints on the impl
 
 ---
 
-## 11. Questions for CireSnave
+## 11. Decisions (CireSnave, 2026-09-18)
 
-1. **Authentication first?** §5.5 proposes that negotiated languages and L2 require authenticated
-   peers, which makes sender authentication a prerequisite for them. Is that the right order?
-2. **Who may file a negotiated-language spec, and where?** A spec must be readable by an outside
-   auditor, so it needs a home neither negotiating party controls. Agora (#1) also reports duplicate
-   protocols emerging without one shared registry.
-3. **When does a coupling stop counting?** §6.3 treats coupled models as one agent. If two models
-   were coupled and later work separately, when — if ever — are they independent again for review?
-4. **Is training in scope for Fuel?** L2 between *different* models needs a trained adapter for each
-   pair (§9.2). L2 between identical models does not. Which should Synapse plan for first?
+**Approved.** CireSnave, verbatim: *"I agree with everything in DESIGN_AI_TO_AI_COMMUNICATION.md and we
+can proceed with that work when you think we're ready. I especially liked reading about the idea of
+training a latent-to-latent translator adaptor for connecting dissimilar models."*
+
+His answers to the four questions this section used to ask, verbatim: *"Language communication should
+only be done between authenticated peers. I do agree that a language spec must be available to both
+involved models and any auditor and a shared registry for those makes sense but I don't have a
+predesigned idea for how best to create that registry. Coupled models are only a single mind while
+coupled. Fuel has always been intended as a full ML ecosystem including training, inference, and
+anything else we may need of it."*
+
+What each answer settles:
+
+1. **Negotiated languages and L2 are for authenticated peers only.** §5.5's ordering stands. It is
+   no longer a prerequisite waiting to be built: sender authentication, receiver acknowledgement,
+   sealing, replay suppression and agent certificates are all on `main` as of 2026-09-18. A
+   negotiation offer from a sender whose verdict is anything but `Verified` is refused, not
+   downgraded.
+2. **Every language spec lives in a shared registry**, readable by both negotiating models and by any
+   auditor. CireSnave has no predesigned registry; §12 proposes one.
+3. **A coupling counts as one mind only while it lasts.** §6.3's treatment — review coupled models
+   as a single agent — applies for the duration of the coupling. Once they work separately, each is
+   reviewed on its own again. The record of what they did while coupled stays attributed to the
+   coupling, not split between them after the fact.
+4. **Training belongs in Fuel**, which is intended as a full ML ecosystem: training, inference, and
+   whatever else this needs. So the latent translator adapters of §9.2 are Fuel work, and Synapse's
+   role is to carry, version and verify them, never to train them.
+
+**Start:** when the PM judges it ready, which the roadmap places after Synapse 2.0.
+
+## 12. The language registry — a proposal
+
+CireSnave asked for this to be designed rather than assumed, so it is a proposal for review, not a
+decision. It has to satisfy one hard constraint he stated separately on 2026-09-18: models that can
+negotiate a language should be able to **store** what they say in it and read it back later —
+*"the equivalent of HTML pages where the data is stored in their compressed language and retrievable
+later by any model that understands that negotiated language."* So a language must stay resolvable
+for as long as any document written in it exists. Everything below follows from that.
+
+### 12.1 What an entry is
+
+A **language spec** is an immutable, signed document:
+
+- **Identified by its content.** The id is the SHA-256 of the spec's canonical bytes, so it cannot be
+  edited in place: a change is a new spec with a new id. Readers never ask "what does language X mean
+  now?", only "what did spec `<hash>` say?".
+- **Signed by the account key that proposed it** — the same account keys slice f introduced. The
+  signature says who authored the spec; it grants nothing.
+- **Versioned by lineage.** A new version names the id it supersedes, forming a chain an auditor can
+  walk. Superseding never deletes: the old spec stays resolvable for as long as anything cites it.
+- **Carries an auditor-readable decoding.** For a symbolic language that is its grammar and semantics.
+  For a **latent** language it is a trained decoder, and the entry must pin **both** the model version
+  whose latents it decodes **and** the decoder's own version — a latent is meaningless without the
+  exact model that produced it, and a decoder is a claim that has to be tested (§12.3).
+
+### 12.2 What a document is
+
+A stored message — a "page for models" — pins the **exact** spec id it is written in and is signed by
+its author's key. A reader resolves the spec by id, verifies both signatures, and only then decodes.
+There is no "latest version" lookup on the read path: a document written in spec `<hash>` is always
+read with spec `<hash>`, so its meaning cannot drift under it.
+
+### 12.3 Verifying a latent language
+
+A latent decoder's fidelity is a measured property, published in the registry beside the spec:
+
+- **Round-trip verification** (CireSnave's idea): A→B→A exchange loops, used live as a repair loop —
+  A elaborates on whatever nuance did not survive — and offline as cycle-consistency training signal
+  for the translators, which is Fuel's side.
+- **Anti-collusion guards.** Two translators trained together can learn to hide A's content in
+  dimensions B ignores, passing a round trip while conveying nothing. So: require task-grounded use by
+  B, measure loss as A's **behavioural** divergence rather than vector distance, and keep an
+  **independent auditor decoder** that neither party trained.
+- **What gets published:** round-trip loss plus task accuracy, as each latent language's fidelity
+  score. The irreducible residue — what B cannot represent — is published too, because it is a map of
+  B's gaps, which is exactly what capability-gap training in Fuel consumes.
+
+### 12.4 Where it lives
+
+The proposal is that the registry is **hosted the same way introductions are**: any site can run
+one, and sites federate, following the introduction app's federation model (a separate project,
+first hosted on ThinkersJournal.com). Because every entry is content-addressed and signed,
+federation is safe to relay — a host can store and serve an entry but cannot alter it without
+changing its id, and cannot forge its author. A host can only withhold. That is the same property
+that makes relayed revocations safe in slice f.
+
+**Retention is the hard part, and it is the one place this needs CireSnave's call later:** "resolvable
+for as long as any document cites it" means entries are never garbage-collected, so the registry only
+grows. Content addressing makes mirroring cheap, which helps, but someone has to commit to keeping
+the bytes.
+
+### 12.5 What is deliberately not decided here
+
+- **Who may publish a spec.** The proposal is any authenticated account key, since the signature
+  records authorship and grants nothing. A narrower rule is possible.
+- **Discovery.** How a model finds a spec it has not been handed is left to the registry project.
+- **Deprecation.** Nothing is ever deleted, but a spec could be marked superseded or unsafe. The
+  marking would itself be a signed entry, never a mutation.
