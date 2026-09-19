@@ -145,9 +145,11 @@ Two of the six are new transports, not repairs.
 
 **Decided (CireSnave, 2026-09-18), selecting:** *"Repair four now; QUIC and email as their own slices
 before 2.0."* So **this slice repairs TCP, WebSocket, HTTP and NAT traversal.** QUIC and email each get
-their own spec and slice, both still before publishing. Until they land, their transports **refuse to
-construct**, returning an error that names the missing slice, rather than pretending — so no build of
-this branch ever reports a delivery that did not happen.
+their own spec and slice, both still before publishing. Until they land, **QUIC refuses to construct**, and
+**email constructs but refuses to operate** — its send, receive and connectivity check each return an
+error naming the email slice. Email still constructs because its address validator is real, and is
+what `test_transport_error_handling` exercises. Either way, no build of this branch ever reports a
+delivery that did not happen.
 
 **Email authentication folds into the email slice** (CireSnave, selecting *"Fold it into the email
 transport slice"*). The approved order had email authentication next, on the premise that email would
