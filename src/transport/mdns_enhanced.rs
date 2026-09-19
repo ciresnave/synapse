@@ -617,9 +617,9 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
 impl crate::transport::abstraction::TransportReceive for EnhancedMdnsTransport {
     async fn receive_raw(
         &self,
-        _token: crate::transport::abstraction::private::Token,
-    ) -> crate::error::Result<Vec<crate::transport::abstraction::IncomingMessage>> {
-        Ok(vec![])
+        _inbox: &mut crate::transport::abstraction::RawInbox,
+    ) -> crate::error::Result<()> {
+        Ok(())
     }
 }
 

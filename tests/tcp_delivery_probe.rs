@@ -5,10 +5,13 @@
 //! message that `send_message` receipts `Ok` with `DeliveryConfirmation::Sent`
 //! actually ARRIVE at the receiver?
 //!
-//! Ported for the transport-contract task (2026-09-18): the crate's design now makes
-//! `Transport::receive_raw` uncallable from outside the crate (see
-//! `synapse::transport::abstraction::TransportReceive`) — only `TransportManager::receive_messages`
-//! is public. This probe now drives `TcpTransportImpl` through a real `TransportManager`
+//! Ported for the transport-contract task (2026-09-18): `Transport::receive_raw` (see
+//! `synapse::transport::abstraction::TransportReceive`) now takes a `&mut RawInbox` that outside
+//! code can push into but cannot construct or read back (see `RawInbox`'s docs) — so a caller
+//! outside the crate cannot get a `Vec<IncomingMessage>` out of a raw transport at all; only
+//! `TransportManager::receive_messages`, which drains the inbox after verifying every message
+//! against a `SenderVerdict`, is public. This probe now drives `TcpTransportImpl` through a real
+//! `TransportManager`
 //! (built with `TransportManagerBuilder` + `TcpTransportFactory`, exactly the pattern a
 //! deployment uses), over a REAL `127.0.0.1` loopback socket, and asserts actual DELIVERY (the
 //! payload comes back out of `TransportManager::receive_messages`), never merely that the send
@@ -87,6 +90,14 @@ async fn a_receipted_tcp_message_actually_arrives() {
         .await
         .expect("receiver.start() returns")
         .expect("receiver.start() should succeed");
+    // `TransportManager::start()` swallows a per-transport start error (it logs and continues, so
+    // that one bad transport doesn't stop the others), so the `expect` above cannot fail even if
+    // TCP itself never came up, and neither can this: `get_transport_status` only reports what
+    // `start()` recorded, which is `Running` whenever `start()` returned `Ok` regardless of
+    // whether the underlying `start_transport` call actually succeeded for TCP specifically. This
+    // pair of checks proves only that the manager *registered and attempted* a TCP transport, not
+    // that TCP is actually listening -- that is FACT 1 below (a real connect), which is the one
+    // that can actually fail.
     assert_eq!(
         receiver
             .get_transport_status()
@@ -94,6 +105,13 @@ async fn a_receipted_tcp_message_actually_arrives() {
             .get(&TransportType::Tcp),
         Some(&TransportStatus::Running),
         "receiver should report Running after start()"
+    );
+    assert!(
+        receiver
+            .list_available_transports()
+            .await
+            .contains(&TransportType::Tcp),
+        "receiver should have a TCP transport registered"
     );
 
     // Let the server's accept loop become ready.

@@ -323,10 +323,7 @@ impl Transport for MockTransport {
 
 #[async_trait]
 impl TransportReceive for MockTransport {
-    async fn receive_raw(
-        &self,
-        _token: abstraction::private::Token,
-    ) -> Result<Vec<abstraction::IncomingMessage>> {
-        Ok(vec![]) // Simple mock - no messages
+    async fn receive_raw(&self, _inbox: &mut abstraction::RawInbox) -> Result<()> {
+        Ok(()) // Simple mock - no messages
     }
 }

@@ -15,75 +15,118 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Sealing machinery for [`TransportReceive::receive_raw`].
+/// A write-only sink for raw, unverified messages coming off a transport.
 ///
-/// The module and the `Token` type are both `pub`: the type must be *nameable* from anywhere
-/// (downstream crates need to spell it out in `impl TransportReceive for MyTransport`, and
-/// sibling modules inside this crate such as `manager.rs` need to name it too). What makes the
-/// token "sealed" is that it cannot be *constructed* anywhere but here: its single field is a
-/// private (non-`pub`) unit `()`, so no other module can write the struct literal `Token(())`,
-/// and its only constructor, `new`, is `pub(crate)` -- visible within this crate, invisible to
-/// downstream crates. A downstream implementor receives a `Token` as a parameter and can ignore
-/// it, but has no way to produce one to call `receive_raw` itself. This is the standard "sealed
-/// trait" / "private token" pattern: the trait is public to *implement*, private to *call*.
-pub mod private {
-    /// Nameable everywhere; constructible only inside this crate (private field, `pub(crate)`
-    /// constructor).
-    #[derive(Debug)]
-    pub struct Token(());
+/// This is how [`TransportReceive::receive_raw`] is sealed: not with a token guarding the
+/// *call* (a token is just a value -- `'static + Send + Sync`, so it can be stashed in a static
+/// or handed on to any other transport a caller can reach, which would let a malicious
+/// implementation read straight through another transport's `receive_raw`), but by controlling
+/// what the call can *do*. A `RawInbox` can be written to by anyone holding a `&mut` reference
+/// ([`push`](Self::push), [`extend`](Self::extend) are `pub`), but it can only be *constructed*
+/// or *read back* from inside this crate: [`new`](Self::new) and [`drain`](Self::drain) are
+/// `pub(crate)`. It deliberately implements none of `Clone`, `Default`, `Debug`, `Deref`, or
+/// `IntoIterator` -- any of those would either let outside code manufacture one or let it read
+/// contents back out. So an external implementation of `receive_raw` can push its own transport's
+/// messages into the inbox it was handed, and can forward that same `&mut RawInbox` to another
+/// transport it wraps or decorates (whose messages then land in the same inbox, still headed for
+/// verification) -- but it has no way to conjure an inbox of its own to bait a call, and no way to
+/// look inside the one it was given to steal what another transport already deposited there.
+/// Only [`TransportManager`] (`manager.rs`) ever calls `new` and `drain`.
+pub struct RawInbox {
+    messages: Vec<IncomingMessage>,
+}
 
-    impl Token {
-        pub(crate) fn new() -> Self {
-            Token(())
+impl RawInbox {
+    pub(crate) fn new() -> Self {
+        Self {
+            messages: Vec::new(),
         }
+    }
+
+    /// Add one message.
+    pub fn push(&mut self, message: IncomingMessage) {
+        self.messages.push(message);
+    }
+
+    /// Add every message from an iterator.
+    pub fn extend(&mut self, messages: impl IntoIterator<Item = IncomingMessage>) {
+        self.messages.extend(messages);
+    }
+
+    /// How many messages are currently held. Exposed so the manager can log a per-transport
+    /// count without being able to read the messages themselves.
+    pub(crate) fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Take everything out, leaving the inbox empty.
+    pub(crate) fn drain(&mut self) -> Vec<IncomingMessage> {
+        std::mem::take(&mut self.messages)
     }
 }
 
 /// Raw, unverified receive -- callable only by [`TransportManager`], which pairs every message
-/// with a `SenderVerdict` before handing it to applications. See the module-level docs on
-/// [`private`] for how the sealing works.
+/// with a `SenderVerdict` before handing it to applications. See [`RawInbox`] for how the sealing
+/// works.
 #[async_trait]
 pub trait TransportReceive: Send + Sync {
-    /// Receive raw messages from the wire.
+    /// Receive raw messages from the wire, pushing them into `inbox`.
     ///
     /// ⚠️ Unverified: senders are not authenticated here. `TransportManager::receive_messages`
     /// pairs each message with a `SenderVerdict`; that is the only public way to receive from a
     /// transport.
     ///
-    /// The `token` parameter exists only to make this method uncallable from outside this crate:
-    /// `private::Token` cannot be constructed anywhere else. Implementors accept and ignore it.
-    ///
-    /// A downstream crate can implement this trait for its own transport:
+    /// `inbox` cannot be constructed by an implementor, and cannot be read back by one either --
+    /// it can only be written to (see [`RawInbox`]). A downstream crate can implement this trait
+    /// for its own transport:
     /// ```
     /// use async_trait::async_trait;
     /// use synapse::error::Result;
-    /// use synapse::transport::{IncomingMessage, TransportReceive};
+    /// use synapse::transport::{IncomingMessage, RawInbox, TransportReceive, TransportType};
+    /// use synapse::types::{SecureMessage, SecurityLevel};
     ///
     /// struct MyTransport;
     ///
     /// #[async_trait]
     /// impl TransportReceive for MyTransport {
-    ///     async fn receive_raw(
-    ///         &self,
-    ///         _token: synapse::transport::abstraction::private::Token,
-    ///     ) -> Result<Vec<IncomingMessage>> {
-    ///         Ok(Vec::new())
+    ///     async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
+    ///         let message = SecureMessage::new("to", "from", b"hi".to_vec(), SecurityLevel::Public);
+    ///         inbox.push(IncomingMessage::new(
+    ///             message,
+    ///             TransportType::Tcp,
+    ///             "127.0.0.1:0".to_string(),
+    ///         ));
+    ///         Ok(())
     ///     }
     /// }
     /// # fn main() {}
     /// ```
     ///
-    /// But it cannot call `receive_raw` itself, because it cannot construct a `Token`:
+    /// It cannot construct a `RawInbox` itself, whether by a constructor or a struct literal:
     /// ```compile_fail
-    /// use synapse::transport::{IncomingMessage, TransportReceive};
+    /// use synapse::transport::RawInbox;
     ///
-    /// async fn call_it(t: &dyn TransportReceive) {
-    ///     // No public constructor for `Token` exists outside this crate, so this cannot compile.
-    ///     let _ = t.receive_raw(synapse::transport::abstraction::private::Token::new()).await;
+    /// fn make_one() -> RawInbox {
+    ///     // No public constructor exists outside this crate, and its field is private, so
+    ///     // neither `RawInbox::new()` nor a struct literal can compile here.
+    ///     RawInbox::new()
     /// }
     /// # fn main() {}
     /// ```
-    async fn receive_raw(&self, token: private::Token) -> Result<Vec<IncomingMessage>>;
+    ///
+    /// Nor can it read back an inbox it was handed, to see what another transport already put in
+    /// it:
+    /// ```compile_fail
+    /// use synapse::transport::RawInbox;
+    ///
+    /// fn peek(inbox: &mut RawInbox) {
+    ///     // `drain` is `pub(crate)`, and `RawInbox` implements no `IntoIterator`/`Deref` to
+    ///     // read it another way, so this cannot compile here.
+    ///     let _ = inbox.drain();
+    /// }
+    /// # fn main() {}
+    /// ```
+    async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()>;
 }
 
 /// Unified transport interface that all transport mechanisms must implement

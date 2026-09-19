@@ -999,10 +999,7 @@ impl Transport for NatTraversalTransport {
 
 #[async_trait]
 impl TransportReceive for NatTraversalTransport {
-    async fn receive_raw(
-        &self,
-        _token: abstraction::private::Token,
-    ) -> Result<Vec<abstraction::IncomingMessage>> {
+    async fn receive_raw(&self, inbox: &mut abstraction::RawInbox) -> Result<()> {
         // Create UDP socket for receiving if not already created
         let socket = {
             let mut socket_lock = self.socket.lock().await;
@@ -1065,7 +1062,8 @@ impl TransportReceive for NatTraversalTransport {
             }
         }
 
-        Ok(messages)
+        inbox.extend(messages);
+        Ok(())
     }
 }
 

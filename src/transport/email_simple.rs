@@ -195,7 +195,7 @@ impl Transport for SimpleEmailTransport {
 
 #[async_trait]
 impl TransportReceive for SimpleEmailTransport {
-    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+    async fn receive_raw(&self, _inbox: &mut RawInbox) -> Result<()> {
         // Never claim to have checked for mail this transport did not check.
         Err(SynapseError::TransportError(NOT_IMPLEMENTED.to_string()))
     }
@@ -304,7 +304,7 @@ mod tests {
         );
         let err = transport.send_message(&target, &message).await.unwrap_err();
         assert!(err.to_string().contains("email slice"), "{err}");
-        assert!(transport.receive_raw(private::Token::new()).await.is_err());
+        assert!(transport.receive_raw(&mut RawInbox::new()).await.is_err());
         // The transport must never claim a connection it did not make.
         assert!(transport.test_connectivity(&target).await.is_err());
     }

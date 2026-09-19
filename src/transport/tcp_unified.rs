@@ -483,10 +483,11 @@ impl Transport for TcpTransportImpl {
 
 #[async_trait]
 impl TransportReceive for TcpTransportImpl {
-    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+    async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
         let mut messages = self.received_messages.lock().await;
-        let result = messages.drain(..).collect();
-        Ok(result)
+        let result: Vec<IncomingMessage> = messages.drain(..).collect();
+        inbox.extend(result);
+        Ok(())
     }
 }
 

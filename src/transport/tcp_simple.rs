@@ -15,9 +15,9 @@ use crate::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, RequestOutcome},
     error::{Result, SynapseError},
     transport::abstraction::{
-        ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, MessageUrgency,
+        ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, MessageUrgency, RawInbox,
         Transport, TransportCapabilities, TransportEstimate, TransportMetrics, TransportReceive,
-        TransportStatus, TransportTarget, TransportType, private,
+        TransportStatus, TransportTarget, TransportType,
     },
     types::SecureMessage,
 };
@@ -233,10 +233,10 @@ impl Transport for SimpleTcpTransport {
 
 #[async_trait]
 impl TransportReceive for SimpleTcpTransport {
-    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+    async fn receive_raw(&self, _inbox: &mut RawInbox) -> Result<()> {
         // For this simple implementation, we don't maintain persistent listeners
         // This would typically be implemented with a background task
-        Ok(vec![])
+        Ok(())
     }
 }
 

@@ -9,8 +9,8 @@ mod http_impl {
     use crate::error::{Result, SynapseError};
     use crate::transport::abstraction::{
         ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, MessageUrgency,
-        Transport, TransportCapabilities, TransportEstimate, TransportFactory, TransportMetrics,
-        TransportReceive, TransportStatus, TransportTarget, TransportType, private,
+        RawInbox, Transport, TransportCapabilities, TransportEstimate, TransportFactory,
+        TransportMetrics, TransportReceive, TransportStatus, TransportTarget, TransportType,
     };
     use crate::types::SecureMessage;
     use async_trait::async_trait;
@@ -499,7 +499,7 @@ mod http_impl {
 
     #[async_trait]
     impl TransportReceive for HttpTransportImpl {
-        async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+        async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
             let server_lock = self.server.lock().await;
             if let Some(server) = server_lock.as_ref() {
                 let mut messages = server.received_messages.lock().await;
@@ -515,10 +515,9 @@ mod http_impl {
                         .as_secs();
                 }
 
-                Ok(received)
-            } else {
-                Ok(Vec::new())
+                inbox.extend(received);
             }
+            Ok(())
         }
     }
 

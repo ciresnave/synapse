@@ -1016,9 +1016,9 @@ impl Transport for WebSocketTransportImpl {
 
 #[async_trait]
 impl TransportReceive for WebSocketTransportImpl {
-    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+    async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
         if !self.circuit_breaker.can_proceed().await {
-            return Ok(Vec::new()); // Return empty vec if circuit is open
+            return Ok(()); // Nothing to add if circuit is open
         }
 
         let messages = self.receive_websocket_messages().await?;
@@ -1036,6 +1036,7 @@ impl TransportReceive for WebSocketTransportImpl {
             received.extend(messages.clone());
         }
 
-        Ok(messages)
+        inbox.extend(messages);
+        Ok(())
     }
 }

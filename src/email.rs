@@ -155,6 +155,7 @@ impl EmailTransport {
     }
 
     /// Receive messages from IMAP server
+    ///
     /// Out of scope for the transport-contract sealing (Task 4): this is the email path, which a
     /// later slice replaces.
     pub async fn receive_messages(&self) -> Result<Vec<SynapseEmailMessage>> {
@@ -180,6 +181,7 @@ impl EmailTransport {
     }
 
     /// Connect to IMAP and retrieve actual messages (full implementation)
+    ///
     /// Out of scope for the transport-contract sealing (Task 4): this is the email path, which a
     /// later slice replaces.
     pub async fn receive_messages_imap(&self) -> Result<Vec<SynapseEmailMessage>> {

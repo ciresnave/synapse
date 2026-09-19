@@ -410,10 +410,11 @@ impl Transport for UdpTransportImpl {
 
 #[async_trait]
 impl TransportReceive for UdpTransportImpl {
-    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+    async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
         let mut messages = self.received_messages.lock().await;
-        let result = messages.drain(..).collect();
-        Ok(result)
+        let result: Vec<IncomingMessage> = messages.drain(..).collect();
+        inbox.extend(result);
+        Ok(())
     }
 }
 
