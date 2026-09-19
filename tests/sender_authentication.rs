@@ -285,10 +285,8 @@ fn signing_without_a_key_is_an_error_not_an_empty_signature() {
     assert_eq!(m.sender_proof, SenderProof::unsigned());
 }
 
-fn free_udp_port() -> u16 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
-    socket.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::free_udp_port;
 
 async fn udp_manager(port: u16, store: TrustStore) -> TransportManager {
     udp_manager_with_gate(port, store, synapse::replay::GateConfig::default()).await

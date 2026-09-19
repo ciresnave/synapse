@@ -168,17 +168,18 @@ impl TcpTransportImpl {
                         let incoming =
                             IncomingMessage::new(message, TransportType::Tcp, source_addr);
 
-                        if let Ok(mut messages) = received_messages.try_lock() {
-                            messages.push(incoming);
-                            debug!("Queued TCP message, total: {}", messages.len());
-                        }
-
                         // Update metrics
-                        if let Ok(mut metrics) = metrics.try_write() {
+                        if let Ok(mut metrics) = metrics.write() {
                             metrics.messages_received += 1;
                             metrics.bytes_received += bytes_read as u64;
                             metrics.touch();
                         }
+
+                        // Wait for the queue: `receive_raw` and other connections hold it
+                        // briefly, and a `try_lock` here silently discarded the message.
+                        let mut messages = received_messages.lock().await;
+                        messages.push(incoming);
+                        debug!("Queued TCP message, total: {}", messages.len());
                     } else {
                         warn!("Failed to parse message from {}", source_addr);
                     }
@@ -535,5 +536,61 @@ impl TransportFactory for TcpTransportFactory {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SecurityLevel;
+
+    // A message read while the queue is held (by `receive_raw` or another connection) must wait
+    // for the lock and be queued, not be discarded. Deterministic: the lock is held until
+    // `messages_received` shows the message was read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_message_that_arrives_while_the_queue_is_locked_is_kept() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let message = SecureMessage::new(
+            "bob@synapse.test",
+            "alice@synapse.test",
+            b"while locked".to_vec(),
+            SecurityLevel::Public,
+        );
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(&serde_json::to_vec(&message).unwrap())
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+        let (stream, peer) = listener.accept().await.unwrap();
+
+        let queue = Arc::new(Mutex::new(Vec::new()));
+        let metrics = Arc::new(RwLock::new(TransportMetrics::default()));
+        let handler = {
+            let held = queue.lock().await;
+            let handler = tokio::spawn(TcpTransportImpl::handle_connection(
+                stream,
+                peer.to_string(),
+                Arc::clone(&queue),
+                Arc::clone(&metrics),
+            ));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while metrics.read().unwrap().messages_received == 0 {
+                assert!(Instant::now() < deadline, "the message was never read");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            drop(held);
+            handler
+        };
+        tokio::time::timeout(Duration::from_secs(5), handler)
+            .await
+            .expect("the handler finishes once the lock is free")
+            .unwrap();
+        assert_eq!(
+            queue.lock().await.len(),
+            1,
+            "a message read while the queue was locked was discarded"
+        );
     }
 }
