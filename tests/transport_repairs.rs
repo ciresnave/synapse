@@ -437,7 +437,13 @@ async fn tcp_carries_a_large_verified_message() {
 /// `src/transport/tcp_unified.rs`, which holds the queue lock across a send.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn tcp_loses_no_message_under_concurrent_sends() {
-    loses_no_message_under_concurrent_sends(TransportType::Tcp, tcp, 400).await;
+    loses_no_message_under_concurrent_sends(
+        TransportType::Tcp,
+        tcp,
+        400,
+        DeliveryConfirmation::Sent,
+    )
+    .await;
 }
 
 /// How many of the concurrent test's sends are in flight at once. Enough to contend for the
@@ -450,12 +456,13 @@ async fn tcp_loses_no_message_under_concurrent_sends() {
 const MAX_SENDS_IN_FLIGHT: usize = 32;
 
 /// Send `n` signed messages from Alice to Bob over `kind`, [`MAX_SENDS_IN_FLIGHT`] at a time, while
-/// Bob polls, and check that every one arrives exactly once, Verified, with the body it was sent
-/// with.
+/// Bob polls, and check that every receipt claims `expected`, and that every message arrives
+/// exactly once, Verified, with the body it was sent with.
 async fn loses_no_message_under_concurrent_sends(
     kind: TransportType,
     factory: fn() -> Box<dyn TransportFactory>,
     n: usize,
+    expected: DeliveryConfirmation,
 ) {
     let pair = Arc::new(Pair::new(kind, factory(), factory(), free_port(), free_port()).await);
     let messages: Vec<SecureMessage> = (0..n)
@@ -499,7 +506,7 @@ async fn loses_no_message_under_concurrent_sends(
         .collect();
     for send in sends {
         let receipt = send.await.expect("send task");
-        pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+        pair.assert_receipt(&receipt, &expected);
     }
 
     let received = poller.await.expect("poll task");
@@ -1139,7 +1146,13 @@ async fn websocket_delivers_each_message_once_across_polls() {
 /// a debug build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn websocket_loses_no_message_under_concurrent_sends() {
-    loses_no_message_under_concurrent_sends(TransportType::WebSocket, ws, 200).await;
+    loses_no_message_under_concurrent_sends(
+        TransportType::WebSocket,
+        ws,
+        200,
+        DeliveryConfirmation::Sent,
+    )
+    .await;
 }
 
 /// The sender refuses a message whose serialized form is over its `max_message_size` as
@@ -1636,5 +1649,1006 @@ async fn websocket_idle_timeout_is_a_gap_between_reads_not_a_deadline_for_a_mess
         arrived.is_empty(),
         "a frame that went silent for {:?} mid-way must be cut off by the {IDLE:?} idle timeout",
         IDLE * 3
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// HTTP (plan Task 9): one request per connection to `POST /synapse/message`, answered 202 only
+// once the message is queued -- so the sender's receipt is `Delivered`.
+// ---------------------------------------------------------------------------------------------
+
+fn http() -> Box<dyn TransportFactory> {
+    Box::new(synapse::transport::HttpTransportFactory)
+}
+
+/// Before the repair, `start_server` bound nothing: it built an `HttpServer` record whose queue
+/// nothing ever filled, so no message could arrive. The server now answers 2xx only after the
+/// message is in its queue, so the receipt is `Delivered`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_carries_a_verified_message_end_to_end() {
+    let (received, receipt) = round_trip(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+        b"repaired",
+        DeliveryConfirmation::Delivered,
+    )
+    .await;
+    assert_eq!(received.incoming.transport_type, TransportType::Http);
+    assert_eq!(receipt.transport_used, TransportType::Http);
+    assert_eq!(
+        receipt.metadata.get("status_code").map(String::as_str),
+        Some("202")
+    );
+    assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
+}
+
+/// A 16 KiB body serialises to far more than one read: the server must read the whole body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_carries_a_large_verified_message() {
+    let payload: Vec<u8> = (0..16 * 1024).map(|i| (i % 251) as u8).collect();
+    let (received, _receipt) = round_trip(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+        &payload,
+        DeliveryConfirmation::Delivered,
+    )
+    .await;
+    assert!(received.payload == Payload::Opened(payload));
+}
+
+/// Each message arrives exactly once through the manager, however many times Bob polls after, and
+/// -- because `Delivered` means already queued -- the first poll after the last receipt finds them
+/// all. The manager's replay record would hide a transport's repeats, so the transport-level check
+/// is http_unified's `receive_raw_hands_each_message_out_once`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_delivers_each_message_once_across_polls() {
+    const K: usize = 5;
+    const EXTRA_POLLS: usize = 10;
+    let pair = Pair::new(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let messages: Vec<SecureMessage> = (0..K)
+        .map(|i| pair.signed(format!("once {i}").as_bytes()))
+        .collect();
+    for message in &messages {
+        let receipt = pair
+            .alice_node
+            .send_message(&pair.bob_target(), message)
+            .await
+            .expect("the transport sends");
+        pair.assert_receipt(&receipt, &DeliveryConfirmation::Delivered);
+    }
+    let mut arrived = pair.bob_node.receive_messages().await.expect("receive");
+    assert_eq!(
+        arrived.len(),
+        K,
+        "every message was receipted Delivered, so every one must already be queued"
+    );
+    for _ in 0..EXTRA_POLLS {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        arrived.extend(pair.bob_node.receive_messages().await.expect("receive"));
+    }
+    let mut seen = HashSet::new();
+    for message in &arrived {
+        let id = message.incoming.message.message_id.0.to_string();
+        assert!(seen.insert(id.clone()), "message {id} arrived twice");
+        pair.assert_verified_as_alice(message);
+    }
+    let sent: HashSet<String> = messages
+        .iter()
+        .map(|m| m.message_id.0.to_string())
+        .collect();
+    assert_eq!(seen, sent);
+    assert_eq!(arrived.len(), K, "{EXTRA_POLLS} more polls found repeats");
+}
+
+/// N = 200, 32 requests in flight, as for WebSocket: each send is two HTTP exchanges (the
+/// manager's `estimate_metrics` probes before each send).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn http_loses_no_message_under_concurrent_sends() {
+    loses_no_message_under_concurrent_sends(
+        TransportType::Http,
+        http,
+        200,
+        DeliveryConfirmation::Delivered,
+    )
+    .await;
+}
+
+/// The sender refuses a message whose serialized form is over its `max_message_size` as
+/// `MessageRefused`, before connecting: the refusal comes back from a target where nothing
+/// listens, where a message that fits fails differently, at the connect (the control). Ten
+/// refusals through the manager leave HTTP Running (the manager's breaker would open at the 10th
+/// failure) and the next message is delivered. Before, the refusal was a `TransportError`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_refuses_an_oversize_message_before_connecting_and_stays_running() {
+    const LIMIT: usize = 4096;
+    const REFUSALS: usize = 10;
+    let config = one_key("max_message_size", &LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+
+    let alice_transport = synapse::transport::HttpTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("a transport with the same limit");
+    let (over, over_size) = measured(&pair, LIMIT, false);
+    let nobody =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{}", free_port()));
+    match alice_transport.send_message(&nobody, &over).await {
+        Err(synapse::SynapseError::MessageRefused(reason)) => assert!(
+            reason.contains("max_message_size")
+                && reason.contains(&over_size.to_string())
+                && reason.contains(&LIMIT.to_string()),
+            "the refusal must name the limit and both sizes: {reason}"
+        ),
+        Err(other) => panic!("a {over_size}-byte message must be MessageRefused, not {other:?}"),
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+    }
+    // Control: a message that fits, to the same nowhere, reaches the connect and fails there.
+    let (fits, _) = measured(&pair, LIMIT, true);
+    match alice_transport.send_message(&nobody, &fits).await {
+        Err(synapse::SynapseError::TransportError(_)) => {}
+        other => panic!("a message that fits must reach the connect and fail there: {other:?}"),
+    }
+
+    for attempt in 1..=REFUSALS {
+        let (over, over_size) = measured(&pair, LIMIT, false);
+        let error = match pair
+            .alice_node
+            .send_message(&pair.bob_target(), &over)
+            .await
+        {
+            Ok(receipt) => panic!(
+                "refusal {attempt}: a {over_size}-byte message must be refused, not {:?}",
+                receipt.confirmation
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            error.contains("Http")
+                && error.contains("max_message_size")
+                && error.contains(&over_size.to_string()),
+            "refusal {attempt}: the manager's error must carry HTTP's own reason: {error}"
+        );
+        assert_eq!(
+            pair.alice_node
+                .get_transport_status()
+                .await
+                .get(&TransportType::Http),
+            Some(&TransportStatus::Running),
+            "refusal {attempt}: a refused message must not mark HTTP failed"
+        );
+    }
+
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &fits)
+        .await
+        .expect("after the refusals, the next message must still go through HTTP");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Delivered);
+    let arrived = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(arrived.len(), 1, "only the message that fits may arrive");
+    assert_eq!(arrived[0].incoming.message.message_id.0, fits.message_id.0);
+    pair.assert_verified_as_alice(&arrived[0]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after = pair.bob_node.receive_messages().await.expect("receive");
+    assert!(after.is_empty(), "{} more messages arrived", after.len());
+}
+
+/// The head of a `POST /synapse/message`, with `framing` as its body-framing header lines.
+fn post_head(framing: &str) -> Vec<u8> {
+    format!(
+        "POST /synapse/message HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+         {framing}\r\n"
+    )
+    .into_bytes()
+}
+
+/// A whole `POST /synapse/message` carrying `body`.
+fn post_request(body: &[u8]) -> Vec<u8> {
+    let mut request = post_head(&format!("Content-Length: {}\r\n", body.len()));
+    request.extend_from_slice(body);
+    request
+}
+
+/// Read one response head from `reader` within `within`, returning its status and head, or `None`
+/// if the connection closed or the time passed first.
+async fn read_response_head<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    within: Duration,
+) -> Option<(u16, String)> {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(within, async {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match reader.read(&mut byte).await {
+                Ok(1) => head.push(byte[0]),
+                _ => return None,
+            }
+        }
+        let head = String::from_utf8_lossy(&head).to_string();
+        let status = head.split(' ').nth(1)?.parse().ok()?;
+        Some((status, head))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// A body declared over the limit is refused with 413 from its `Content-Length`, before any of it
+/// is read: the peer declares 1 GB and then trickles a byte every 100 ms, and the 413 must come
+/// within 2 s, after at most a handful of bytes -- with a 20 s idle timeout, so no timeout can be
+/// what answers. A body that does not declare its length (chunked) is refused the same way, with
+/// 411, before any of it is read. Nothing is queued, and a message that fits still arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_server_refuses_an_oversize_body_with_413_without_reading_it() {
+    use tokio::io::AsyncWriteExt;
+    const LIMIT: usize = 4096;
+    let config = HashMap::from([
+        ("max_message_size".to_string(), LIMIT.to_string()),
+        ("idle_timeout_ms".to_string(), "20000".to_string()),
+    ]);
+    let pair = Pair::with_config(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let bob = ("127.0.0.1", pair.bob_port);
+
+    let mut peer = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    peer.write_all(&post_head("Content-Length: 1000000000\r\n"))
+        .await
+        .expect("write the head");
+    let (mut reader, mut writer) = peer.into_split();
+    let trickled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let trickler = {
+        let trickled = Arc::clone(&trickled);
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                if writer.write_all(b"[").await.is_err() {
+                    return;
+                }
+                trickled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+    };
+    let start = Instant::now();
+    let answer = read_response_head(&mut reader, Duration::from_secs(2)).await;
+    let took = start.elapsed();
+    let bytes_sent = trickled.load(std::sync::atomic::Ordering::SeqCst);
+    trickler.abort();
+    assert_eq!(
+        answer.as_ref().map(|(status, _)| *status),
+        Some(413),
+        "a 1 GB Content-Length must be answered 413 at once; after {took:?}: {answer:?}"
+    );
+    assert!(
+        bytes_sent <= 5,
+        "the 413 must come before the body is read, not after {bytes_sent} bytes"
+    );
+
+    // Chunked, with no Content-Length: refused at once, whatever follows.
+    let mut peer = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    peer.write_all(&post_head("Transfer-Encoding: chunked\r\n"))
+        .await
+        .expect("write the head");
+    let _ = peer.write_all(b"400\r\n[").await;
+    let answered = read_response_head(&mut peer, Duration::from_secs(2)).await;
+    assert_eq!(
+        answered.as_ref().map(|(status, _)| *status),
+        Some(411),
+        "a body without a Content-Length must be refused before it is read: {answered:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        pair.bob_node
+            .receive_messages()
+            .await
+            .expect("receive")
+            .is_empty(),
+        "nothing refused may be queued"
+    );
+    let (fits, _) = measured(&pair, LIMIT, true);
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &fits)
+        .await
+        .expect("a message that fits is delivered");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Delivered);
+    assert_eq!(poll_bob(&pair, 1, Duration::from_secs(3)).await.len(), 1);
+}
+
+/// Backpressure: requests wait. With a queue budget that holds two of its messages but not three,
+/// and nobody polling, four messages are sent at once. The server answers only once a message is
+/// queued, so exactly two sends return `Delivered` and the other two are still waiting -- not
+/// answered, not refused, not lost -- when Bob first polls, which finds exactly two. Polling frees
+/// the budget, the waiting two are queued and answered `Delivered`, and all four arrive once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_holds_requests_past_its_queue_budget_until_polled() {
+    let probe = Pair::new(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let probe_largest = (0..4)
+        .map(|i| wire_size(&probe.signed(&queued_body(i))))
+        .max()
+        .expect("four probes");
+    drop(probe);
+    let budget = 2 * (probe_largest + QUEUED_SIZE_SLACK);
+    let config = HashMap::from([
+        ("max_queued_bytes".to_string(), budget.to_string()),
+        ("max_message_size".to_string(), budget.to_string()),
+    ]);
+    let pair = Arc::new(
+        Pair::with_config(
+            TransportType::Http,
+            http(),
+            http(),
+            free_port(),
+            free_port(),
+            &config,
+        )
+        .await,
+    );
+    let messages: Vec<SecureMessage> = (0..4).map(|i| pair.signed(&queued_body(i))).collect();
+    let mut sorted: Vec<usize> = messages.iter().map(wire_size).collect();
+    sorted.sort_unstable();
+    assert!(sorted[2] + sorted[3] <= budget, "any two must fit {budget}");
+    assert!(
+        sorted[0] + sorted[1] + sorted[2] > budget,
+        "no three may fit {budget}"
+    );
+
+    let sends: Vec<_> = messages
+        .iter()
+        .cloned()
+        .map(|message| {
+            let pair = Arc::clone(&pair);
+            tokio::spawn(async move {
+                pair.alice_node
+                    .send_message(&pair.bob_target(), &message)
+                    .await
+            })
+        })
+        .collect();
+    // Long enough for Bob to read all four; nobody polls meanwhile.
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    let finished = sends.iter().filter(|send| send.is_finished()).count();
+    assert_eq!(
+        finished, 2,
+        "with budget for 2, exactly 2 sends may have been answered before Bob polls"
+    );
+
+    let first = pair.bob_node.receive_messages().await.expect("receive");
+    assert_eq!(first.len(), 2, "the first poll must find exactly 2 queued");
+    let mut arrived = first;
+    for send in sends {
+        let receipt = tokio::time::timeout(Duration::from_secs(5), send)
+            .await
+            .expect("once polled, every waiting send is answered")
+            .expect("send task")
+            .expect("a waiting message is delivered, not refused");
+        pair.assert_receipt(&receipt, &DeliveryConfirmation::Delivered);
+    }
+    arrived.extend(poll_bob(&pair, 2, Duration::from_secs(5)).await);
+    let sent: HashSet<String> = messages
+        .iter()
+        .map(|m| m.message_id.0.to_string())
+        .collect();
+    let mut seen = HashSet::new();
+    for message in &arrived {
+        let id = message.incoming.message.message_id.0.to_string();
+        assert!(seen.insert(id.clone()), "message {id} arrived twice");
+        pair.assert_verified_as_alice(message);
+    }
+    assert_eq!(seen, sent, "every held message must arrive once polled");
+}
+
+/// A request that waits for queue budget longer than `request_timeout_ms` is answered 503 and its
+/// message dropped: the sender gets an error, never a receipt, and the message never arrives,
+/// even once Bob polls. The budget holds one message, which fills it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_answers_503_when_no_budget_frees_before_the_deadline() {
+    const DEADLINE: Duration = Duration::from_millis(1000);
+    let probe = Pair::new(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let size = wire_size(&probe.signed(b"fills the budget")) + QUEUED_SIZE_SLACK;
+    drop(probe);
+    let config = HashMap::from([
+        ("max_queued_bytes".to_string(), size.to_string()),
+        ("max_message_size".to_string(), size.to_string()),
+        (
+            "request_timeout_ms".to_string(),
+            DEADLINE.as_millis().to_string(),
+        ),
+    ]);
+    let pair = Pair::with_config(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let first = pair.signed(b"fills the budget");
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &first)
+        .await
+        .expect("the first message fills the budget");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Delivered);
+
+    let alice = synapse::transport::HttpTransportFactory
+        .create_transport(&HashMap::new())
+        .await
+        .expect("a sender");
+    let second = pair.signed(b"finds no room");
+    let start = Instant::now();
+    match alice.send_message(&pair.bob_target(), &second).await {
+        Err(synapse::SynapseError::TransportError(why)) => {
+            assert!(why.contains("503"), "{why}")
+        }
+        other => panic!("a request that found no budget must be a 503 error, not {other:?}"),
+    }
+    let took = start.elapsed();
+    assert!(
+        took >= DEADLINE - Duration::from_millis(150) && took < DEADLINE + Duration::from_secs(2),
+        "the 503 must come at the {DEADLINE:?} deadline, came after {took:?}"
+    );
+    let arrived = poll_bob(&pair, 2, Duration::from_millis(500)).await;
+    let ids: Vec<_> = arrived
+        .iter()
+        .map(|m| m.incoming.message.message_id.0)
+        .collect();
+    assert_eq!(
+        ids,
+        vec![first.message_id.0],
+        "only the first message may arrive"
+    );
+}
+
+/// With `max_concurrent_connections` = 2 and two connections held open, a third request is not
+/// read until one of them closes: the accept loop waits for a permit. The held connections send
+/// nothing, under a 20 s header timeout, so only the cap holds Alice back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_reads_no_more_connections_at_once_than_its_cap() {
+    let config = HashMap::from([
+        ("max_concurrent_connections".to_string(), "2".to_string()),
+        ("header_read_timeout_ms".to_string(), "20000".to_string()),
+    ]);
+    let pair = Arc::new(
+        Pair::with_config(
+            TransportType::Http,
+            http(),
+            http(),
+            free_port(),
+            free_port(),
+            &config,
+        )
+        .await,
+    );
+    let bob = ("127.0.0.1", pair.bob_port);
+    let first = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    let second = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let message = pair.signed(b"behind the cap");
+    let send = {
+        let (pair, message) = (Arc::clone(&pair), message.clone());
+        tokio::spawn(async move {
+            pair.alice_node
+                .send_message(&pair.bob_target(), &message)
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        !send.is_finished(),
+        "with two connections held and a cap of 2, a third request was answered"
+    );
+    assert!(
+        pair.bob_node
+            .receive_messages()
+            .await
+            .expect("receive")
+            .is_empty(),
+        "with two connections held and a cap of 2, a third was read anyway"
+    );
+
+    drop(first);
+    let receipt = tokio::time::timeout(Duration::from_secs(10), send)
+        .await
+        .expect("once a held connection closes, the waiting request is answered")
+        .expect("send task")
+        .expect("delivered");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Delivered);
+    let arrived = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(arrived.len(), 1);
+    assert_eq!(
+        arrived[0].incoming.message.message_id.0,
+        message.message_id.0
+    );
+    pair.assert_verified_as_alice(&arrived[0]);
+    drop(second);
+}
+
+/// Slowloris, on the request head: with a connection cap of 2, one peer connects and sends nothing
+/// and another trickles its head a byte every 100 ms, never finishing it. The header timeout
+/// (500 ms here) closes both, so Alice's message, waiting in the backlog behind them, is delivered
+/// within that timeout plus a margin -- and not sooner than most of it, which shows the two really
+/// held both permits. The trickling peer is cut off however steadily it sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_closes_connections_that_do_not_finish_their_head() {
+    const HEADER: Duration = Duration::from_millis(500);
+    let config = HashMap::from([
+        ("max_concurrent_connections".to_string(), "2".to_string()),
+        (
+            "header_read_timeout_ms".to_string(),
+            HEADER.as_millis().to_string(),
+        ),
+    ]);
+    let pair = Pair::with_config(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let bob = ("127.0.0.1", pair.bob_port);
+    let silent = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    let mut trickling = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    let head = post_head("Content-Length: 10\r\n");
+    let trickler = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let start = Instant::now();
+        // Far more bytes than the head, so the head never ends: a byte every 100 ms for 20 s.
+        for byte in head.iter().take(head.len() - 4).cycle().take(200) {
+            if trickling.write_all(&[*byte]).await.is_err() {
+                return Some(start.elapsed());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        None
+    });
+
+    let message = pair.signed(b"behind two slow heads");
+    let start = Instant::now();
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &message)
+        .await
+        .expect("delivered once the slow peers are closed");
+    let waited = start.elapsed();
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Delivered);
+    assert!(
+        waited >= HEADER - Duration::from_millis(150),
+        "delivered after {waited:?}, before the slow peers could have timed out, so they never \
+         held the permits and the test shows nothing"
+    );
+    assert!(
+        waited < HEADER + Duration::from_secs(3),
+        "two slow heads held both permits for {waited:?}; the {HEADER:?} header timeout did not \
+         close them"
+    );
+    let cut = tokio::time::timeout(Duration::from_secs(5), trickler)
+        .await
+        .expect("the trickler stops")
+        .expect("trickler task");
+    assert!(
+        cut.is_some_and(|after| after < HEADER + Duration::from_secs(2)),
+        "a head trickled a byte every 100 ms must be cut off near the {HEADER:?} header timeout: \
+         {cut:?}"
+    );
+    assert_eq!(poll_bob(&pair, 1, Duration::from_secs(3)).await.len(), 1);
+    drop(silent);
+}
+
+/// Slowloris, on the body: `idle_timeout_ms` is a gap between reads, not a deadline for the whole
+/// body. With it at 300 ms, a request whose body arrives in 10 pieces 100 ms apart -- about 1 s in
+/// all -- is answered 202 and its message delivered. The control: the same kind of request with
+/// one gap of 900 ms in its body is answered 408 at about the idle timeout, and its message never
+/// arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_idle_timeout_is_a_gap_between_body_reads_not_a_deadline() {
+    use tokio::io::AsyncWriteExt;
+    const IDLE: Duration = Duration::from_millis(300);
+    let config = one_key("idle_timeout_ms", &IDLE.as_millis().to_string());
+    let pair = Pair::with_config(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let bob = ("127.0.0.1", pair.bob_port);
+
+    let slow = pair.signed(b"slow but steady");
+    let json = serde_json::to_vec(&slow).expect("serialize");
+    let mut peer = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    let start = Instant::now();
+    peer.write_all(&post_head(&format!("Content-Length: {}\r\n", json.len())))
+        .await
+        .expect("the head");
+    for piece in json.chunks(json.len().div_ceil(10)) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        peer.write_all(piece).await.expect("a body piece");
+    }
+    let response = read_response_head(&mut peer, Duration::from_secs(5)).await;
+    let took = start.elapsed();
+    assert_eq!(
+        response.as_ref().map(|(status, _)| *status),
+        Some(202),
+        "a body whose bytes kept coming, never more than 100 ms apart, must not be cut off by a \
+         {IDLE:?} idle timeout (took {took:?}): {response:?}"
+    );
+    assert!(
+        took > IDLE * 3,
+        "the body must take well over the idle timeout: {took:?}"
+    );
+    let arrived = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(arrived.len(), 1);
+    assert_eq!(arrived[0].incoming.message.message_id.0, slow.message_id.0);
+    pair.assert_verified_as_alice(&arrived[0]);
+
+    // Control: half the body, then silence for three idle timeouts.
+    let stalled = pair.signed(b"stalls mid-body");
+    let json = serde_json::to_vec(&stalled).expect("serialize");
+    let mut peer = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    peer.write_all(&post_head(&format!("Content-Length: {}\r\n", json.len())))
+        .await
+        .expect("the head");
+    peer.write_all(&json[..json.len() / 2])
+        .await
+        .expect("half the body");
+    let start = Instant::now();
+    let response = read_response_head(&mut peer, IDLE * 3).await;
+    let took = start.elapsed();
+    assert_eq!(
+        response.as_ref().map(|(status, _)| *status),
+        Some(408),
+        "a body that went silent must be cut off by the {IDLE:?} idle timeout: {response:?}"
+    );
+    assert!(
+        took >= IDLE - Duration::from_millis(100),
+        "the 408 came after {took:?}, before the idle timeout could have passed"
+    );
+    let _ = peer.write_all(&json[json.len() / 2..]).await;
+    let arrived = poll_bob(&pair, 1, Duration::from_secs(1)).await;
+    assert!(arrived.is_empty(), "the cut-off message must not arrive");
+}
+
+/// One request per connection: two requests written back to back on one connection (HTTP/1.1
+/// pipelining) get one answer, 202 with `connection: close`, then the connection ends; only the
+/// first message is queued. And a body that is not a `SecureMessage`, or is empty, is answered
+/// 400, queuing nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_answers_one_request_per_connection_and_refuses_what_does_not_parse() {
+    use tokio::io::AsyncWriteExt;
+    let pair = Pair::new(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let bob = ("127.0.0.1", pair.bob_port);
+    let first = pair.signed(b"first of two");
+    let second = pair.signed(b"pipelined behind it");
+    let mut both = post_request(&serde_json::to_vec(&first).expect("serialize"));
+    both.extend(post_request(
+        &serde_json::to_vec(&second).expect("serialize"),
+    ));
+    let mut peer = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    peer.write_all(&both).await.expect("write both");
+    let (status, head) = read_response_head(&mut peer, Duration::from_secs(5))
+        .await
+        .expect("the first request is answered");
+    assert_eq!(status, 202, "{head}");
+    assert!(
+        head.to_ascii_lowercase().contains("connection: close"),
+        "the answer must close the connection: {head}"
+    );
+    assert!(
+        closed_within(&mut peer, Duration::from_secs(2))
+            .await
+            .is_some(),
+        "the connection must end after one answer"
+    );
+    let arrived = poll_bob(&pair, 2, Duration::from_millis(1000)).await;
+    let ids: Vec<_> = arrived
+        .iter()
+        .map(|m| m.incoming.message.message_id.0)
+        .collect();
+    assert_eq!(
+        ids,
+        vec![first.message_id.0],
+        "only the first request may be read"
+    );
+
+    for body in [&b"not json"[..], b"{\"message_id\": 7}", b""] {
+        let mut peer = tokio::net::TcpStream::connect(bob).await.expect("connect");
+        peer.write_all(&post_request(body)).await.expect("write");
+        let answer = read_response_head(&mut peer, Duration::from_secs(5)).await;
+        assert_eq!(
+            answer.map(|(status, _)| status),
+            Some(400),
+            "{:?} must be answered 400",
+            String::from_utf8_lossy(body)
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        pair.bob_node
+            .receive_messages()
+            .await
+            .expect("receive")
+            .is_empty()
+    );
+}
+
+/// Refuses `config`, with an error naming `key`, at construction and in `validate_config`.
+async fn http_refuses(config: HashMap<String, String>, key: &str) {
+    match synapse::transport::HttpTransportFactory
+        .create_transport(&config)
+        .await
+    {
+        Ok(_) => panic!("{config:?} must be refused"),
+        Err(e) => assert!(
+            e.to_string().contains(key),
+            "the error for {config:?} must name {key}: {e}"
+        ),
+    }
+    assert!(
+        synapse::transport::HttpTransportFactory
+            .validate_config(&config)
+            .is_err(),
+        "validate_config must refuse {config:?} too"
+    );
+}
+
+/// Every limit, timeout and the port refuse a value that does not parse, or a zero, naming the
+/// key, instead of silently becoming the default; the queue budget must hold the largest message
+/// and fit a `u32`; and the retired keys are refused rather than ignored. Valid values are the
+/// positive controls. Before, `server_port` fell back to 0 (no server) and `max_message_size` to
+/// 10 MiB on a typo, `use_https` to true, and there were no other limits.
+#[tokio::test]
+async fn http_refuses_an_invalid_config() {
+    let factory = synapse::transport::HttpTransportFactory;
+    for key in [
+        "max_message_size",
+        "max_concurrent_connections",
+        "timeout_ms",
+        "header_read_timeout_ms",
+        "idle_timeout_ms",
+        "request_timeout_ms",
+    ] {
+        for bad in ["", "abc", "0", "-1", "1MiB"] {
+            http_refuses(one_key(key, bad), key).await;
+        }
+        assert!(
+            factory
+                .create_transport(&one_key(key, "4096"))
+                .await
+                .is_ok(),
+            "{key} = 4096 must be accepted"
+        );
+    }
+    for bad in ["", "abc", "-1", "65536"] {
+        http_refuses(one_key("server_port", bad), "server_port").await;
+    }
+    for bad in ["", "yes", "1", "TRUE"] {
+        http_refuses(one_key("use_https", bad), "use_https").await;
+    }
+    for (key, good) in [
+        ("server_port", "0"),
+        ("use_https", "true"),
+        ("use_https", "false"),
+    ] {
+        assert!(
+            factory.create_transport(&one_key(key, good)).await.is_ok(),
+            "{key} = {good}"
+        );
+    }
+    let budget = |budget: &str, message: &str| {
+        HashMap::from([
+            ("max_queued_bytes".to_string(), budget.to_string()),
+            ("max_message_size".to_string(), message.to_string()),
+        ])
+    };
+    let over_u32 = (u64::from(u32::MAX) + 1).to_string();
+    for (b, m) in [
+        ("4095", "4096"),
+        ("0", "4096"),
+        ("abc", "4096"),
+        (over_u32.as_str(), over_u32.as_str()),
+    ] {
+        http_refuses(budget(b, m), "max_queued_bytes").await;
+    }
+    http_refuses(one_key("max_queued_bytes", "4096"), "max_queued_bytes").await;
+    assert!(
+        factory
+            .create_transport(&budget("4096", "4096"))
+            .await
+            .is_ok()
+    );
+    http_refuses(one_key("server_address", "0.0.0.0"), "server_address").await;
+    http_refuses(one_key("max_connections", "10"), "max_connections").await;
+    http_refuses(one_key("bind_scope", "everywhere"), "bind_scope").await;
+    assert!(factory.validate_config(&factory.default_config()).is_ok());
+}
+
+/// A target must be what is dialled: an `http://` or `https://` URL or `host:port`, with a host and
+/// a port, no userinfo, no fragment, and a host the URL parser keeps as written. `can_reach` says
+/// so without touching the network, and `send_message` refuses the same targets. Bob's own address,
+/// in three accepted forms, is the positive control. (The full list is http_unified's unit test
+/// `target_addresses`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_refuses_targets_it_would_not_dial_as_named() {
+    let pair = Pair::new(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let alice = synapse::transport::HttpTransportFactory
+        .create_transport(&HashMap::new())
+        .await
+        .expect("a sender");
+    let message = pair.signed(b"never sent");
+    let port = pair.bob_port;
+    for bad in [
+        format!("ws://127.0.0.1:{port}"),
+        format!("ftp://127.0.0.1:{port}"),
+        "127.0.0.1".to_string(),
+        "http://127.0.0.1/".to_string(),
+        format!("http://user@127.0.0.1:{port}/"),
+        format!("http://127.0.0.1:{port}/#fragment"),
+        format!("http://127.1:{port}/"),
+        format!("http://0x7f.1:{port}/"),
+        format!("127.0.0.1:{port}/synapse/message"),
+        "127.0.0.1:0".to_string(),
+    ] {
+        let target = TransportTarget::new(BOB.to_string()).with_address(bad.clone());
+        assert!(
+            !alice.can_reach(&target).await,
+            "{bad} must not be reachable"
+        );
+        assert!(
+            alice.send_message(&target, &message).await.is_err(),
+            "{bad} must be refused"
+        );
+    }
+    assert!(
+        !alice
+            .can_reach(&TransportTarget::new(BOB.to_string()))
+            .await,
+        "a target with no address is refused"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        pair.bob_node
+            .receive_messages()
+            .await
+            .expect("receive")
+            .is_empty(),
+        "no refused target may have reached Bob"
+    );
+    for good in [
+        format!("127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}/synapse/message"),
+    ] {
+        let target = TransportTarget::new(BOB.to_string()).with_address(good.clone());
+        assert!(alice.can_reach(&target).await, "{good}");
+        let receipt = alice
+            .send_message(&target, &pair.signed(good.as_bytes()))
+            .await
+            .unwrap_or_else(|e| panic!("{good} must be delivered: {e}"));
+        pair.assert_receipt(&receipt, &DeliveryConfirmation::Delivered);
+    }
+    assert_eq!(poll_bob(&pair, 3, Duration::from_secs(3)).await.len(), 3);
+}
+
+/// Connected only after a real HTTP exchange: against Bob's node the probe is answered (405, since
+/// the one route is POST) and reports a measured round trip, and `estimate_metrics` says available;
+/// against a port where nothing listens, neither is claimed, and the latency reported is the
+/// timeout, not the time the failure took. The probes are not messages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_reports_connectivity_only_after_a_real_exchange() {
+    let pair = Pair::new(
+        TransportType::Http,
+        http(),
+        http(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let transport = synapse::transport::HttpTransportFactory
+        .create_transport(&one_key("timeout_ms", "2000"))
+        .await
+        .expect("construct");
+    let live = transport
+        .test_connectivity(&pair.bob_target())
+        .await
+        .expect("connectivity");
+    assert!(live.connected, "{live:?}");
+    assert!(live.rtt.is_some());
+    assert_eq!(
+        live.details.get("status_code").map(String::as_str),
+        Some("405")
+    );
+    let estimate = transport
+        .estimate_metrics(&pair.bob_target())
+        .await
+        .expect("estimate");
+    assert!(estimate.available);
+    assert_eq!(estimate.bandwidth, 1, "no send measured, so no bandwidth");
+
+    let nobody =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{}", free_port()));
+    let dead = transport
+        .test_connectivity(&nobody)
+        .await
+        .expect("connectivity");
+    assert!(!dead.connected, "{dead:?}");
+    assert_eq!(dead.rtt, None);
+    let estimate = transport.estimate_metrics(&nobody).await.expect("estimate");
+    assert!(!estimate.available);
+    assert_eq!(estimate.latency, Duration::from_millis(2000));
+    assert!(estimate.confidence < 0.5);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        pair.bob_node
+            .receive_messages()
+            .await
+            .expect("receive")
+            .is_empty()
     );
 }

@@ -34,6 +34,7 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 | **UDP round trip** | ✅ **DELIVERS** — payload intact, ~1 ms, via the factory path with `bind_port` set |
 | **TCP round trip** | 🔴 **SILENTLY DROPS** — `send_message` returns `Ok(confirmation: Sent)`; nothing ever arrives |
 | **WebSocket** | ✅ **DELIVERS** over loopback — a sealed, signed message arrives `Verified` and opens intact; the receipt claims `Sent` (transport contract PR B, Task 8) |
+| **HTTP** | ✅ **DELIVERS** over loopback — a sealed, signed message arrives `Verified` and opens intact; the receipt claims `Delivered`, because the receiver answers `2xx` only once the message is in its queue (transport contract PR B, Task 9) |
 | **QUIC** | 🔴 **simulation** — binds nothing, fabricates connections with a hardcoded RTT |
 
 > **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** QUIC — **deleted**: `quic_unified.rs` is gone and
@@ -101,9 +102,9 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 >   each message at the closed budget.
 > - The manager does not drain a transport in recovery, so after one real send failure marks TCP
 >   failed, inbound TCP stalls for the 300 s recovery window.
-> - UDP (`udp_unified.rs:157`) and HTTP (`http_unified.rs:211`) still return `TransportError` for
->   an oversize message, which counts against the transport. HTTP is handled in PR B Task 9; UDP
->   needs its own fix. (WebSocket's refusal is `MessageRefused` since PR B, Task 8.)
+> - UDP (`udp_unified.rs:157`) still returns `TransportError` for an oversize message, which counts
+>   against the transport; UDP needs its own fix. (WebSocket's refusal is `MessageRefused` since
+>   PR B, Task 8, and HTTP's since PR B, Task 9.)
 > - Cap `routing_path` and `metadata` lengths during deserialization, to bound `f` itself.
 
 > **Status, 2026-09-19, PR B of the transport contract, Task 8 (branch `feat/transport-contract-b`, not
@@ -169,6 +170,77 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > adaptive selection calls `estimate_metrics`, which probes; `wss://` is refused, since
 > `tokio-tungstenite` is built without TLS; `TransportCapabilities::websocket()` in `abstraction.rs`
 > still advertises 16 MB and WSS (the transport reports its own capabilities and does not use it).
+
+> **Status, 2026-09-19, PR B of the transport contract, Task 9 (branch `feat/transport-contract-b`, not
+> yet on `main`):** HTTP — `start_server` bound nothing: it built an `HttpServer` record, logged
+> "HTTP server started", and returned, so nothing listened and nothing ever filled the queue
+> `receive_raw` drained; `abstraction.rs` held a second `HttpTransportFactory` with a weaker config
+> check. Now `start()` binds once on the `BindScope` address (loopback by default) at `server_port`,
+> keeps the listener, and serves it with `axum` on hyper's HTTP/1.1 server: one route,
+> `POST /synapse/message`, whose handler reads the JSON body, takes queue budget for it, parses it,
+> queues it, and only then answers `202`. So the sender's receipt is `Delivered`, resting on that
+> `2xx`; any other status is an error, never `Sent`. The server answers `413` for a `Content-Length`
+> over `max_message_size` and `411` for a body without one (chunked), both before reading any of
+> the body; `400` for a body that is empty, short or does not parse; `408` when the body goes
+> silent; `503` while the transport is stopping or when no queue budget frees before the request's
+> deadline. Keep-alive is off: one request per connection, so a connection permit bounds one
+> message, as for TCP and WebSocket, and a pipelined second request is never read. Limits are TCP's,
+> with the same keys and defaults where they overlap (`max_message_size` 1 MiB of serialized JSON,
+> `max_concurrent_connections` 64, `max_queued_bytes` 4 MiB), plus `header_read_timeout_ms` (5 s,
+> hyper's header timeout, which also closes a connection that sends nothing), `idle_timeout_ms` (5 s,
+> a gap between body reads) and `request_timeout_ms` (20 s, the whole connection including the wait
+> for queue budget, under the sender's 30 s `timeout_ms`); an unparseable or zero value, a bad
+> `server_port` or `use_https`, a `max_queued_bytes` below `max_message_size` or above `u32::MAX`,
+> or the retired keys `server_address` and `max_connections`, fails construction and
+> `validate_config` alike. A full queue makes requests wait, holding their connection permits, until
+> the application polls or the deadline passes. The worst case an unauthenticated peer can make the
+> receiver hold is about `C × (M + 140 KiB) + B × f`, about 145 MiB at peak with the defaults and `f`
+> = 18. The handler allocates exactly the declared body length, once, so a body costs at most `M`;
+> the rest of a connection was measured at 137 to 138 KiB at `M` = 256 KiB, 1 MiB and 4 MiB, with
+> up to four write patterns, 16 connections at once (a counting allocator that counts a
+> reallocation's transient, release build, Windows); the 140 KiB rounds that up and is not a proven
+> maximum, and that it holds for 64 connections is derived. A target is an `http://` or `https://`
+> URL or `host:port`, with a host and a port; it is checked as the `reqwest::Url` that is then
+> dialled, and refused if the parser would dial a different host or port than the address names
+> (`127.1`, `0x7f.1`, a percent-encoded or non-ASCII host), or if it has userinfo or a fragment; the
+> client follows no redirect and uses no proxy. `https://` is accepted because `reqwest` is built
+> with TLS (rustls); a unit test shows an `https://` send opens with a TLS handshake. The sender
+> refuses an oversize message with `SynapseError::MessageRefused` before connecting.
+> `test_connectivity` and `estimate_metrics` report connected and available only after a real HTTP
+> exchange (any response; this server answers the `HEAD` probe `405`), a failed probe reporting
+> unavailable, the request timeout as latency and confidence 0.3; bandwidth is measured from sends,
+> or 1 until there is one. `stop()` closes the queue budget, ends the accept loop and releases the
+> listener. `reqwest` moved from 0.12.22 to 0.13.5; `axum` 0.8.9, `hyper` 1.11.1, `hyper-util`
+> 0.1.20, `tower` 0.5.3, `tower-http` 0.7.1 and `http-body-util` 0.1.5 were added at their latest
+> versions, under the `http` feature. What `tests/transport_repairs.rs` shows, over loopback in one
+> process only: a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`
+> and opens intact, receipted `Delivered` with status `202`; five messages each arrive once, all of
+> them at the first poll after their receipts; 200 signed sends, 32 in flight at a time, all arrive
+> once; an oversize message is `MessageRefused` even to a port where nothing listens, and ten
+> refusals through the manager leave HTTP `Running` with the next message delivered; a 1 GB
+> `Content-Length` trickled a byte every 100 ms is answered `413` within 2 s, after at most 5 bytes,
+> and a chunked body `411`; with a queue budget for two of four messages sent at once and no polling,
+> exactly two sends are answered and two wait until Bob polls, then all four arrive once; with a 1 s
+> `request_timeout_ms` and a full budget, a send is answered `503` at the deadline and its message
+> never arrives; under a cap of 2 with two silent connections, a third request is not read until one
+> closes; under a cap of 2 and a 500 ms header timeout, a silent peer and one trickling its head are
+> closed and a message behind them is delivered after that timeout, not before; a body trickled
+> 100 ms apart over about 1 s is accepted under a 300 ms idle timeout, while one that stalls is
+> answered `408`; two pipelined requests get one answer and one queued message; bodies that do not
+> parse, or are empty, are answered `400`; invalid configs and targets are refused; connectivity is
+> reported against a live node and not against a closed port. That `receive_raw` hands each message
+> out once, that `stop()` answers a waiting request `503`, that every non-2xx answer (`500`, `404`,
+> `302`) is an error, and that `https://` uses TLS are shown by unit tests in
+> `src/transport/http_unified.rs`. Nothing here was run across machines.
+>
+> **Known gaps, not fixed in Task 9 (follow-ups):** each send to a peer costs two HTTP exchanges
+> through the manager, because adaptive selection calls `estimate_metrics`, which probes; the
+> server speaks plain HTTP only (no TLS server), so `capabilities()` reports `encrypted: false`;
+> `TransportCapabilities::http()` in `abstraction.rs` still advertises 10 MB (the transport reports
+> its own capabilities and does not use it); a `503` from a busy peer is a `TransportError`, which
+> the manager counts against HTTP; if the `2xx` is lost after the message is queued, the sender sees
+> an error for a delivered message (a resend is then dropped by the replay record); and TCP's
+> `estimate_metrics` still reports an invented 1,000,000 bytes/s of bandwidth.
 
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
 undocumented construction requirements.** That single fact matters more for planning than everything
@@ -848,7 +920,7 @@ were read at different times, so each says when: **2026-09-09** is the original 
 | `websocket_unified` | current: 2026-09-19, branch `feat/transport-contract-b` (PR B, Task 8), not yet on `main` | bound, stored it, then re-bound the same port inside the spawn, until PR B, Task 8 made `start()` bind once and serve that listener | ✅ **fixed; delivers end-to-end over loopback** (PR B, Task 8) |
 | `udp_unified` | 2026-09-09 at `9f63707` (the bind is at :77 on 2026-09-19) | binds once at :72, stores `Arc<UdpSocket>`, receive path uses `self.socket` | ✅ **structurally sound** — my speculation was wrong |
 | `quic_unified` | 2026-09-09 at `9f63707`; deleted 2026-09-18 by PR A (#44, `b6a1904`) | **did not bind anything** | 🔴 **was a simulation — see below** |
-| `http_unified` | 2026-09-09 at `9f63707`; unchanged in this respect on 2026-09-19 (PR B, Task 9 adds a server) | no bind call in the file | no server side |
+| `http_unified` | current: 2026-09-19, branch `feat/transport-contract-b` (PR B, Task 9), not yet on `main` | had no bind call until PR B, Task 9 made `start()` bind once and serve that listener with `axum` | ✅ **fixed; delivers end-to-end over loopback** (PR B, Task 9) |
 | `tcp_simple` | 2026-09-19: deleted in PR B, Task 7 | had no bind call | had no server side |
 
 ⚠️ **`websocket_unified` had the same bug, more silently than the TCP one, until transport contract
@@ -888,8 +960,8 @@ orphaned `src/transport/quic.rs` (740 lines, §5.3) *does* contain a real `endpo
 > construct. `websocket_unified`'s double bind — **fixed in PR B, Task 8**, which also added the real
 > handshake, send and draining receive; PR A only made its send refuse. The orphaned `quic.rs` is deleted too.
 
-**Still unmeasured end-to-end:** UDP, QUIC, HTTP, email. (WebSocket is measured over loopback by
-`tests/transport_repairs.rs` since transport contract PR B, Task 8.) The table above is a reading of
+**Still unmeasured end-to-end:** UDP, QUIC, email. (WebSocket and HTTP are measured over loopback by
+`tests/transport_repairs.rs` since transport contract PR B, Tasks 8 and 9.) The table above is a reading of
 `start_server` in each, not a round trip. **`udp_unified` being structurally sound is not a claim that
 it delivers.**
 

@@ -502,9 +502,114 @@ Quote this list in PR B's body, with Task 7's.
 The client's `Sent` stays gated on a 2xx; a 2xx is also the protocol event that permits `Delivered`,
 since the peer's HTTP stack confirmed receipt — say so in the comment.
 
-- [ ] **Test:** `http_carries_a_verified_message_end_to_end`. Control: record that it fails before the
-  server is bound, because the queue is never filled.
-- [ ] Commit: `fix(http): bind a real server, so HTTP can receive`.
+- [ ] **Test:** `http_carries_a_verified_message_end_to_end`. Control, as run: at `9f559ed`, in a
+  fresh target directory, the test fails in `node` before any message is sent: "Http reports Running but nothing holds 127.0.0.1:57267; the transport is not listening" (`start_server` bound nothing). The `protocol event` comment is enforced: with it removed, `tests/delivery_claims.rs` fails, flagging `http_unified.rs:1041`.
+- [ ] Commit: `fix(http)!: bind a real bounded server, so HTTP can receive`.
+
+**As built:** the ruling on the delivery claim overrides the wording above. The server answers `202`
+only after the message is read, has queue budget, is parsed and is in the queue, so the receipt is
+`Delivered`, with a `// protocol event:` comment naming that `2xx`; any other status is an `Err`,
+not `Sent` (the bytes were written, but the peer refused them). The server is `axum` on hyper's
+HTTP/1.1 connection builder, driven by an accept loop that is TCP's: a connection permit before
+each `accept`, the listener bound once in `start()` (`server_port`, the key `port_key` maps HTTP
+to, at the `BindScope` address) and kept, the status `Failed` if the bind fails. Keep-alive is off,
+so one connection carries one request, as TCP and WebSocket carry one message: a kept-alive
+connection could carry any number of requests under one permit, and pipelined requests after the
+first are never read. The limits and keys are TCP's, plus `header_read_timeout_ms` (hyper's, which
+also closes a connection that sends nothing), `idle_timeout_ms` (a gap between body reads, `408`)
+and `request_timeout_ms` (20 s, the whole connection, including the wait for queue budget; under
+the sender's 30 s so a waiting sender sees the `503`). Backpressure: requests wait for queue budget,
+holding their permits, until the application polls, and are answered `503` at the deadline or when
+`stop()` closes the budget. A body must carry a `Content-Length`: over `max_message_size` it is
+`413` (tower-http's `RequestBodyLimitLayer`, and the handler again) and without one `411`, both
+before any of it is read; the handler then allocates exactly that length, once, so no reallocation
+holds two copies. First built with a buffer that doubled, and accepting chunked bodies; the
+measurement below counted the reallocation transient and the design changed before commit. The
+memory bound, in TCP's style: about `C × (M + 140 KiB) + B × f`, about 145 MiB at peak with the
+defaults and `f` = 18. **Measured** (counting allocator that counts a reallocation's old and new
+blocks at once, release build, Windows, 16 connections, each with a whole body read and waiting for
+budget): 20.6 KiB per connection once its head is read, and `M` + 137 to 138 KiB at the peak, the
+same at `M` = 256 KiB, 1 MiB and 4 MiB and for one write, 64 KiB, 1 KiB and (at 256 KiB) 7-byte
+writes. **Derived:** the 140 KiB (a round-up of the largest measured, not a proven maximum), and
+that 64 connections hold what 16 did. A target is checked as the `reqwest::Url` that is dialled; its
+host and port must be the ones the address names, so `127.1`, `0x7f.1`, `%61` and non-ASCII hosts
+are refused, with userinfo, fragments, a missing port and any scheme but `http` and `https`; the
+client follows no redirect, uses no proxy and speaks HTTP/1.1 only. `https://` is accepted because
+`reqwest`'s default features, kept, include rustls, which a unit test checks (an `https://` send
+opens with a TLS handshake record). `abstraction.rs`'s second `HttpTransportFactory`, whose
+`validate_config` checked three keys, is deleted, as Task 7 deleted the shadowing TCP factory.
+`stop()` also ends the accept loop and releases the listener, which TCP and WebSocket do not yet.
+Mutation controls, each in the mutation tree's own target directory, each caught by the named
+tests: answering `202` before queuing (the backpressure, 503-deadline, pipelining, `receive_raw`
+and `stop` tests); keep-alive on (`http_answers_one_request_per_connection_...`); no header
+timeout (`http_closes_connections_that_do_not_finish_their_head`); no body idle timeout
+(`http_idle_timeout_is_a_gap_...`); no `413` in the layer or the handler
+(`http_server_refuses_an_oversize_body_...`); `receive_raw` handing out copies
+(`receive_raw_hands_each_message_out_once`, the backpressure test); `stop` not closing the budget
+(`stop_answers_a_waiting_request_with_503`); the cap raised by 100 (the cap and header tests); the
+sender not refusing oversize (`http_refuses_an_oversize_message_before_connecting_...`); redirects
+followed (`a_non_2xx_answer_is_an_error`); a rewritten host accepted (`target_addresses`,
+`http_refuses_targets_it_would_not_dial_as_named`). The unmutated tree passed both runs.
+
+#### Breaking changes (unreleased 2.0.0), from Task 9
+
+Quote this list in PR B's body, with Tasks 7 and 8's.
+
+- HTTP now receives: `start()` binds `server_port` (at the `bind_scope` address, loopback by
+  default) and serves `POST /synapse/message`. `start()` sets the status to `Failed` when its bind
+  fails, and a second `start()` on the same instance is an error. `stop()` ends the accept loop,
+  releases the listener and closes the receive queue.
+- HTTP's receipt claims `Delivered` instead of `Sent`, resting on the peer's `2xx`, which this
+  server sends only after the message is queued.
+- The wire contract: one JSON `SecureMessage` per `POST`, with a `Content-Length` (a chunked body is
+  answered `411`), one request per connection (keep-alive off; the server answers with
+  `Connection: close`, and a pipelined request is never read), HTTP/1.1 only. The server answers
+  `202`, `400`, `408`, `411`, `413` or `503` (module documentation of `http_unified.rs`).
+- HTTP's error for an oversize message changed from `SynapseError::TransportError` to
+  `SynapseError::MessageRefused`, returned before connecting, and the manager no longer counts it
+  against HTTP.
+- `max_message_size`'s default fell from 10 MiB to 1 MiB of serialized JSON. New keys:
+  `max_concurrent_connections` 64, `max_queued_bytes` 4 MiB, `header_read_timeout_ms` and
+  `idle_timeout_ms` 5 s, `request_timeout_ms` 20 s.
+- `use_https`'s default changed from `true` to `false`, since this transport's server speaks plain
+  HTTP; it now affects only `host:port` targets.
+- An unparseable or zero limit or timeout, a `server_port` that is not a port number, a `use_https`
+  other than `true` or `false`, a `user_agent` that is not a valid header value, or a
+  `max_queued_bytes` below `max_message_size` or above `u32::MAX`, is refused at construction and by
+  `HttpTransportFactory::validate_config`, instead of silently becoming the default (a bad
+  `server_port` used to disable the server, and a bad `use_https` meant `true`). `validate_config`
+  used to check three keys. `default_config` returns every key.
+- The keys `server_address` (use `bind_scope`) and `max_connections` (use
+  `max_concurrent_connections`) are refused rather than ignored.
+- A target must carry an address that is an `http://` or `https://` URL or `host:port`, naming a
+  host and a port. Refused, where they used to be turned into some URL: an identifier-only target
+  (it became `http(s)://localhost:8080/synapse/message/<identifier>`), a missing port (80, 443, 8080
+  or 8443 was guessed), any other scheme, userinfo, a fragment, and a host the URL parser would
+  rewrite (`127.1`, `0x7f.1`, a percent-encoded or non-ASCII name). `can_reach` says so without
+  touching the network. A URL whose path is empty or `/` is sent to `/synapse/message`.
+- The sender follows no redirect (a `3xx` is an error) and ignores `HTTP_PROXY` and the other proxy
+  settings of the environment.
+- `test_connectivity` sends a `HEAD` to the target URL (it sent one to `/synapse/health`, which
+  nothing served) and reports connected on any HTTP response. `estimate_metrics`, which reported
+  fixed figures without touching the network (100 or 200 ms, reliability 0.95, 1,000,000 bytes/s,
+  available, confidence 0.8), now probes: measured latency and confidence 1 on a response; on a
+  failure, unavailable, `timeout_ms` as the latency and confidence 0.3. Bandwidth is measured from
+  sends, or 1 until one has been.
+- `metrics()`: `reliability_score` is successes over attempts, 0 before any (it was a moving average
+  starting at 1.0); `average_latency_ms` is a running mean (it was the last send's);
+  `active_connections` counts inbound connections being served.
+- `capabilities()` reports the configured `max_message_size`, `encrypted: false`, and the features
+  `request_response`, `one_request_per_connection` and `firewall_friendly`.
+- The default `User-Agent` is `Synapse-HTTP-Transport/2.0` (was `/1.0`).
+- Removed from the public API: `HttpTransportConfig`; `HttpServer`, with its public
+  `received_messages` queue; and `synapse::transport::abstraction::HttpTransportFactory`, a second
+  factory (`synapse::transport::HttpTransportFactory` is `http_unified`'s, as before). Added:
+  `http_unified::validate_config`, `HttpTransportImpl::local_addr`, and the key and default
+  constants.
+- `reqwest` moved from 0.12.22 to 0.13.5. `axum` 0.8.9, `hyper` 1.11.1, `hyper-util` 0.1.20,
+  `tower` 0.5.3, `tower-http` 0.7.1 and `http-body-util` 0.1.5 are new dependencies of the `http`
+  feature. No public API names their types; `llm_discovery` and the telemetry error reporter, the
+  other users of `reqwest`, compile unchanged against 0.13.
 
 ### Task 10: NAT traversal
 
