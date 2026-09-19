@@ -533,6 +533,68 @@ async fn tcp_refuses_an_unparseable_or_zero_limit() {
     }
 }
 
+/// The queue budget must hold the largest message the receiver reads, or a handler holding such a
+/// message would wait forever for budget that never comes; and it must fit the `u32` one
+/// semaphore acquire counts in. Construction refuses a budget below `max_message_size`, above
+/// `u32::MAX`, unparseable or zero, naming the key; a budget equal to `max_message_size` is the
+/// positive control. Before `max_queued_bytes` existed, every one of these was accepted.
+#[tokio::test]
+async fn tcp_refuses_a_queue_budget_smaller_than_its_largest_message() {
+    let config = |budget: &str, message: &str| {
+        HashMap::from([
+            ("max_queued_bytes".to_string(), budget.to_string()),
+            ("max_message_size".to_string(), message.to_string()),
+        ])
+    };
+    let over_u32 = (u64::from(u32::MAX) + 1).to_string();
+    for (budget, message) in [
+        ("4095", "4096"),
+        ("1", "4096"),
+        ("1048575", "1048576"),
+        (over_u32.as_str(), over_u32.as_str()),
+        ("0", "4096"),
+        ("abc", "4096"),
+    ] {
+        match synapse::transport::TcpTransportFactory
+            .create_transport(&config(budget, message))
+            .await
+        {
+            Ok(_) => panic!(
+                "max_queued_bytes = {budget} with max_message_size = {message} must be refused"
+            ),
+            Err(e) => assert!(
+                e.to_string().contains("max_queued_bytes"),
+                "the error for max_queued_bytes = {budget} must name the key: {e}"
+            ),
+        }
+    }
+    // Without `max_message_size`, the budget is checked against its default of 1 MiB.
+    assert!(
+        synapse::transport::TcpTransportFactory
+            .create_transport(&tcp_config("max_queued_bytes", "4096"))
+            .await
+            .is_err(),
+        "max_queued_bytes = 4096 is under the default max_message_size and must be refused"
+    );
+    for (budget, message) in [("4096", "4096"), ("8192", "4096")] {
+        assert!(
+            synapse::transport::TcpTransportFactory
+                .create_transport(&config(budget, message))
+                .await
+                .is_ok(),
+            "max_queued_bytes = {budget} with max_message_size = {message} must be accepted"
+        );
+    }
+    let u32_max = u32::MAX.to_string();
+    assert!(
+        synapse::transport::TcpTransportFactory
+            .create_transport(&config(&u32_max, "4096"))
+            .await
+            .is_ok(),
+        "max_queued_bytes = u32::MAX must be accepted"
+    );
+}
+
 /// The serialized size of `message`, the unit `max_message_size` counts.
 fn wire_size(message: &SecureMessage) -> usize {
     serde_json::to_vec(message).expect("serialize").len()
@@ -708,26 +770,67 @@ async fn poll_bob(pair: &Pair, want: usize, within: Duration) -> Vec<ReceivedMes
     arrived
 }
 
-/// With `max_queued_messages` = 2 and nobody polling, four messages are sent. Only two may enter
-/// the queue; the other two handlers wait for space, holding their connections, rather than being
-/// dropped. What shows the cap: the first poll, made long after all four were read, returns exactly
-/// two, because a message enters the queue only when it gets a slot and the first drain happens
-/// before any slot is freed. Without the cap all four are already queued and the first poll
-/// returns four. The later polls show nothing was lost: all four arrive, each once.
+/// The body of the `i`th message the queue test sends: 4 KiB, so each message's serialized size
+/// is large beside the few hundred bytes by which two such messages can differ.
+fn queued_body(i: usize) -> Vec<u8> {
+    let mut body = format!("queued {i} ").into_bytes();
+    body.resize(4096, b'.');
+    body
+}
+
+/// How far the serialized sizes of two messages built alike, with the same body length, can
+/// differ: the 64-byte signature serializes as a JSON number array of 127 to 255 characters, the
+/// timestamp's fraction takes 0 to 7, and the rest -- certificate chain, key id, ids -- is fixed
+/// width or nearly so. 512 bytes covers that with room to spare.
+const QUEUED_SIZE_SLACK: usize = 512;
+
+/// With a queue budget that holds two of its messages but not three, and nobody polling, four
+/// messages are sent. Only two may enter the queue; the other two handlers wait for budget, holding
+/// their connections, rather than being dropped. What shows the budget: the first poll, made long
+/// after all four were read, returns exactly two, because a message enters the queue only once it
+/// holds budget for its bytes and the first drain happens before any budget is freed. Without the
+/// budget all four are already queued and the first poll returns four. The later polls show
+/// nothing was lost: all four arrive, each once.
+///
+/// The budget is set before the messages exist (they are signed by the pair's own key), so it is
+/// sized from messages built the same way on a probe pair, `QUEUED_SIZE_SLACK` apart from the real
+/// ones at most; the real ones are then measured, as `measured` does, and the test asserts that any
+/// two of them fit the budget and no three do before relying on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tcp_holds_messages_past_its_queue_cap_until_polled_and_loses_none() {
+    let probe = Pair::new(TransportType::Tcp, tcp(), tcp(), free_port(), free_port()).await;
+    let probe_largest = (0..4)
+        .map(|i| wire_size(&probe.signed(&queued_body(i))))
+        .max()
+        .expect("four probes");
+    drop(probe);
+    let budget = 2 * (probe_largest + QUEUED_SIZE_SLACK);
+    // `max_queued_bytes` may not be below `max_message_size`; every message here is under both.
+    let config = HashMap::from([
+        ("max_queued_bytes".to_string(), budget.to_string()),
+        ("max_message_size".to_string(), budget.to_string()),
+    ]);
     let pair = Pair::with_config(
         TransportType::Tcp,
         tcp(),
         tcp(),
         free_port(),
         free_port(),
-        &tcp_config("max_queued_messages", "2"),
+        &config,
     )
     .await;
-    let messages: Vec<SecureMessage> = (0..4)
-        .map(|i| pair.signed(format!("queued {i}").as_bytes()))
-        .collect();
+    let messages: Vec<SecureMessage> = (0..4).map(|i| pair.signed(&queued_body(i))).collect();
+    let sizes: Vec<usize> = messages.iter().map(wire_size).collect();
+    let mut sorted = sizes.clone();
+    sorted.sort_unstable();
+    assert!(
+        sorted[2] + sorted[3] <= budget,
+        "the two largest messages ({sizes:?} bytes) must fit the {budget}-byte budget"
+    );
+    assert!(
+        sorted[0] + sorted[1] + sorted[2] > budget,
+        "no three messages ({sizes:?} bytes) may fit the {budget}-byte budget"
+    );
     for message in &messages {
         let receipt = pair
             .alice_node
@@ -743,7 +846,7 @@ async fn tcp_holds_messages_past_its_queue_cap_until_polled_and_loses_none() {
     assert_eq!(
         first.len(),
         2,
-        "with a queue cap of 2, the first poll must find exactly 2 queued messages"
+        "with a budget for 2 messages, the first poll must find exactly 2 queued messages"
     );
     let mut arrived = first;
     arrived.extend(poll_bob(&pair, 2, Duration::from_secs(5)).await);

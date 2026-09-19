@@ -14,13 +14,16 @@
 //! | `connection_timeout_ms` | `10000` | how long `send_message` waits to connect |
 //! | [`MAX_MESSAGE_SIZE_KEY`] (`max_message_size`) | [`DEFAULT_MAX_MESSAGE_SIZE`] (1 MiB) | the largest message, **in bytes of serialized JSON**, the receiver reads and the sender sends |
 //! | [`MAX_CONCURRENT_CONNECTIONS_KEY`] (`max_concurrent_connections`) | [`DEFAULT_MAX_CONCURRENT_CONNECTIONS`] (64) | how many inbound connections are handled at once |
-//! | [`MAX_QUEUED_MESSAGES_KEY`] (`max_queued_messages`) | [`DEFAULT_MAX_QUEUED_MESSAGES`] (1024) | how many received messages wait for the application to poll |
+//! | [`MAX_QUEUED_BYTES_KEY`] (`max_queued_bytes`) | [`DEFAULT_MAX_QUEUED_BYTES`] (16 MiB) | how many bytes of received messages, **counted as serialized JSON**, may wait for the application to poll; at least `max_message_size` and at most `u32::MAX` |
 //! | [`FIRST_BYTE_TIMEOUT_MS_KEY`] (`first_byte_timeout_ms`) | [`DEFAULT_FIRST_BYTE_TIMEOUT_MS`] (5000) | how long a new connection may stay silent before it is closed |
 //! | [`IDLE_TIMEOUT_MS_KEY`] (`idle_timeout_ms`) | [`DEFAULT_IDLE_TIMEOUT_MS`] (5000) | how long a connection may stay silent between two reads |
 //!
 //! Every key but `listen_port` and `connection_timeout_ms` must parse as a positive integer:
 //! [`TcpTransportImpl::new`] (and so the factory's `create_transport`) refuses an unparseable or
-//! zero value instead of falling back to the default.
+//! zero value instead of falling back to the default. It also refuses a `max_queued_bytes` below
+//! `max_message_size`, which would leave a message that passed the size check waiting forever for
+//! room the queue can never have, and one above `u32::MAX`, the most one semaphore acquire can
+//! take.
 //!
 //! `max_message_size` counts serialized bytes, not body bytes: `encrypted_content` serializes as
 //! a JSON number array, a few characters per body byte, so the largest body that fits is several
@@ -33,31 +36,33 @@
 //!
 //! Nothing below is authenticated: the receiver reads, parses and queues a message before anyone
 //! checks its signature. Write `C` for `max_concurrent_connections`, `M` for `max_message_size`,
-//! `Q` for `max_queued_messages`, and `f` for the parse factor -- the heap a parsed
-//! `SecureMessage` takes per byte of its JSON. `f` depends on the data: one 1 MiB JSON message was
-//! measured parsing to about 6.9 MB, `f` ≈ 6.7, which is an example, not a bound. The worst case
-//! is the sum of:
+//! `B` for `max_queued_bytes`, and `f` for the parse factor -- the heap a `SecureMessage` takes,
+//! while it is parsed and after, per byte of its JSON. `f` depends on the data: one 1 MiB JSON
+//! message was measured parsing to about 6.9 MB, `f` ≈ 6.7, which is an example, not a bound. The
+//! worst case is the sum of:
 //!
 //! - **read buffers:** `C × (M + 1)` bytes. At most `C` connections are handled at once, each read
-//!   into a buffer that never reserves more than `M + 1` bytes. A handler waiting for queue space
-//!   still holds its buffer, and this term already counts it.
-//! - **parse peak:** about `C × (1 + f) × M`. A handler parses only once it holds a queue slot, and
-//!   while it parses it holds both the buffer and the parsed message.
-//! - **queued:** `Q × f × M`, the queue's cap times the parsed size of a message.
+//!   into a buffer that never reserves more than `M + 1` bytes. A handler holds its buffer while it
+//!   waits for queue budget and while it parses, and this term counts it in both.
+//! - **parsed messages:** `B × f`. Before parsing, a handler takes budget for its message's JSON
+//!   length, and the queued message keeps that budget until the application drains it. So every
+//!   message being parsed or waiting in the queue holds budget for its own raw bytes, and together
+//!   they hold at most `B`. How many connections parse at once does not change this term.
 //!
-//! With the defaults and `f` = 6.7 that is about 64 MiB + 490 MiB + 6.7 GiB; lower `Q` or `M` where
-//! that is too much.
+//! With the defaults (`C` = 64, `M` = 1 MiB, `B` = 16 MiB) and `f` = 6.7 that is about
+//! 64 MiB + 107 MiB, about 171 MiB. Lower `B` to shrink the second term, and `C` or `M` to shrink
+//! the first.
 //!
 //! # Backpressure, not loss
 //!
 //! The accept loop takes a connection permit before each `accept`, so at `C` it waits and later
 //! connections queue in the kernel's backlog instead of being closed. A handler that has read a
-//! message waits for a queue slot while still holding its connection permit; nothing is dropped
-//! for want of space. If the application never polls `receive_messages`, the queue fills, every
-//! handler ends up waiting for a slot, the listener stops accepting, and senders queue in the
+//! message waits for queue budget while still holding its connection permit; nothing is dropped
+//! for want of space. If the application never polls `receive_messages`, the budget runs out,
+//! every handler ends up waiting for it, the listener stops accepting, and senders queue in the
 //! kernel's backlog until it too is full and their connects fail. Each message already read is
-//! kept until the application polls. The read timeouts cover the read only, never the wait for a
-//! queue slot.
+//! kept until the application polls. The read timeouts cover the read only, never the wait for
+//! queue budget.
 //!
 //! # Slow and silent peers
 //!
@@ -105,11 +110,13 @@ pub const MAX_CONCURRENT_CONNECTIONS_KEY: &str = "max_concurrent_connections";
 /// The default for [`MAX_CONCURRENT_CONNECTIONS_KEY`].
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 64;
 
-/// The config key for how many received messages may wait for the application to poll.
-pub const MAX_QUEUED_MESSAGES_KEY: &str = "max_queued_messages";
+/// The config key for how many bytes of received messages, counted as serialized JSON, may wait
+/// for the application to poll. It must be at least [`MAX_MESSAGE_SIZE_KEY`] and at most
+/// `u32::MAX`.
+pub const MAX_QUEUED_BYTES_KEY: &str = "max_queued_bytes";
 
-/// The default for [`MAX_QUEUED_MESSAGES_KEY`].
-pub const DEFAULT_MAX_QUEUED_MESSAGES: usize = 1024;
+/// The default for [`MAX_QUEUED_BYTES_KEY`]: 16 MiB of serialized JSON.
+pub const DEFAULT_MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 
 /// The config key for how long, in milliseconds, a new connection may send nothing before the
 /// receiver closes it.
@@ -159,7 +166,7 @@ struct ReadTimeouts {
 struct Limits {
     max_message_size: usize,
     max_concurrent_connections: usize,
-    max_queued_messages: usize,
+    max_queued_bytes: usize,
     read_timeouts: ReadTimeouts,
 }
 
@@ -171,22 +178,36 @@ impl Limits {
                 positive_limit(config, key, default)? as u64
             ))
         };
+        let max_message_size =
+            positive_limit(config, MAX_MESSAGE_SIZE_KEY, DEFAULT_MAX_MESSAGE_SIZE)?;
+        let max_queued_bytes =
+            positive_limit(config, MAX_QUEUED_BYTES_KEY, DEFAULT_MAX_QUEUED_BYTES)?;
+        // A message the size check accepts must fit the queue budget, or its handler would wait
+        // forever for room that never comes.
+        if max_queued_bytes < max_message_size {
+            return Err(crate::error::SynapseError::Config(format!(
+                "{MAX_QUEUED_BYTES_KEY} ({max_queued_bytes}) must be at least \
+                 {MAX_MESSAGE_SIZE_KEY} ({max_message_size}), or a message of that size could \
+                 never be queued"
+            )));
+        }
+        // A handler takes budget for a whole message in one `acquire_many_owned`, which counts in
+        // `u32`. A message is at most the budget, so a budget that fits `u32` makes every acquire
+        // fit too.
+        if u32::try_from(max_queued_bytes).is_err() {
+            return Err(crate::error::SynapseError::Config(format!(
+                "{MAX_QUEUED_BYTES_KEY} ({max_queued_bytes}) must be at most {}",
+                u32::MAX
+            )));
+        }
         Ok(Self {
-            max_message_size: positive_limit(
-                config,
-                MAX_MESSAGE_SIZE_KEY,
-                DEFAULT_MAX_MESSAGE_SIZE,
-            )?,
+            max_message_size,
             max_concurrent_connections: positive_limit(
                 config,
                 MAX_CONCURRENT_CONNECTIONS_KEY,
                 DEFAULT_MAX_CONCURRENT_CONNECTIONS,
             )?,
-            max_queued_messages: positive_limit(
-                config,
-                MAX_QUEUED_MESSAGES_KEY,
-                DEFAULT_MAX_QUEUED_MESSAGES,
-            )?,
+            max_queued_bytes,
             read_timeouts: ReadTimeouts {
                 first_byte: millis(FIRST_BYTE_TIMEOUT_MS_KEY, DEFAULT_FIRST_BYTE_TIMEOUT_MS)?,
                 idle: millis(IDLE_TIMEOUT_MS_KEY, DEFAULT_IDLE_TIMEOUT_MS)?,
@@ -246,16 +267,17 @@ async fn read_bounded<R: AsyncRead + Unpin>(
 /// What an inbound connection's handler shares with the transport.
 struct Inbound {
     received_messages: Arc<Mutex<Vec<Queued>>>,
-    queue_slots: Arc<Semaphore>,
+    queue_budget: Arc<Semaphore>,
     metrics: Arc<RwLock<TransportMetrics>>,
     max_message_size: usize,
     read_timeouts: ReadTimeouts,
 }
 
-/// A received message waiting for the application, holding its queue slot until it is drained.
+/// A received message waiting for the application, holding queue budget for its JSON length until
+/// it is drained.
 struct Queued {
     message: IncomingMessage,
-    _slot: OwnedSemaphorePermit,
+    _budget: OwnedSemaphorePermit,
 }
 
 /// TCP Transport implementation
@@ -280,10 +302,11 @@ pub struct TcpTransportImpl {
     connection_permits: Arc<Semaphore>,
     /// Timeouts for each read of an inbound connection.
     read_timeouts: ReadTimeouts,
-    /// Free places in `received_messages`. A handler takes one before it parses and keeps it with
-    /// the queued message; `receive_raw` releases it by draining the message.
-    queue_slots: Arc<Semaphore>,
-    /// Received messages, each with the queue slot it holds.
+    /// Free bytes of queue budget, one permit per byte of serialized JSON. A handler takes its
+    /// message's length before it parses and keeps it with the queued message; `receive_raw`
+    /// releases it by draining the message.
+    queue_budget: Arc<Semaphore>,
+    /// Received messages, each with the queue budget it holds.
     received_messages: Arc<Mutex<Vec<Queued>>>,
     /// Current status
     status: Arc<RwLock<TransportStatus>>,
@@ -315,7 +338,7 @@ impl TcpTransportImpl {
         let Limits {
             max_message_size,
             max_concurrent_connections,
-            max_queued_messages,
+            max_queued_bytes,
             read_timeouts,
         } = Limits::from_config(config)?;
 
@@ -347,7 +370,7 @@ impl TcpTransportImpl {
             max_message_size,
             connection_permits: Arc::new(Semaphore::new(max_concurrent_connections)),
             read_timeouts,
-            queue_slots: Arc::new(Semaphore::new(max_queued_messages)),
+            queue_budget: Arc::new(Semaphore::new(max_queued_bytes)),
             received_messages: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(RwLock::new(TransportStatus::Stopped)),
             metrics: Arc::new(RwLock::new(metrics)),
@@ -362,7 +385,7 @@ impl TcpTransportImpl {
             let metrics = Arc::clone(&self.metrics);
             let max_message_size = self.max_message_size;
             let permits = Arc::clone(&self.connection_permits);
-            let queue_slots = Arc::clone(&self.queue_slots);
+            let queue_budget = Arc::clone(&self.queue_budget);
             let read_timeouts = self.read_timeouts;
             // Serve the listener the constructor already bound. The previous version
             // bound a SECOND listener on the same port inside this task; that bind
@@ -397,7 +420,7 @@ impl TcpTransportImpl {
                             debug!("Accepted TCP connection from {}", addr);
                             let messages_clone = Arc::clone(&received_messages);
                             let metrics_clone = Arc::clone(&metrics);
-                            let slots_clone = Arc::clone(&queue_slots);
+                            let budget_clone = Arc::clone(&queue_budget);
 
                             tokio::spawn(async move {
                                 Self::handle_connection(
@@ -405,14 +428,14 @@ impl TcpTransportImpl {
                                     addr.to_string(),
                                     Inbound {
                                         received_messages: messages_clone,
-                                        queue_slots: slots_clone,
+                                        queue_budget: budget_clone,
                                         metrics: metrics_clone,
                                         max_message_size,
                                         read_timeouts,
                                     },
                                 )
                                 .await;
-                                // Held for the whole read and any wait for a queue slot, released
+                                // Held for the whole read and any wait for queue budget, released
                                 // when the handler finishes.
                                 drop(permit);
                             });
@@ -439,13 +462,13 @@ impl TcpTransportImpl {
     /// reachability probe (`can_reach`, `estimate_metrics` and `test_connectivity` connect and
     /// close), not a dropped message, and is logged at debug.
     ///
-    /// Once the message is read, the handler waits for a queue slot -- with no timeout, still
-    /// holding its connection permit -- and only then parses and queues it, so a full queue slows
-    /// the listener down instead of losing messages.
+    /// Once the message is read, the handler waits for queue budget for its length -- with no
+    /// timeout, still holding its connection permit -- and only then parses and queues it, so a
+    /// full queue slows the listener down instead of losing messages.
     async fn handle_connection(stream: TcpStream, source_addr: String, inbound: Inbound) {
         let Inbound {
             received_messages,
-            queue_slots,
+            queue_budget,
             metrics,
             max_message_size,
             read_timeouts,
@@ -456,13 +479,13 @@ impl TcpTransportImpl {
         let mut buffer = Vec::with_capacity(limit.min(READ_CHUNK));
 
         // The total timeout, and `read_bounded`'s first-byte and idle timeouts, cover the read
-        // only; the wait for a queue slot below is deliberately outside them.
+        // only; the wait for queue budget below is deliberately outside them.
         let outcome = tokio::time::timeout(
             READ_TIMEOUT,
             read_bounded(&mut stream, &mut buffer, limit, read_timeouts),
         )
         .await;
-        // Nothing more is read; release the socket while waiting for a queue slot.
+        // Nothing more is read; release the socket while waiting for queue budget.
         drop(stream);
         let bytes_read = buffer.len();
         match outcome {
@@ -506,10 +529,19 @@ impl TcpTransportImpl {
         }
         debug!("Received {} bytes via TCP from {}", bytes_read, source_addr);
 
-        // Wait for queue space before parsing, so a waiting handler holds only its raw bytes, not
-        // the several times larger parsed message. The semaphore is never closed, so
-        // `acquire_owned` cannot fail while the transport exists.
-        let Ok(slot) = queue_slots.acquire_owned().await else {
+        // Wait for queue budget before parsing, so a waiting handler holds only its raw bytes, not
+        // the several times larger parsed message. `Limits` guarantees
+        // `bytes_read <= max_message_size <= max_queued_bytes <= u32::MAX`, so the conversion
+        // cannot fail and the acquire never asks for more than the budget holds. The semaphore is
+        // never closed, so the acquire cannot fail while the transport exists.
+        let Ok(wanted) = u32::try_from(bytes_read) else {
+            error!(
+                "Dropped TCP message from {}: {} bytes is over the queue budget's u32 limit",
+                source_addr, bytes_read
+            );
+            return;
+        };
+        let Ok(budget) = queue_budget.acquire_many_owned(wanted).await else {
             error!(
                 "Dropped TCP message from {}: the receive queue was closed",
                 source_addr
@@ -537,7 +569,7 @@ impl TcpTransportImpl {
             let mut messages = received_messages.lock().await;
             messages.push(Queued {
                 message: incoming,
-                _slot: slot,
+                _budget: budget,
             });
             debug!("Queued TCP message, total: {}", messages.len());
         }
@@ -865,7 +897,7 @@ impl Transport for TcpTransportImpl {
 #[async_trait]
 impl TransportReceive for TcpTransportImpl {
     async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
-        // Draining a message drops the queue slot it held, so a handler waiting for space can
+        // Draining a message drops the queue budget it held, so a handler waiting for budget can
         // queue its message as soon as this lock is released.
         let mut messages = self.received_messages.lock().await;
         inbox.extend(messages.drain(..).map(|queued| queued.message));
@@ -906,8 +938,8 @@ impl TransportFactory for TcpTransportFactory {
             DEFAULT_MAX_CONCURRENT_CONNECTIONS.to_string(),
         );
         config.insert(
-            MAX_QUEUED_MESSAGES_KEY.to_string(),
-            DEFAULT_MAX_QUEUED_MESSAGES.to_string(),
+            MAX_QUEUED_BYTES_KEY.to_string(),
+            DEFAULT_MAX_QUEUED_BYTES.to_string(),
         );
         config.insert(
             FIRST_BYTE_TIMEOUT_MS_KEY.to_string(),
@@ -998,7 +1030,7 @@ mod tests {
         for key in [
             MAX_MESSAGE_SIZE_KEY,
             MAX_CONCURRENT_CONNECTIONS_KEY,
-            MAX_QUEUED_MESSAGES_KEY,
+            MAX_QUEUED_BYTES_KEY,
             FIRST_BYTE_TIMEOUT_MS_KEY,
             IDLE_TIMEOUT_MS_KEY,
         ] {
@@ -1009,7 +1041,13 @@ mod tests {
                     "{key} = {bad:?}"
                 );
             }
-            let config = HashMap::from([(key.to_string(), "7".to_string())]);
+            // The queue budget must hold the largest message, so its positive control is that.
+            let good = if key == MAX_QUEUED_BYTES_KEY {
+                DEFAULT_MAX_MESSAGE_SIZE.to_string()
+            } else {
+                "7".to_string()
+            };
+            let config = HashMap::from([(key.to_string(), good)]);
             assert!(
                 TcpTransportFactory.validate_config(&config).is_ok(),
                 "{key}"

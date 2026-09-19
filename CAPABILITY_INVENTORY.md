@@ -54,14 +54,16 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > whenever the queue was busy. The fix-round commits on the same branch read each connection to EOF
 > (the sender now shuts down its write half) and wait for the queue lock. Everything the receiver
 > holds, it holds before any signature is checked. Writing `C` = `max_concurrent_connections`
-> (default 64), `M` = `max_message_size` (default 1 MiB), `Q` = `max_queued_messages` (default 1024)
-> and `f` for the parse factor (heap per byte of JSON, which depends on the data: one 1 MiB JSON
-> message measured about 6.9 MB parsed, `f` ≈ 6.7 — an example, not a bound), the worst case is
-> read buffers `C × (M + 1)`, plus a parse peak of about `C × (1 + f) × M`, plus queued messages
-> `Q × f × M`; with the defaults and `f` = 6.7 that is about 64 MiB + 490 MiB + 6.7 GiB. At `C` the
-> accept loop waits, so later connections queue in the kernel's backlog; with `Q` messages queued, a
-> handler waits for space holding its connection, so an application that never polls stops the
-> listener (backpressure) rather than losing messages. A connection is closed if it sends nothing
+> (default 64), `M` = `max_message_size` (default 1 MiB), `B` = `max_queued_bytes` (default 16 MiB,
+> counted in bytes of serialized JSON; construction refuses `B` < `M` and `B` > `u32::MAX`) and `f`
+> for the parse factor (heap per byte of JSON while parsing and after, which depends on the data: one
+> 1 MiB JSON message measured about 6.9 MB parsed, `f` ≈ 6.7 — an example, not a bound), the worst
+> case is read buffers `C × (M + 1)` plus parsed messages `B × f`: a handler takes budget for its
+> message's JSON length before parsing, and the queued message keeps it until drained, so everything
+> being parsed or queued holds at most `B` bytes of budget. With the defaults and `f` = 6.7 that is
+> about 64 MiB + 107 MiB, about 171 MiB. At `C` the accept loop waits, so later connections queue in
+> the kernel's backlog; with the budget spent, a handler waits for budget holding its connection, so
+> an application that never polls stops the listener (backpressure) rather than losing messages. A connection is closed if it sends nothing
 > for `first_byte_timeout_ms` (default 5 s), goes silent for `idle_timeout_ms` (default 5 s), or has
 > not ended after 30 s, so a round of `C` silent peers holds every connection for at most 5 s and a
 > round of peers trickling bytes for at most 30 s; a legitimate connection still waits behind every
@@ -79,8 +81,10 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > while one under it arrives; after such a refusal TCP stays `Running` and the next message
 > arrives; with a cap of 2 and two connections held open, a third is read only after one closes;
 > with two silent connections and a 500 ms first-byte timeout, a message behind them arrives after
-> that timeout, not after 30 s; with a queue cap of 2 and no polling, four messages sent leave only
-> two queued at the first poll, and all four arrive once polling continues. Each receipt still claims only
+> that timeout, not after 30 s; with a queue budget that holds two of its messages but not three and
+> no polling, four messages sent leave only two queued at the first poll, and all four arrive once
+> polling continues; a `max_queued_bytes` below `max_message_size`, above `u32::MAX`, zero or
+> unparseable fails construction. Each receipt still claims only
 > `Sent`. Nothing here was run across machines.
 
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
@@ -89,8 +93,7 @@ else in this document.
 
 🔴 **Added 2026-09-17: on `main`, "encrypted" messages can be read by anyone who has the bytes.**
 `encrypt_message` stores the AES key inside its own output. This is not in any published release
-(§2.2, "ENCRYPTION ON `main` IS NOT CONFIDENTIAL"). **Fixed on branch `feat/sealing`** (held, not yet on
-`main`).
+(§2.2, "ENCRYPTION ON `main` IS NOT CONFIDENTIAL"). **Fixed by PR #41, on `main` as `63d4945`.**
 
 ---
 
