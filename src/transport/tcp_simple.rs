@@ -16,8 +16,8 @@ use crate::{
     error::{Result, SynapseError},
     transport::abstraction::{
         ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, MessageUrgency,
-        Transport, TransportCapabilities, TransportEstimate, TransportMetrics, TransportStatus,
-        TransportTarget, TransportType,
+        Transport, TransportCapabilities, TransportEstimate, TransportMetrics, TransportReceive,
+        TransportStatus, TransportTarget, TransportType, private,
     },
     types::SecureMessage,
 };
@@ -168,12 +168,6 @@ impl Transport for SimpleTcpTransport {
         }
     }
 
-    async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
-        // For this simple implementation, we don't maintain persistent listeners
-        // This would typically be implemented with a background task
-        Ok(vec![])
-    }
-
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
         let addr = if let Some(address) = &target.address {
             address
@@ -234,6 +228,15 @@ impl Transport for SimpleTcpTransport {
 
     async fn metrics(&self) -> TransportMetrics {
         self.metrics.read().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TransportReceive for SimpleTcpTransport {
+    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+        // For this simple implementation, we don't maintain persistent listeners
+        // This would typically be implemented with a background task
+        Ok(vec![])
     }
 }
 

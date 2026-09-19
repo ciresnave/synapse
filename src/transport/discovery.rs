@@ -14,8 +14,8 @@ use auto_discovery::{DiscoveryConfig, ProtocolType, ServiceDiscovery, ServiceInf
 use crate::error::{Result, SynapseError};
 use crate::transport::abstraction::{
     ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, MessageUrgency,
-    Transport, TransportCapabilities, TransportEstimate, TransportMetrics, TransportStatus,
-    TransportTarget, TransportType,
+    Transport, TransportCapabilities, TransportEstimate, TransportMetrics, TransportReceive,
+    TransportStatus, TransportTarget, TransportType, private,
 };
 use crate::types::SecureMessage;
 
@@ -422,12 +422,6 @@ impl Transport for DiscoveryTransport {
         }
     }
 
-    async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
-        // Discovery transport doesn't receive messages directly
-        // It provides service information for other transports to use
-        Ok(Vec::new())
-    }
-
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
         let services = self.discovered_services.read().await;
 
@@ -482,5 +476,14 @@ impl Transport for DiscoveryTransport {
 
     async fn metrics(&self) -> TransportMetrics {
         self.metrics.read().await.clone()
+    }
+}
+
+#[async_trait]
+impl TransportReceive for DiscoveryTransport {
+    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+        // Discovery transport doesn't receive messages directly
+        // It provides service information for other transports to use
+        Ok(Vec::new())
     }
 }

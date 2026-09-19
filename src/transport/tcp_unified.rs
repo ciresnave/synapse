@@ -383,12 +383,6 @@ impl Transport for TcpTransportImpl {
         self.connect_and_send(&host, port, message).await
     }
 
-    async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
-        let mut messages = self.received_messages.lock().await;
-        let result = messages.drain(..).collect();
-        Ok(result)
-    }
-
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
         let (host, port) = self.parse_target_address(target)?;
         let target_addr = format!("{}:{}", host, port);
@@ -484,6 +478,15 @@ impl Transport for TcpTransportImpl {
 
     async fn metrics(&self) -> TransportMetrics {
         self.metrics.read().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TransportReceive for TcpTransportImpl {
+    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+        let mut messages = self.received_messages.lock().await;
+        let result = messages.drain(..).collect();
+        Ok(result)
     }
 }
 

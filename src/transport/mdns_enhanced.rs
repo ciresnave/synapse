@@ -582,12 +582,6 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
         })
     }
 
-    async fn receive_messages(
-        &self,
-    ) -> crate::error::Result<Vec<crate::transport::abstraction::IncomingMessage>> {
-        Ok(vec![])
-    }
-
     async fn test_connectivity(
         &self,
         target: &crate::transport::abstraction::TransportTarget,
@@ -616,6 +610,16 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
 
     async fn metrics(&self) -> crate::transport::abstraction::TransportMetrics {
         crate::transport::abstraction::TransportMetrics::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::transport::abstraction::TransportReceive for EnhancedMdnsTransport {
+    async fn receive_raw(
+        &self,
+        _token: crate::transport::abstraction::private::Token,
+    ) -> crate::error::Result<Vec<crate::transport::abstraction::IncomingMessage>> {
+        Ok(vec![])
     }
 }
 

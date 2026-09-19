@@ -821,29 +821,6 @@ impl Transport for WebSocketTransportImpl {
         }
     }
 
-    async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
-        if !self.circuit_breaker.can_proceed().await {
-            return Ok(Vec::new()); // Return empty vec if circuit is open
-        }
-
-        let messages = self.receive_websocket_messages().await?;
-
-        if !messages.is_empty() {
-            self.circuit_breaker
-                .record_outcome(crate::circuit_breaker::RequestOutcome::Success)
-                .await;
-
-            self.update_metrics("receive", Duration::from_millis(1), true)
-                .await;
-
-            // Add messages to internal queue
-            let mut received = self.received_messages.lock().await;
-            received.extend(messages.clone());
-        }
-
-        Ok(messages)
-    }
-
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
         let start_time = Instant::now();
 
@@ -1034,5 +1011,31 @@ impl Transport for WebSocketTransportImpl {
 
     async fn metrics(&self) -> TransportMetrics {
         self.metrics.read().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TransportReceive for WebSocketTransportImpl {
+    async fn receive_raw(&self, _token: private::Token) -> Result<Vec<IncomingMessage>> {
+        if !self.circuit_breaker.can_proceed().await {
+            return Ok(Vec::new()); // Return empty vec if circuit is open
+        }
+
+        let messages = self.receive_websocket_messages().await?;
+
+        if !messages.is_empty() {
+            self.circuit_breaker
+                .record_outcome(crate::circuit_breaker::RequestOutcome::Success)
+                .await;
+
+            self.update_metrics("receive", Duration::from_millis(1), true)
+                .await;
+
+            // Add messages to internal queue
+            let mut received = self.received_messages.lock().await;
+            received.extend(messages.clone());
+        }
+
+        Ok(messages)
     }
 }

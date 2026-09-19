@@ -102,6 +102,8 @@ impl SynapseRouter {
     /// Receive messages from all transports
     /// ⚠️ Unverified: senders are not authenticated here. `TransportManager::receive_messages`
     /// pairs each message with a `SenderVerdict`.
+    /// Out of scope for the transport-contract sealing (Task 4): this is the email path, which a
+    /// later slice replaces.
     pub async fn receive_messages(&self) -> Result<Vec<SimpleMessage>> {
         let mut all_messages = Vec::new();
         // Get messages from email transport

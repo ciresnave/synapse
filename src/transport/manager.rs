@@ -660,7 +660,7 @@ impl TransportManager {
                 continue;
             }
 
-            match transport.receive_messages().await {
+            match transport.receive_raw(private::Token::new()).await {
                 Ok(mut messages) => {
                     debug!(
                         "Received {} messages from {:?}",

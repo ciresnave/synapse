@@ -4,7 +4,9 @@
 //! This module provides trait-based dependency injection for transport implementations,
 //! making the system much more testable and flexible.
 
-use super::{TransportSelector, abstraction, abstraction::Transport};
+use super::{
+    TransportSelector, abstraction, abstraction::Transport, abstraction::TransportReceive,
+};
 use crate::{config::Config, error::Result, types::SecureMessage};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -289,10 +291,6 @@ impl Transport for MockTransport {
         })
     }
 
-    async fn receive_messages(&self) -> Result<Vec<abstraction::IncomingMessage>> {
-        Ok(vec![]) // Simple mock - no messages
-    }
-
     async fn test_connectivity(
         &self,
         _target: &abstraction::TransportTarget,
@@ -320,5 +318,15 @@ impl Transport for MockTransport {
 
     async fn metrics(&self) -> abstraction::TransportMetrics {
         abstraction::TransportMetrics::default()
+    }
+}
+
+#[async_trait]
+impl TransportReceive for MockTransport {
+    async fn receive_raw(
+        &self,
+        _token: abstraction::private::Token,
+    ) -> Result<Vec<abstraction::IncomingMessage>> {
+        Ok(vec![]) // Simple mock - no messages
     }
 }

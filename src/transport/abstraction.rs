@@ -15,9 +15,80 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Sealing machinery for [`TransportReceive::receive_raw`].
+///
+/// The module and the `Token` type are both `pub`: the type must be *nameable* from anywhere
+/// (downstream crates need to spell it out in `impl TransportReceive for MyTransport`, and
+/// sibling modules inside this crate such as `manager.rs` need to name it too). What makes the
+/// token "sealed" is that it cannot be *constructed* anywhere but here: its single field is a
+/// private (non-`pub`) unit `()`, so no other module can write the struct literal `Token(())`,
+/// and its only constructor, `new`, is `pub(crate)` -- visible within this crate, invisible to
+/// downstream crates. A downstream implementor receives a `Token` as a parameter and can ignore
+/// it, but has no way to produce one to call `receive_raw` itself. This is the standard "sealed
+/// trait" / "private token" pattern: the trait is public to *implement*, private to *call*.
+pub mod private {
+    /// Nameable everywhere; constructible only inside this crate (private field, `pub(crate)`
+    /// constructor).
+    #[derive(Debug)]
+    pub struct Token(());
+
+    impl Token {
+        pub(crate) fn new() -> Self {
+            Token(())
+        }
+    }
+}
+
+/// Raw, unverified receive -- callable only by [`TransportManager`], which pairs every message
+/// with a `SenderVerdict` before handing it to applications. See the module-level docs on
+/// [`private`] for how the sealing works.
+#[async_trait]
+pub trait TransportReceive: Send + Sync {
+    /// Receive raw messages from the wire.
+    ///
+    /// ⚠️ Unverified: senders are not authenticated here. `TransportManager::receive_messages`
+    /// pairs each message with a `SenderVerdict`; that is the only public way to receive from a
+    /// transport.
+    ///
+    /// The `token` parameter exists only to make this method uncallable from outside this crate:
+    /// `private::Token` cannot be constructed anywhere else. Implementors accept and ignore it.
+    ///
+    /// A downstream crate can implement this trait for its own transport:
+    /// ```
+    /// use async_trait::async_trait;
+    /// use synapse::error::Result;
+    /// use synapse::transport::{IncomingMessage, TransportReceive};
+    ///
+    /// struct MyTransport;
+    ///
+    /// #[async_trait]
+    /// impl TransportReceive for MyTransport {
+    ///     async fn receive_raw(
+    ///         &self,
+    ///         _token: synapse::transport::abstraction::private::Token,
+    ///     ) -> Result<Vec<IncomingMessage>> {
+    ///         Ok(Vec::new())
+    ///     }
+    /// }
+    /// # fn main() {}
+    /// ```
+    ///
+    /// But it cannot call `receive_raw` itself, because it cannot construct a `Token`:
+    /// ```compile_fail
+    /// use synapse::transport::{IncomingMessage, TransportReceive};
+    ///
+    /// async fn call_it(t: &dyn TransportReceive) {
+    ///     // No public constructor for `Token` exists outside this crate, so this cannot compile.
+    ///     let _ = t.receive_raw(synapse::transport::abstraction::private::Token::new()).await;
+    /// }
+    /// # fn main() {}
+    /// ```
+    async fn receive_raw(&self, token: private::Token) -> Result<Vec<IncomingMessage>>;
+}
+
 /// Unified transport interface that all transport mechanisms must implement
 #[async_trait]
-pub trait Transport: Send + Sync {
+pub trait Transport: TransportReceive + Send + Sync {
     /// Get the transport type identifier
     fn transport_type(&self) -> TransportType;
 
@@ -36,11 +107,6 @@ pub trait Transport: Send + Sync {
         target: &TransportTarget,
         message: &SecureMessage,
     ) -> Result<DeliveryReceipt>;
-
-    /// Receive messages from this transport
-    /// ⚠️ Unverified: senders are not authenticated here. `TransportManager::receive_messages`
-    /// pairs each message with a `SenderVerdict`.
-    async fn receive_messages(&self) -> Result<Vec<IncomingMessage>>;
 
     /// Test connectivity to a target
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult>;
@@ -872,292 +938,6 @@ impl TransportFactory for HttpTransportFactory {
             return Err(crate::error::SynapseError::Config(
                 "Invalid max message size".to_string(),
             ));
-        }
-
-        Ok(())
-    }
-}
-
-/// Unified Transport Manager
-/// Manages multiple transport mechanisms and provides intelligent routing
-pub struct UnifiedTransportManager {
-    transports: HashMap<TransportType, Box<dyn Transport>>,
-    target_preferences: HashMap<String, TransportType>, // Target ID -> preferred transport
-    failover_policies: HashMap<TransportType, Vec<TransportType>>, // Failover order
-    config: UnifiedTransportConfig,
-}
-
-/// Configuration for the unified transport manager
-#[derive(Debug, Clone)]
-pub struct UnifiedTransportConfig {
-    pub default_transport: TransportType,
-    pub enable_automatic_failover: bool,
-    pub prefer_real_time_for_sync: bool,
-    pub metrics_cache_seconds: u64,
-    pub optimize_for_bandwidth: bool,
-}
-
-impl Default for UnifiedTransportConfig {
-    fn default() -> Self {
-        Self {
-            default_transport: TransportType::WebSocket,
-            enable_automatic_failover: true,
-            prefer_real_time_for_sync: true,
-            metrics_cache_seconds: 60,
-            optimize_for_bandwidth: false,
-        }
-    }
-}
-
-impl UnifiedTransportManager {
-    /// Create new transport manager
-    pub async fn new(config: UnifiedTransportConfig) -> Result<Self> {
-        let mut manager = Self {
-            transports: HashMap::new(),
-            target_preferences: HashMap::new(),
-            failover_policies: HashMap::new(),
-            config,
-        };
-
-        // Set up default failover policies
-        manager.setup_default_failover_policies();
-
-        Ok(manager)
-    }
-
-    /// Register a transport implementation
-    pub fn register_transport(&mut self, transport: Box<dyn Transport>) -> Result<()> {
-        let transport_type = transport.transport_type();
-
-        if self.transports.contains_key(&transport_type) {
-            return Err(crate::error::SynapseError::TransportError(format!(
-                "Transport already registered: {transport_type}"
-            )));
-        }
-
-        self.transports.insert(transport_type, transport);
-
-        Ok(())
-    }
-
-    /// Send a message using the best available transport
-    pub async fn send_message(
-        &self,
-        target: &TransportTarget,
-        message: &SecureMessage,
-    ) -> Result<DeliveryReceipt> {
-        // Check if we have a preferred transport for this target
-        let transport_type =
-            if let Some(preferred) = self.target_preferences.get(&target.identifier) {
-                *preferred
-            } else {
-                // No preference, try to determine best transport
-                self.determine_best_transport(target, message).await?
-            };
-
-        // Try to send with selected transport
-        if let Some(transport) = self.transports.get(&transport_type) {
-            match transport.send_message(target, message).await {
-                Ok(receipt) => {
-                    return Ok(receipt);
-                }
-                Err(err) => {
-                    // Transport failed, try failover if enabled
-                    if self.config.enable_automatic_failover {
-                        return self
-                            .try_failover_transports(target, message, transport_type)
-                            .await;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-
-        // No suitable transport found
-        Err(crate::error::SynapseError::TransportError(format!(
-            "No suitable transport found for target: {}",
-            target.identifier
-        )))
-    }
-
-    /// Try to send using failover transports
-    async fn try_failover_transports(
-        &self,
-        target: &TransportTarget,
-        message: &SecureMessage,
-        failed_transport: TransportType,
-    ) -> Result<DeliveryReceipt> {
-        if let Some(failover_list) = self.failover_policies.get(&failed_transport) {
-            for transport_type in failover_list {
-                if let Some(transport) = self.transports.get(transport_type)
-                    && transport.can_reach(target).await
-                {
-                    match transport.send_message(target, message).await {
-                        Ok(receipt) => return Ok(receipt),
-                        Err(_) => continue, // Try next failover transport
-                    }
-                }
-            }
-        }
-
-        Err(crate::error::SynapseError::TransportError(format!(
-            "All transports failed for target: {}",
-            target.identifier
-        )))
-    }
-
-    /// Determine best transport for a target and message
-    async fn determine_best_transport(
-        &self,
-        target: &TransportTarget,
-        _message: &SecureMessage,
-    ) -> Result<TransportType> {
-        // If target specifies preferred transports and we have one, use the first available
-        if !target.preferred_transports.is_empty() {
-            for preferred in &target.preferred_transports {
-                if self.transports.contains_key(preferred) {
-                    return Ok(*preferred);
-                }
-            }
-        }
-
-        // Collect metrics for all transports that can reach this target
-        let mut available_transports = Vec::new();
-
-        for (transport_type, transport) in &self.transports {
-            if transport.can_reach(target).await {
-                let metrics = transport.estimate_metrics(target).await?;
-                available_transports.push((*transport_type, metrics));
-            }
-        }
-
-        if available_transports.is_empty() {
-            return Err(crate::error::SynapseError::TransportError(format!(
-                "No transports can reach target: {}",
-                target.identifier
-            )));
-        }
-
-        // Sort by best metrics based on configuration and message
-        available_transports.sort_by(|(_, a), (_, b)| {
-            // For now, we'll use latency as the primary sorting criterion
-            // since we don't have synchronous response field on SecureMessage
-            // and real_time_capability field on TransportEstimate
-
-            // First compare by availability
-            match (a.available, b.available) {
-                (true, false) => return std::cmp::Ordering::Less,
-                (false, true) => return std::cmp::Ordering::Greater,
-                _ => {} // Both same availability, continue with other metrics
-            }
-
-            // Then by reliability
-            let reliability_cmp = b
-                .reliability
-                .partial_cmp(&a.reliability)
-                .unwrap_or(std::cmp::Ordering::Equal);
-            if reliability_cmp != std::cmp::Ordering::Equal {
-                return reliability_cmp;
-            }
-
-            // Finally by latency (lower is better)
-            a.latency
-                .partial_cmp(&b.latency)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Return the best transport
-        Ok(available_transports[0].0)
-    }
-
-    /// Set up default failover policies
-    fn setup_default_failover_policies(&mut self) {
-        // WebSocket failover
-        self.failover_policies.insert(
-            TransportType::WebSocket,
-            vec![TransportType::Http, TransportType::Email],
-        );
-
-        // HTTP failover
-        self.failover_policies.insert(
-            TransportType::Http,
-            vec![TransportType::WebSocket, TransportType::Email],
-        );
-
-        // Email failover (last resort)
-        self.failover_policies.insert(
-            TransportType::Email,
-            vec![TransportType::Http, TransportType::WebSocket],
-        );
-
-        // QUIC failover
-        self.failover_policies.insert(
-            TransportType::Quic,
-            vec![
-                TransportType::WebSocket,
-                TransportType::Http,
-                TransportType::Email,
-            ],
-        );
-    }
-
-    /// Receive messages from all transports
-    /// ⚠️ Unverified: senders are not authenticated here. `TransportManager::receive_messages`
-    /// pairs each message with a `SenderVerdict`.
-    pub async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
-        let mut all_messages = Vec::new();
-
-        for transport in self.transports.values() {
-            match transport.receive_messages().await {
-                Ok(mut messages) => all_messages.append(&mut messages),
-                Err(_) => continue, // Skip transports with errors
-            }
-        }
-
-        Ok(all_messages)
-    }
-
-    /// Receive messages from a specific transport
-    pub async fn receive_from_transport(
-        &self,
-        transport_type: TransportType,
-    ) -> Result<Vec<IncomingMessage>> {
-        if let Some(transport) = self.transports.get(&transport_type) {
-            return transport.receive_messages().await;
-        }
-
-        Err(crate::error::SynapseError::TransportError(format!(
-            "Transport not found: {transport_type}"
-        )))
-    }
-
-    /// Start all transports
-    pub async fn start_all_transports(&self) -> Result<()> {
-        for transport in self.transports.values() {
-            if let Err(e) = transport.start().await {
-                // Log the error but continue with other transports
-                tracing::error!(
-                    "Failed to start transport {}: {}",
-                    transport.transport_type(),
-                    e
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Stop all transports
-    pub async fn stop_all_transports(&self) -> Result<()> {
-        for transport in self.transports.values() {
-            if let Err(e) = transport.stop().await {
-                // Log the error but continue stopping other transports
-                tracing::error!(
-                    "Failed to stop transport {}: {}",
-                    transport.transport_type(),
-                    e
-                );
-            }
         }
 
         Ok(())
