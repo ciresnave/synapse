@@ -875,9 +875,18 @@ async fn tcp_holds_messages_past_its_queue_cap_until_polled_and_loses_none() {
 /// transport: the manager's error must carry the transport's own reason, TCP must stay Running,
 /// and the next message must go through. Before, one refusal marked TCP failed for 300 s, both
 /// directions, and the caller saw only "All transports failed".
+///
+/// `REFUSALS` refusals come first, because the manager's circuit breaker must not count them
+/// either. With the builder's default config (`TransportManagerConfig::default`, manager.rs) the
+/// breaker opens once its 60 s window holds at least `minimum_requests` (10) outcomes of which
+/// `failure_threshold` (5) are failures (`CircuitBreaker::should_trip`). So if the manager counted
+/// refusals against the breaker, the 10th would open it and the good message would be refused with
+/// "Circuit breaker is open". The breaker's own count is not observable through a public API, so
+/// what the test observes is that outcome.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_message_does_not_take_tcp_out_of_service() {
     const LIMIT: usize = 4096;
+    const REFUSALS: usize = 10;
     let pair = Pair::with_config(
         TransportType::Tcp,
         tcp(),
@@ -887,49 +896,58 @@ async fn a_refused_message_does_not_take_tcp_out_of_service() {
         &tcp_config("max_message_size", &LIMIT.to_string()),
     )
     .await;
-    let (over, over_size) = measured(&pair, LIMIT, false);
-
-    let error = match pair
-        .alice_node
-        .send_message(&pair.bob_target(), &over)
-        .await
-    {
-        Ok(receipt) => panic!(
-            "a {over_size}-byte message over the {LIMIT}-byte limit must be refused, not {:?}",
-            receipt.confirmation
-        ),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        error.contains("Tcp")
-            && error.contains("max_message_size")
-            && error.contains(&over_size.to_string()),
-        "the manager's error must carry TCP's own reason, with the size: {error}"
-    );
-    assert_eq!(
-        pair.alice_node
-            .get_transport_status()
+    for attempt in 1..=REFUSALS {
+        let (over, over_size) = measured(&pair, LIMIT, false);
+        let error = match pair
+            .alice_node
+            .send_message(&pair.bob_target(), &over)
             .await
-            .get(&TransportType::Tcp),
-        Some(&TransportStatus::Running),
-        "a refused message must not mark TCP failed"
-    );
+        {
+            Ok(receipt) => panic!(
+                "refusal {attempt}: a {over_size}-byte message over the {LIMIT}-byte limit must be                  refused, not {:?}",
+                receipt.confirmation
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            error.contains("Tcp")
+                && error.contains("max_message_size")
+                && error.contains(&over_size.to_string()),
+            "refusal {attempt}: the manager's error must carry TCP's own reason, with the size:              {error}"
+        );
+        assert_eq!(
+            pair.alice_node
+                .get_transport_status()
+                .await
+                .get(&TransportType::Tcp),
+            Some(&TransportStatus::Running),
+            "refusal {attempt}: a refused message must not mark TCP failed"
+        );
+    }
 
     let (fits, _) = measured(&pair, LIMIT, true);
     let receipt = pair
         .alice_node
         .send_message(&pair.bob_target(), &fits)
         .await
-        .expect("after a refusal, the next message must still go through TCP");
+        .expect("after the refusals, the next message must still go through TCP");
     pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
     let arrived = poll_bob(&pair, 1, Duration::from_secs(3)).await;
     assert_eq!(
         arrived.len(),
         1,
-        "the message after the refusal must arrive"
+        "the message after the refusals must arrive"
     );
     assert_eq!(arrived[0].incoming.message.message_id.0, fits.message_id.0);
     pair.assert_verified_as_alice(&arrived[0]);
+    assert_eq!(
+        pair.alice_node
+            .get_transport_status()
+            .await
+            .get(&TransportType::Tcp),
+        Some(&TransportStatus::Running),
+        "TCP must still be Running after the refusals and the good message"
+    );
 }
 
 /// Slowloris: with a connection cap of 2, two peers connect and send nothing. The first-byte

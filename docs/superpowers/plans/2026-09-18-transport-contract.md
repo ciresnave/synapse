@@ -386,6 +386,22 @@ keyed differently for TCP. Where they differ, follow the code and say so in the 
   must fail against the unfixed code. Run it against `main` first and record that it fails.
 - [ ] Commit: `fix(tcp): the public factory builds the TCP transport that can receive`.
 
+#### Breaking changes (unreleased 2.0.0), from Task 7
+
+Quote this list in PR B's body.
+
+- `SynapseError::MessageRefused` is a new variant, and `SynapseError` is not `#[non_exhaustive]`,
+  so an exhaustive `match` on it no longer compiles.
+- TCP's error for an oversize message changed from `SynapseError::TransportError` to
+  `SynapseError::MessageRefused`, and the manager no longer counts it against TCP.
+- The text of the manager's "All transports failed" error now carries each transport's reason.
+- TCP has new config keys and new defaults: `max_message_size` 1 MiB of serialized JSON,
+  `max_concurrent_connections` 64, `max_queued_bytes` 4 MiB, `first_byte_timeout_ms` and
+  `idle_timeout_ms` 5 s. An unparseable or zero value, or a `max_queued_bytes` below
+  `max_message_size` or above `u32::MAX`, is refused at construction instead of becoming the default.
+- `tcp_simple` and the `TcpTransportFactory` in `abstraction.rs` that shadowed `tcp_unified`'s
+  were removed; `synapse::transport::TcpTransportFactory` is now `tcp_unified`'s.
+
 ### Task 8: WebSocket
 
 **Files:** `src/transport/websocket_unified.rs`, `src/transport/abstraction.rs` (register the factory

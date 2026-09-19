@@ -54,14 +54,23 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > whenever the queue was busy. The fix-round commits on the same branch read each connection to EOF
 > (the sender now shuts down its write half) and wait for the queue lock. Everything the receiver
 > holds, it holds before any signature is checked. Writing `C` = `max_concurrent_connections`
-> (default 64), `M` = `max_message_size` (default 1 MiB), `B` = `max_queued_bytes` (default 16 MiB,
+> (default 64), `M` = `max_message_size` (default 1 MiB), `B` = `max_queued_bytes` (default 4 MiB,
 > counted in bytes of serialized JSON; construction refuses `B` < `M` and `B` > `u32::MAX`) and `f`
-> for the parse factor (heap per byte of JSON while parsing and after, which depends on the data: one
-> 1 MiB JSON message measured about 6.9 MB parsed, `f` ≈ 6.7 — an example, not a bound), the worst
-> case is read buffers `C × (M + 1)` plus parsed messages `B × f`: a handler takes budget for its
-> message's JSON length before parsing, and the queued message keeps it until drained, so everything
-> being parsed or queued holds at most `B` bytes of budget. With the defaults and `f` = 6.7 that is
-> about 64 MiB + 107 MiB, about 171 MiB. At `C` the accept loop waits, so later connections queue in
+> for the parse factor (heap per byte of JSON while parsing and after), the worst case is read
+> buffers `C × (M + 1 + 8 KiB)` (each handler's buffer plus its 8 KiB read chunk) plus parsed
+> messages `B × f`: a handler takes budget for its message's JSON length before parsing, and the
+> queued message keeps it until drained, so everything being parsed or queued holds at most `B`
+> bytes of budget. The sender chooses the JSON, so `f` is adversarial. Measured with a counting
+> allocator on about 1 MiB of JSON `SecureMessage`: a `routing_path` of empty strings peaks at 18.0×
+> and retains 12.0× (`Vec` capacity doubling is never shrunk); one of one-character strings peaks at
+> 9.1× and retains 6.3×, about 14× with per-allocation heap overhead; short-key `metadata` peaks at
+> 9.5× and retains 6.6×. So `f` ≈ 18 while parsing and ≈ 12 retained — the largest measured, not
+> proven maxima. With the defaults that is 64 × (1 MiB + 1 B + 8 KiB) + 4 MiB × 18 = 143,130,688
+> bytes, about 136.5 MiB at peak (112.5 MiB with everything retained at `f` = 12); the old 16 MiB
+> default would have allowed about 352.5 MiB. The bound ends where a message is drained:
+> `receive_raw` releases its budget before the manager verifies and opens it, so while the manager
+> processes a batch, up to `B × f` of drained messages sit outside the bound while the queue refills
+> another `B`, and whatever the application keeps afterwards is outside it too. At `C` the accept loop waits, so later connections queue in
 > the kernel's backlog; with the budget spent, a handler waits for budget holding its connection, so
 > an application that never polls stops the listener (backpressure) rather than losing messages. A connection is closed if it sends nothing
 > for `first_byte_timeout_ms` (default 5 s), goes silent for `idle_timeout_ms` (default 5 s), or has
@@ -84,8 +93,19 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > that timeout, not after 30 s; with a queue budget that holds two of its messages but not three and
 > no polling, four messages sent leave only two queued at the first poll, and all four arrive once
 > polling continues; a `max_queued_bytes` below `max_message_size`, above `u32::MAX`, zero or
-> unparseable fails construction. Each receipt still claims only
+> unparseable fails construction; `stop()` closes the queue budget, so handlers waiting for it
+> return and release their connection permits instead of leaking. Each receipt still claims only
 > `Sent`. Nothing here was run across machines.
+>
+> **Known gaps, not fixed in Task 7 (follow-ups):**
+> - `stop()` leaves TCP's accept loop running: it still accepts and reads connections, then drops
+>   each message at the closed budget.
+> - The manager does not drain a transport in recovery, so after one real send failure marks TCP
+>   failed, inbound TCP stalls for the 300 s recovery window.
+> - UDP (`udp_unified.rs:157`), WebSocket (`websocket_unified.rs:216`) and HTTP
+>   (`http_unified.rs:211`) still return `TransportError` for an oversize message, which counts
+>   against the transport. WebSocket and HTTP are handled in PR B Tasks 8 and 9; UDP needs its own fix.
+> - Cap `routing_path` and `metadata` lengths during deserialization, to bound `f` itself.
 
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
 undocumented construction requirements.** That single fact matters more for planning than everything
@@ -500,25 +520,24 @@ mis-read an early return as the whole body.
 > `tcp_simple.rs` is deleted, with the shadowing `TcpTransportFactory` that built it; the public
 > factory is now `tcp_unified`'s, whose receive drains a real listener's queue.
 
-#### ⚠️ NO MESSAGE'S SENDER IS EVER AUTHENTICATED, AND THE TYPE SAYS OTHERWISE
+#### ✅ UNTIL PR #37, NO MESSAGE'S SENDER WAS AUTHENTICATED, AND THE TYPE SAID OTHERWISE
 
-> **Added 2026-09-17: a fix is built, on branch `feat/sender-authentication`, not on `main`.**
-> The branch has a mandatory `sender_proof`, a pinned `TrustStore`, and receiver-computed
-> verdicts from `TransportManager::receive_messages`. The design is
-> `docs/superpowers/specs/2026-09-17-sender-authentication-design.md`. Its PR is held until
-> CireSnave answers #33 §11 Q1. **Until that PR merges, this heading remains true of `main`.**
+> **Fixed by PR #37 (P2 slice a), on `main` as `ee1bf8c`.** It added a mandatory `sender_proof`,
+> a pinned `TrustStore`, and receiver-computed verdicts from `TransportManager::receive_messages`.
+> The design is `docs/superpowers/specs/2026-09-17-sender-authentication-design.md`. The
+> measurements below describe `main` before #37.
 
-> **Added 2026-09-17: replay suppression and bounded inbound state are built, on branch
-> `feat/replay-suppression` (held, not on `main`).** `main` has neither. On that branch, unverified
-> senders are denied by default at the transport, with an opt-in setting to accept them and a
-> bounded record of who was refused. This is not sender authentication and does not change the
-> finding above: it decides whether to admit a message from a sender the transport could not
-> verify, not whether the sender is who it claims to be. Stated plainly, not as a caveat to bury:
-> the router's email path (`SynapseRouter`) remains unauthenticated both before and after this
-> branch, because it holds no trust store.
+> **Replay suppression and bounded inbound state merged as PR #42 (P2 slice e), on `main` as
+> `5ddcb07`.** Unverified senders are denied by default at the transport, with an opt-in setting to
+> accept them and a bounded record of who was refused. This is not sender authentication: it
+> decides whether to admit a message from a sender the transport could not verify, not whether the
+> sender is who it claims to be. Stated plainly, not as a caveat to bury: the router's email path
+> (`SynapseRouter`) remains unauthenticated, because it holds no trust store (`TrustStore` has no
+> hit in `src/router.rs` at `origin/main` `4df9e36`; the same query finds 9 in
+> `src/transport/manager.rs`).
 
-> **Added 2026-09-17: account keys and agent certificates are built, on branch
-> `feat/agent-certificates` (P2 slice f1, held, not on `main`).** An account holder's key signs
+> **Account keys and agent certificates merged as PR #43 (P2 slice f1), on `main` as
+> `bbd4bf0`.** An account holder's key signs
 > certificates for the agents it runs, so a receiver pins **one** account key instead of every
 > agent's own key. `TrustStore::verify_at` accepts a certificate chain rooted in a pinned account
 > key as an alternative to pinning the agent directly, checks the chain's validity window,
@@ -528,9 +547,8 @@ mis-read an early return as the whole body.
 > accepted into the trust store only when signed by a pinned account key -- a relay can deliver a
 > revocation but never forge one. **Direct per-agent pinning still works unchanged and is removed
 > in slice f2**, which is scoped to that removal plus the delegation and identity work this slice
-> deferred. This does not change the finding above: the router's email path remains
-> unauthenticated, because `SynapseRouter` holds no trust store either before or after this
-> branch.
+> deferred. The router's email path remains unauthenticated, because `SynapseRouter` holds no
+> trust store.
 
 Checked because the OverMind lane — which drives non-Claude models through MCP tools behind a
 refusal gate — asked directly whether Synapse carries a sender identity a recipient can verify
@@ -621,14 +639,15 @@ an optional identity field would be the cheap change and the wrong one.**
 FAM (being rewritten into Synapse) already has a voucher-chain design for it. Recorded so the merge
 inherits the measurement rather than the type's implication.
 
-#### 🔴 ENCRYPTION ON `main` IS NOT CONFIDENTIAL — the key travels inside the ciphertext
+#### ✅ UNTIL PR #41, ENCRYPTION ON `main` WAS NOT CONFIDENTIAL — the key travelled inside the ciphertext
 
-*Added 2026-09-17. Measured at `8edce9c1`.*
+*Added 2026-09-17. Measured at `8edce9c1`. Fixed by PR #41, on `main` as `63d4945`; everything in
+this section up to "Status" describes `main` before #41.*
 
-`CryptoManager::encrypt_message` (`crypto.rs:121`) never uses the recipient's key; it only checks
-that one is on file. `encrypt_with_aes` generates a random AES-256-GCM key and returns
-`key(32) ‖ nonce(12) ‖ ciphertext`. `decrypt_message` (`crypto.rs:161`) reads the key back out of
-those bytes and never touches a private key.
+`CryptoManager::encrypt_message` (`crypto.rs:121`) never used the recipient's key; it only checked
+that one was on file. `encrypt_with_aes` generated a random AES-256-GCM key and returned
+`key(32) ‖ nonce(12) ‖ ciphertext`. `decrypt_message` (`crypto.rs:161`) read the key back out of
+those bytes and never touched a private key.
 
 **Measured by running it.** A throwaway test (not committed) did three things:
 - created a sender and a recipient;
@@ -638,13 +657,13 @@ those bytes and never touches a private key.
 It returned `Ok("the secret")`. **Control:** the ciphertext does not contain the plaintext bytes, so
 the result is not a plaintext passthrough.
 
-⚠️ **So `SecurityLevel::Secure` gives no confidentiality.** Anyone who can read the bytes (a relay, a
-mail server, a packet capture) can read the message. The router encrypts this way on its send
-path (`router.rs:79`) and in `convert_to_secure_message` (`router.rs:223`).
+⚠️ **So, before #41, `SecurityLevel::Secure` gave no confidentiality.** Anyone who could read the
+bytes (a relay, a mail server, a packet capture) could read the message. The router encrypted this
+way on its send path (`router.rs:79`) and in `convert_to_secure_message` (`router.rs:223`).
 
 **When it arrived:** `git log -S` finds the key-in-output line was introduced by `f0f570c` (the
 2026-06-12 checkpoint). That commit replaced RSA with Ed25519, which can only sign and cannot
-encrypt. **The published 1.1.0 crate does not have this flaw:** its `crypto.rs`, read from the
+encrypt. **The published 1.1.0 crate never had this flaw:** its `crypto.rs`, read from the
 registry copy and from `7b80ca4`, encrypts to the recipient's RSA public key with PKCS#1 v1.5.
 That older scheme carries its own advisory, RUSTSEC-2023-0071 (already in the audit list). **No
 crates.io consumer has ever received the self-decrypting version.**

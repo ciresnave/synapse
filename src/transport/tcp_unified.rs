@@ -14,7 +14,7 @@
 //! | `connection_timeout_ms` | `10000` | how long `send_message` waits to connect |
 //! | [`MAX_MESSAGE_SIZE_KEY`] (`max_message_size`) | [`DEFAULT_MAX_MESSAGE_SIZE`] (1 MiB) | the largest message, **in bytes of serialized JSON**, the receiver reads and the sender sends |
 //! | [`MAX_CONCURRENT_CONNECTIONS_KEY`] (`max_concurrent_connections`) | [`DEFAULT_MAX_CONCURRENT_CONNECTIONS`] (64) | how many inbound connections are handled at once |
-//! | [`MAX_QUEUED_BYTES_KEY`] (`max_queued_bytes`) | [`DEFAULT_MAX_QUEUED_BYTES`] (16 MiB) | how many bytes of received messages, **counted as serialized JSON**, may wait for the application to poll; at least `max_message_size` and at most `u32::MAX` |
+//! | [`MAX_QUEUED_BYTES_KEY`] (`max_queued_bytes`) | [`DEFAULT_MAX_QUEUED_BYTES`] (4 MiB) | how many bytes of received messages, **counted as serialized JSON**, may wait for the application to poll; at least `max_message_size` and at most `u32::MAX` |
 //! | [`FIRST_BYTE_TIMEOUT_MS_KEY`] (`first_byte_timeout_ms`) | [`DEFAULT_FIRST_BYTE_TIMEOUT_MS`] (5000) | how long a new connection may stay silent before it is closed |
 //! | [`IDLE_TIMEOUT_MS_KEY`] (`idle_timeout_ms`) | [`DEFAULT_IDLE_TIMEOUT_MS`] (5000) | how long a connection may stay silent between two reads |
 //!
@@ -37,21 +37,32 @@
 //! Nothing below is authenticated: the receiver reads, parses and queues a message before anyone
 //! checks its signature. Write `C` for `max_concurrent_connections`, `M` for `max_message_size`,
 //! `B` for `max_queued_bytes`, and `f` for the parse factor -- the heap a `SecureMessage` takes,
-//! while it is parsed and after, per byte of its JSON. `f` depends on the data: one 1 MiB JSON
-//! message was measured parsing to about 6.9 MB, `f` ≈ 6.7, which is an example, not a bound. The
-//! worst case is the sum of:
+//! while it is parsed and after, per byte of its JSON. The sender chooses the JSON, so `f` is
+//! adversarial. Measured with a counting allocator on about 1 MiB of JSON: a `routing_path` of
+//! empty strings peaks at 18.0 and retains 12.0 (a `Vec`'s doubled capacity is never shrunk); one
+//! of one-character strings peaks at 9.1 and retains 6.3, about 14 once each allocation's heap
+//! overhead is counted; `metadata` with short keys peaks at 9.5 and retains 6.6. So take `f` ≈ 18
+//! while parsing and ≈ 12 retained -- the largest factors measured, not proven maxima. The worst
+//! case is the sum of:
 //!
-//! - **read buffers:** `C × (M + 1)` bytes. At most `C` connections are handled at once, each read
-//!   into a buffer that never reserves more than `M + 1` bytes. A handler holds its buffer while it
-//!   waits for queue budget and while it parses, and this term counts it in both.
+//! - **read buffers:** `C × (M + 1 + 8 KiB)` bytes. At most `C` connections are handled at once,
+//!   each read into a buffer that never reserves more than `M + 1` bytes, through an 8 KiB chunk
+//!   array in its handler. A handler holds its buffer while it waits for queue budget and while it
+//!   parses, and this term counts it in both.
 //! - **parsed messages:** `B × f`. Before parsing, a handler takes budget for its message's JSON
 //!   length, and the queued message keeps that budget until the application drains it. So every
 //!   message being parsed or waiting in the queue holds budget for its own raw bytes, and together
 //!   they hold at most `B`. How many connections parse at once does not change this term.
 //!
-//! With the defaults (`C` = 64, `M` = 1 MiB, `B` = 16 MiB) and `f` = 6.7 that is about
-//! 64 MiB + 107 MiB, about 171 MiB. Lower `B` to shrink the second term, and `C` or `M` to shrink
-//! the first.
+//! With the defaults (`C` = 64, `M` = 1 MiB, `B` = 4 MiB) that is 64 × (1 MiB + 1 B + 8 KiB) =
+//! 64.5 MiB + 64 B, plus 4 MiB × 18 = 72 MiB while parsing: 143,130,688 bytes, about 136.5 MiB at
+//! peak (112.5 MiB with every message parsed and retained at `f` = 12). Lower `B` to shrink the
+//! second term, and `C` or `M` to shrink the first.
+//!
+//! The bound ends where a message is drained. `receive_raw` releases a message's budget before the
+//! manager verifies and opens it, so while the manager processes a batch, up to `B × f` of drained
+//! messages sit outside the bound while the queue refills another `B`; whatever the application
+//! keeps afterwards is outside it too.
 //!
 //! # Backpressure, not loss
 //!
@@ -115,8 +126,9 @@ pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 64;
 /// `u32::MAX`.
 pub const MAX_QUEUED_BYTES_KEY: &str = "max_queued_bytes";
 
-/// The default for [`MAX_QUEUED_BYTES_KEY`]: 16 MiB of serialized JSON.
-pub const DEFAULT_MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
+/// The default for [`MAX_QUEUED_BYTES_KEY`]: 4 MiB of serialized JSON. See the module documentation
+/// for the memory this bounds.
+pub const DEFAULT_MAX_QUEUED_BYTES: usize = 4 * 1024 * 1024;
 
 /// The config key for how long, in milliseconds, a new connection may send nothing before the
 /// receiver closes it.
@@ -532,8 +544,9 @@ impl TcpTransportImpl {
         // Wait for queue budget before parsing, so a waiting handler holds only its raw bytes, not
         // the several times larger parsed message. `Limits` guarantees
         // `bytes_read <= max_message_size <= max_queued_bytes <= u32::MAX`, so the conversion
-        // cannot fail and the acquire never asks for more than the budget holds. The semaphore is
-        // never closed, so the acquire cannot fail while the transport exists.
+        // cannot fail and the acquire never asks for more than the budget holds. The acquire fails
+        // only once `stop` has closed the budget; the handler then drops the message and returns,
+        // releasing its connection permit, instead of waiting forever.
         let Ok(wanted) = u32::try_from(bytes_read) else {
             error!(
                 "Dropped TCP message from {}: {} bytes is over the queue budget's u32 limit",
@@ -873,8 +886,12 @@ impl Transport for TcpTransportImpl {
             *status = TransportStatus::Stopping;
         }
 
-        // TCP transport doesn't need explicit cleanup
-        // Connections will be closed when dropped
+        // Close the queue budget, so every handler waiting for it gets an error, drops its message
+        // and returns, releasing its connection permit, instead of waiting forever for a poll that
+        // will never come. A stopped transport is not restarted: the manager removes it and builds
+        // a new one. This does not stop the accept loop (a known gap, recorded in
+        // CAPABILITY_INVENTORY.md); a connection it accepts after this is read, then dropped here.
+        self.queue_budget.close();
 
         {
             let mut status = self.status.write().unwrap();
@@ -1022,6 +1039,92 @@ mod tests {
             .expect("read");
         assert_eq!(buffer, b"short");
         assert_eq!(buffer.capacity(), READ_CHUNK);
+    }
+
+    /// `stop` releases handlers that wait for queue budget. One message fills the budget and nobody
+    /// polls, so `WAITING` more handlers read their messages and then wait for budget, each holding
+    /// a connection permit. Nothing public shows a waiting handler, so this counts the permits: the
+    /// accept loop holds one more, taken for its next `accept`. The waiters must still hold theirs
+    /// after a pause (the pre-state: without `stop` they never return), and must release them once
+    /// `stop` closes the budget. Without the close, the permits stay taken and the test fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_releases_handlers_waiting_for_queue_budget() {
+        use crate::types::{SecureMessage, SecurityLevel};
+        const CONNECTIONS: usize = 8;
+        const WAITING: usize = 3;
+
+        let json = serde_json::to_vec(&SecureMessage::new(
+            "bob",
+            "alice",
+            Vec::new(),
+            SecurityLevel::Authenticated,
+        ))
+        .expect("serialize");
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        // A budget of exactly one message: the first fills it, and every later one waits.
+        let config = HashMap::from([
+            ("listen_port".to_string(), port.to_string()),
+            (
+                crate::network_scope::BIND_SCOPE_KEY.to_string(),
+                crate::network_scope::BindScope::Loopback
+                    .config_value()
+                    .to_string(),
+            ),
+            (MAX_MESSAGE_SIZE_KEY.to_string(), json.len().to_string()),
+            (MAX_QUEUED_BYTES_KEY.to_string(), json.len().to_string()),
+            (
+                MAX_CONCURRENT_CONNECTIONS_KEY.to_string(),
+                CONNECTIONS.to_string(),
+            ),
+        ]);
+        let transport = TcpTransportImpl::new(&config).await.expect("construct");
+        assert!(
+            transport.listener.is_some(),
+            "127.0.0.1:{port} must be bound"
+        );
+        transport.start().await.expect("start");
+
+        for _ in 0..=WAITING {
+            let mut stream = TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect");
+            stream.write_all(&json).await.expect("write");
+            stream.shutdown().await.expect("shutdown");
+        }
+
+        let permits = &transport.connection_permits;
+        let held = CONNECTIONS - 1 - WAITING;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.available_permits() != held && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            permits.available_permits(),
+            held,
+            "{WAITING} handlers must be waiting for budget, and the accept loop holding one permit"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            permits.available_permits(),
+            held,
+            "before stop, the waiting handlers must still hold their permits"
+        );
+        assert_eq!(transport.received_messages.lock().await.len(), 1);
+
+        transport.stop().await.expect("stop");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits.available_permits() != CONNECTIONS - 1 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            permits.available_permits(),
+            CONNECTIONS - 1,
+            "after stop, every waiting handler must return and release its permit"
+        );
     }
 
     /// `validate_config` applies the same rule as `new`.
