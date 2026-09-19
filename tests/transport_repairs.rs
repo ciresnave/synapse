@@ -533,9 +533,32 @@ async fn tcp_refuses_an_unparseable_or_zero_limit() {
     }
 }
 
+/// The serialized size of `message`, the unit `max_message_size` counts.
+fn wire_size(message: &SecureMessage) -> usize {
+    serde_json::to_vec(message).expect("serialize").len()
+}
+
+/// A message from Alice whose serialized size is at most `limit` (`under`) or over it, with that
+/// size. Serialized size is not a fixed function of body length -- each signature is a fresh 64
+/// bytes written as a JSON number array, so it varies by a few characters -- so each candidate is
+/// measured rather than predicted. A body of `limit` bytes serializes to about twice `limit`, and a
+/// 64-byte body to far less than a 4096-byte limit, so the margins dwarf that variation.
+fn measured(pair: &Pair, limit: usize, under: bool) -> (SecureMessage, usize) {
+    let body_len = if under { 64 } else { limit };
+    let message = pair.signed(&vec![7u8; body_len]);
+    let size = wire_size(&message);
+    assert_eq!(
+        size <= limit,
+        under,
+        "a {body_len}-byte body serialized to {size} bytes against a {limit}-byte limit; \
+         pick another candidate"
+    );
+    (message, size)
+}
+
 /// The sender refuses a message whose serialized form is over its `max_message_size`, instead of
-/// writing it and claiming `Sent` for a message a receiver with the same limit drops. The largest
-/// message that fits still crosses, so the limit is the same number on both sides.
+/// writing it and claiming `Sent` for a message a receiver with the same limit drops. A message
+/// under the limit still crosses, so both sides accept what the sender sends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tcp_refuses_at_send_a_message_over_its_limit() {
     const LIMIT: usize = 4096;
@@ -550,26 +573,8 @@ async fn tcp_refuses_at_send_a_message_over_its_limit() {
     )
     .await;
 
-    // The largest message at or under the limit, and the first one over it. Each extra body byte
-    // adds two or three serialized characters, so "over" is over by only a few bytes.
-    let mut fits = None;
-    let mut over = None;
-    for len in 0..LIMIT {
-        let message = pair.signed(&vec![7u8; len]);
-        let size = serde_json::to_vec(&message).expect("serialize").len();
-        if size <= LIMIT {
-            fits = Some((message, size));
-        } else {
-            over = Some((message, size));
-            break;
-        }
-    }
-    let (fits, fits_size) = fits.expect("some message fits the limit");
-    let (over, over_size) = over.expect("some message exceeds the limit");
-    assert!(
-        over_size - LIMIT <= 8,
-        "the refused message must be just over the limit: {over_size} bytes against {LIMIT}"
-    );
+    let (fits, fits_size) = measured(&pair, LIMIT, true);
+    let (over, over_size) = measured(&pair, LIMIT, false);
 
     // The one that fits crosses, and Bob, with the same limit, accepts it.
     let receipt = pair
@@ -690,4 +695,193 @@ async fn tcp_reads_no_more_connections_at_once_than_its_cap() {
         Payload::Plain(b"behind the cap".to_vec())
     );
     drop(second);
+}
+
+/// Poll Bob until `want` messages have arrived or `within` passes, and return what arrived.
+async fn poll_bob(pair: &Pair, want: usize, within: Duration) -> Vec<ReceivedMessage> {
+    let deadline = Instant::now() + within;
+    let mut arrived = Vec::new();
+    while arrived.len() < want && Instant::now() < deadline {
+        arrived.extend(pair.bob_node.receive_messages().await.expect("receive"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    arrived
+}
+
+/// With `max_queued_messages` = 2 and nobody polling, four messages are sent. Only two may enter
+/// the queue; the other two handlers wait for space, holding their connections, rather than being
+/// dropped. What shows the cap: the first poll, made long after all four were read, returns exactly
+/// two, because a message enters the queue only when it gets a slot and the first drain happens
+/// before any slot is freed. Without the cap all four are already queued and the first poll
+/// returns four. The later polls show nothing was lost: all four arrive, each once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_holds_messages_past_its_queue_cap_until_polled_and_loses_none() {
+    let pair = Pair::with_config(
+        TransportType::Tcp,
+        tcp(),
+        tcp(),
+        free_port(),
+        free_port(),
+        &tcp_config("max_queued_messages", "2"),
+    )
+    .await;
+    let messages: Vec<SecureMessage> = (0..4)
+        .map(|i| pair.signed(format!("queued {i}").as_bytes()))
+        .collect();
+    for message in &messages {
+        let receipt = pair
+            .alice_node
+            .send_message(&pair.bob_target(), message)
+            .await
+            .expect("the transport sends");
+        pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    }
+    // Long enough for Bob to read all four; nobody polls meanwhile.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let first = pair.bob_node.receive_messages().await.expect("receive");
+    assert_eq!(
+        first.len(),
+        2,
+        "with a queue cap of 2, the first poll must find exactly 2 queued messages"
+    );
+    let mut arrived = first;
+    arrived.extend(poll_bob(&pair, 2, Duration::from_secs(5)).await);
+
+    let sent: HashSet<String> = messages
+        .iter()
+        .map(|m| m.message_id.0.to_string())
+        .collect();
+    let mut seen = HashSet::new();
+    for message in &arrived {
+        let id = message.incoming.message.message_id.0.to_string();
+        assert!(sent.contains(&id), "message {id} was never sent");
+        assert!(seen.insert(id.clone()), "message {id} arrived twice");
+        pair.assert_verified_as_alice(message);
+    }
+    assert_eq!(
+        seen, sent,
+        "every message held back by the full queue must arrive once polling starts"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let after = pair.bob_node.receive_messages().await.expect("receive");
+    assert!(after.is_empty(), "{} extra messages arrived", after.len());
+}
+
+/// A message the transport refuses (over its size limit) is a fault of the message, not of the
+/// transport: the manager's error must carry the transport's own reason, TCP must stay Running,
+/// and the next message must go through. Before, one refusal marked TCP failed for 300 s, both
+/// directions, and the caller saw only "All transports failed".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_message_does_not_take_tcp_out_of_service() {
+    const LIMIT: usize = 4096;
+    let pair = Pair::with_config(
+        TransportType::Tcp,
+        tcp(),
+        tcp(),
+        free_port(),
+        free_port(),
+        &tcp_config("max_message_size", &LIMIT.to_string()),
+    )
+    .await;
+    let (over, over_size) = measured(&pair, LIMIT, false);
+
+    let error = match pair
+        .alice_node
+        .send_message(&pair.bob_target(), &over)
+        .await
+    {
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        error.contains("Tcp")
+            && error.contains("max_message_size")
+            && error.contains(&over_size.to_string()),
+        "the manager's error must carry TCP's own reason, with the size: {error}"
+    );
+    assert_eq!(
+        pair.alice_node
+            .get_transport_status()
+            .await
+            .get(&TransportType::Tcp),
+        Some(&TransportStatus::Running),
+        "a refused message must not mark TCP failed"
+    );
+
+    let (fits, _) = measured(&pair, LIMIT, true);
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &fits)
+        .await
+        .expect("after a refusal, the next message must still go through TCP");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    let arrived = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(
+        arrived.len(),
+        1,
+        "the message after the refusal must arrive"
+    );
+    assert_eq!(arrived[0].incoming.message.message_id.0, fits.message_id.0);
+    pair.assert_verified_as_alice(&arrived[0]);
+}
+
+/// Slowloris: with a connection cap of 2, two peers connect and send nothing. The first-byte
+/// timeout (500 ms here) closes them, so a legitimate message behind them is read within that
+/// timeout plus a margin, not after the 30 s total read timeout. That it takes at least most of the
+/// 500 ms shows the idle connections really held both permits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_closes_silent_connections_so_they_cannot_hold_every_permit() {
+    const FIRST_BYTE: Duration = Duration::from_millis(500);
+    let config = HashMap::from([
+        ("max_concurrent_connections".to_string(), "2".to_string()),
+        (
+            "first_byte_timeout_ms".to_string(),
+            FIRST_BYTE.as_millis().to_string(),
+        ),
+    ]);
+    let pair = Pair::with_config(
+        TransportType::Tcp,
+        tcp(),
+        tcp(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let bob = ("127.0.0.1", pair.bob_port);
+    let idle_one = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    let idle_two = tokio::net::TcpStream::connect(bob).await.expect("connect");
+
+    let message = pair.signed(b"behind two silent peers");
+    let start = Instant::now();
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &message)
+        .await
+        .expect("the kernel accepts the connection into the backlog");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    let arrived = poll_bob(&pair, 1, FIRST_BYTE + Duration::from_secs(3)).await;
+    let waited = start.elapsed();
+
+    assert_eq!(
+        arrived.len(),
+        1,
+        "two silent connections held both permits for {waited:?}; the message was not read \
+         within the {FIRST_BYTE:?} first-byte timeout plus 3 s"
+    );
+    assert_eq!(
+        arrived[0].incoming.message.message_id.0,
+        message.message_id.0
+    );
+    pair.assert_verified_as_alice(&arrived[0]);
+    assert!(
+        waited >= FIRST_BYTE - Duration::from_millis(150),
+        "the message arrived after {waited:?}, before the idle peers could have timed out, so \
+         they never held the permits and the test shows nothing"
+    );
+    drop((idle_one, idle_two));
 }

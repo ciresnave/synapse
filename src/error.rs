@@ -118,6 +118,13 @@ pub enum SynapseError {
 
     #[error("Signing failed: {0}")]
     Signing(String),
+
+    /// A transport refused this message because of the message itself -- for example it is over
+    /// the transport's size limit -- before touching the network. It says nothing about the
+    /// transport's health, so the transport manager does not count it toward marking the
+    /// transport failed or toward its circuit breaker.
+    #[error("Message refused: {0}")]
+    MessageRefused(String),
 }
 
 // Removed From impls for auth_framework::AuthError and auto_discovery::DiscoveryError for minimal build compatibility

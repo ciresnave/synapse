@@ -36,10 +36,10 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 | **WebSocket** | 🔴 same defect as TCP, read not run |
 | **QUIC** | 🔴 **simulation** — binds nothing, fabricates connections with a hardcoded RTT |
 
-> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** QUIC — **deleted**: `quic_unified.rs` is gone and
-> `QuicTransportFactory` refuses to construct until the QUIC slice (`5fb180f`). WebSocket — the double
+> **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** QUIC — **deleted**: `quic_unified.rs` is gone and
+> `QuicTransportFactory` refuses to construct until the QUIC slice. WebSocket — the double
 > bind is **still open**; it is fixed in PR B (plan Task 8), not PR A. PR A makes WebSocket's
-> `send_message` refuse instead of claiming a delivery (`8087c3e`). The TCP and UDP rows are unchanged
+> `send_message` refuse instead of claiming a delivery. The TCP and UDP rows are unchanged
 > by PR A.
 
 > **Status, 2026-09-18, PR B of the transport contract, Task 7 (branch `feat/transport-contract-b`, not
@@ -52,20 +52,35 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > `Sent` receipt: it did one `read` of at most 8192 bytes, so any message whose JSON was larger was
 > dropped (a 2,000 B body is about 9.2 KB of JSON), and it queued with `try_lock`, dropping the message
 > whenever the queue was busy. The fix-round commits on the same branch read each connection to EOF
-> (the sender now shuts down its write half) and wait for the queue lock. What an unauthenticated
-> peer can make the receiver hold is bounded: at most `max_concurrent_connections` connections
-> (default 64) are read at once — at the cap the accept loop waits, so later connections queue in
-> the kernel's backlog — each into a buffer of at most `max_message_size` + 1 bytes (default 1 MiB),
-> for at most 30 s. `max_message_size` counts serialized JSON bytes, not body bytes
-> (`encrypted_content` serializes as a number array, a few characters per body byte); the sender
-> refuses with an error, rather than claiming `Sent`, any message over its own limit, and
-> `capabilities()` reports the configured limit. A limit that does not parse, or is 0, fails
-> construction instead of silently becoming the default. What `tests/transport_repairs.rs` shows,
-> over loopback in one process only: a sealed, signed message with an 8-byte and with a 16 KiB body
-> arrives `Verified`, pinned to the sender's certificate, and opens intact; 400 concurrent signed
-> sends all arrive once, each pinned to the sender and carrying its own body; a message just over a
-> 4096-byte limit is refused at send while the largest one under it arrives; with a cap of 2 and two
-> connections held open, a third is read only after one closes. Each receipt still claims only
+> (the sender now shuts down its write half) and wait for the queue lock. Everything the receiver
+> holds, it holds before any signature is checked. Writing `C` = `max_concurrent_connections`
+> (default 64), `M` = `max_message_size` (default 1 MiB), `Q` = `max_queued_messages` (default 1024)
+> and `f` for the parse factor (heap per byte of JSON, which depends on the data: one 1 MiB JSON
+> message measured about 6.9 MB parsed, `f` ≈ 6.7 — an example, not a bound), the worst case is
+> read buffers `C × (M + 1)`, plus a parse peak of about `C × (1 + f) × M`, plus queued messages
+> `Q × f × M`; with the defaults and `f` = 6.7 that is about 64 MiB + 490 MiB + 6.7 GiB. At `C` the
+> accept loop waits, so later connections queue in the kernel's backlog; with `Q` messages queued, a
+> handler waits for space holding its connection, so an application that never polls stops the
+> listener (backpressure) rather than losing messages. A connection is closed if it sends nothing
+> for `first_byte_timeout_ms` (default 5 s), goes silent for `idle_timeout_ms` (default 5 s), or has
+> not ended after 30 s, so a round of `C` silent peers holds every connection for at most 5 s and a
+> round of peers trickling bytes for at most 30 s; a legitimate connection still waits behind every
+> connection queued ahead of it in the backlog. `max_message_size` counts serialized JSON bytes,
+> not body bytes (`encrypted_content` serializes as a number array, a few characters per body byte);
+> the sender refuses (`SynapseError::MessageRefused`), rather than claiming `Sent`, any message over
+> its own limit, and `capabilities()` reports the configured limit. The manager does not count a
+> refusal against the transport: before, one oversize send marked TCP failed for 300 s, receive
+> included. When every transport fails, the manager's error now carries each transport's own
+> reason. A limit or timeout that does not parse, or is 0, fails construction instead of silently
+> becoming the default. What `tests/transport_repairs.rs` shows, over loopback in one process only:
+> a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`, pinned to the
+> sender's certificate, and opens intact; 400 concurrent signed sends all arrive once, each pinned
+> to the sender and carrying its own body; a message over a 4096-byte limit is refused at send
+> while one under it arrives; after such a refusal TCP stays `Running` and the next message
+> arrives; with a cap of 2 and two connections held open, a third is read only after one closes;
+> with two silent connections and a 500 ms first-byte timeout, a message behind them arrives after
+> that timeout, not after 30 s; with a queue cap of 2 and no polling, four messages sent leave only
+> two queued at the first poll, and all four arrive once polling continues. Each receipt still claims only
 > `Sent`. Nothing here was run across machines.
 
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
@@ -201,12 +216,12 @@ not an infrastructure problem; it is the test doing its job. It took 8.08s, whic
 timeout path is involved. **Deliberately not fixed** — it is a behaviour question, and the code that
 owns it may not survive the merge.
 
-> **Status, 2026-09-18: fixed in PR A of the transport contract (branch `design/transport-contract`, not yet on `main`) (`a258703`, `2a4dd9f`).** `email_simple.rs` had three
+> **Status, 2026-09-18: fixed in PR A of the transport contract (PR #44, on `main` as `b6a1904`).** `email_simple.rs` had three
 > disagreeing address checks; `test_connectivity` required only an `@`, so `invalid@` passed as
 > `connected: true`. One validator (`valid_address`) now serves all three, and the transport, which
 > touches no network, refuses to send, receive or report a connection for a well-formed address
 > ("not implemented yet; it arrives in the email slice") instead of faking one.
-> `transport_error_handling_test` passes; the full run at `593f1c9` shows 0 failures.
+> `transport_error_handling_test` passes; the full run at `593f1c9`, a commit of PR #44 before its squash, shows 0 failures.
 
 ### 2.2 ⚠️ END-TO-END ROUND TRIP: MEASURED, AND IT FAILS WHILE REPORTING SUCCESS
 
@@ -400,12 +415,12 @@ networking at all.** `quic_unified.rs:415` constructs `Delivered` — a stronger
 `Sent` — with the comment *"QUIC provides delivery confirmation"*, in a module that binds nothing and
 fabricates its connections (§2.2). **The simulation out-claims every real transport.**
 
-> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** `quic_unified.rs` is **deleted** and QUIC refuses to
-> construct (`5fb180f`). The other `Delivered` claims named in the control above are gone too:
-> `mdns_enhanced.rs`'s send refuses (`9d4b543`), and `providers.rs`'s is the test mock, marked as a
+> **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** `quic_unified.rs` is **deleted** and QUIC refuses to
+> construct. The other `Delivered` claims named in the control above are gone too:
+> `mdns_enhanced.rs`'s send refuses, and `providers.rs`'s is the test mock, marked as a
 > test double. `tests/delivery_claims.rs` now scans `src/transport/` so every `Delivered`
 > construction names its protocol event and only the manager constructs `Acknowledged` or `Expired`
-> (`9d4b543`, `8087c3e`, `593f1c9`).
+> (all in PR #44).
 
 **Not fixed here.** A receiver-derived acknowledgement is a protocol addition, not a repair, and it
 is precisely the kind of decision the pending merge should make deliberately. **Recorded because it
@@ -467,11 +482,11 @@ read every remaining implementation in full. **The rows shown are the ones I rea
 unmeasured, not "other".** A window is not a function, and a heuristic over a window will confidently
 mis-read an early return as the whole body.
 
-> **Status, 2026-09-18: fixed for transports in PR A of the transport contract (branch `design/transport-contract`, not yet on `main`).** The old `Transport` trait and
-> the files that never compiled are deleted (`a83c4d5`), and a transport's receive is now one
+> **Status, 2026-09-18: fixed for transports in PR A of the transport contract (PR #44, on `main` as `b6a1904`).** The old `Transport` trait and
+> the files that never compiled are deleted, and a transport's receive is now one
 > signature, `TransportReceive::receive_raw(&self, &mut RawInbox)`, which only the manager can call
-> (`fad7277`, `11cfddf`). `git grep -nE 'fn receive_messages\b' -- '*.rs'` finds 25 definitions in
-> 23 files at `origin/main` `624c62d` and 3 at `593f1c9`: `TransportManager::receive_messages`
+> (all in PR #44). `git grep -nE 'fn receive_messages\b' -- '*.rs'` finds 25 definitions in
+> 23 files at `origin/main` `624c62d` and 3 at `593f1c9` (a commit of PR #44 before its squash): `TransportManager::receive_messages`
 > (`manager.rs:653`), and the unrelated `email.rs:162` and `router.rs:109`, which are not transports.
 > Of the semantics above, the two cloning implementations (`production_http`, `quic_unified`) are
 > deleted; `discovery` still adds nothing, `email_simple` now refuses, and `tcp_simple` added nothing
@@ -781,10 +796,9 @@ nothing, while `quinn` is present in `Cargo.lock`. Its own comments say so:
 orphaned `src/transport/quic.rs` (740 lines, §5.3) *does* contain a real `endpoint.accept()` loop —
 **the working-looking implementation is the one excluded from the build.**
 
-> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** `quic_unified` — **deleted**, and QUIC refuses to
-> construct (`5fb180f`). `websocket_unified`'s double bind — **still open**, fixed in PR B (plan Task
-> 8), not PR A; PR A only makes its send refuse (`8087c3e`). The orphaned `quic.rs` is deleted too
-> (`a83c4d5`).
+> **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** `quic_unified` — **deleted**, and QUIC refuses to
+> construct. `websocket_unified`'s double bind — **still open**, fixed in PR B (plan Task
+> 8), not PR A; PR A only makes its send refuse. The orphaned `quic.rs` is deleted too.
 
 **Still unmeasured end-to-end:** UDP, WebSocket, QUIC, HTTP, email. The table above is a reading of
 `start_server` in each, not a round trip. **`udp_unified` being structurally sound is not a claim that
@@ -812,7 +826,7 @@ a prompt is **raised**; event 2099 (by `dllhost`) is written when someone answer
 - **The fix:** `src/network_scope.rs` makes `BindScope::Loopback` the default, and listening on all
   interfaces must be configured (see README, "Network exposure").
   `tests/loopback_by_default.rs` guards the source.
-- **Acceptance:** a full `cargo test --no-fail-fast` in a fresh target directory (0 prompts raised between 09:13:34Z and 09:34:37Z at 002f762e; the same query finds 128 prompt events (64 prompts) in the pre-fix window).
+- **Acceptance:** a full `cargo test --no-fail-fast` in a fresh target directory (0 prompts raised between 09:13:34Z and 09:34:37Z at 002f762e, a commit of PR #40, on `main` as squash `05eee3c`; the same query finds 128 prompt events (64 prompts) in the pre-fix window).
 
 ### 2.3 What "verified" does and does not mean here
 
@@ -897,7 +911,7 @@ signal.**
 
 #### Update after the formatting fix: the pipeline advanced one step, and stopped again
 
-Run `34371759050`, head `54c2596`, after `src/wasm.rs` was removed and `cargo fmt` applied:
+Run `34371759050`, head `54c2596` (a commit of PR #10, on `main` as squash `9f63707`), after `src/wasm.rs` was removed and `cargo fmt` applied:
 
 ```
  8  Check formatting          SUCCESS   <- first time in this repository's history
@@ -914,7 +928,7 @@ CI runs `cargo clippy -- -D warnings`, so **31 ordinary style and dead-code lint
 errors** — 6 × "this `if` statement can be collapsed", 3 × "this operation has no effect", 2 ×
 "`map_or` can be simplified", plus unused imports, unused variables and never-read fields.
 
-**They are not introduced by this pass.** Clippy at `7579b56` (before the `cargo fmt` commit) and at
+**They are not introduced by this pass.** Clippy at `7579b56` (PR #10's first commit, before the `cargo fmt` commit) and at
 `HEAD` both report *"could not compile `synapse` (lib) due to 31 previous errors"*, and a diff of the
 two lint-kind sets is **empty**. `cargo fmt` introduced zero lints.
 
@@ -1150,8 +1164,7 @@ project's name.**
 - It only goes one way: `discovery.rs` never reads TXT records back (`txt_records: HashMap::new()`).
   Not fixed here. The merge decides what the key should mean.
 
-> **Status, 2026-09-18: fixed in PR A of the transport contract (branch `design/transport-contract`,
-> not yet on `main`) (`06f33a6`).** No `version` key is advertised any more: `discovery.rs` and both
+> **Status, 2026-09-18: fixed in PR A of the transport contract (PR #44, on `main` as `b6a1904`).** No `version` key is advertised any more: `discovery.rs` and both
 > `mdns_enhanced` advertisements carry `synapse_protocol=1` (the signed wire `protocol_version`), and
 > `mdns_enhanced`'s reader reads that key. The crate version is no longer advertised.
 
