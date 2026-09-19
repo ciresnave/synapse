@@ -389,14 +389,13 @@ Two further observations, recorded because they mislead:
 **Limits: single process, loopback, one message, one direction.** UDP is also inherently lossy and
 capped at 65507 bytes (`max_message_size` default). **This is a working link, not a reliable one.**
 
-#### ⚠️ EVERY DELIVERY CONFIRMATION SYNAPSE PRODUCES IS SENDER-SIDE
+#### ✅ UNTIL PR #38, EVERY DELIVERY CONFIRMATION SYNAPSE PRODUCED WAS SENDER-SIDE
 
-> **Added 2026-09-17: a receiver-derived acknowledgement is built, on branch `feat/receiver-ack`
-> (stacked on `feat/sender-authentication`, and held with it), not on `main`.** The receiving
-> application sends a signed ack after processing. The sender reaches `Acknowledged` only on a
+> **Fixed by PR #38 (P2 slice b), on `main` as `71388eb`: a receiver-derived acknowledgement.** The
+> receiving application sends a signed ack after processing. The sender reaches `Acknowledged` only on a
 > verified, matching ack, and the unused `Received` variant is removed. Design:
-> `docs/superpowers/specs/2026-09-17-receiver-acknowledgement-design.md`. **Until that branch
-> merges, this heading remains true of `main`.**
+> `docs/superpowers/specs/2026-09-17-receiver-acknowledgement-design.md`. What follows describes
+> `main` before #38.
 
 Checked because the FAM lane, whose fabric is being rewritten into Synapse, handed over a measured
 requirement — *"the ack must belong to the receiver"* — after their own system marked a message
@@ -678,12 +677,11 @@ waits on the rest of the 2.0 set and on CireSnave's approval.
 
 #### What this means for a non-Rust agent runtime
 
-> **Added 2026-09-17: an MCP stdio surface is built, on branch `feat/mcp-surface` (stacked on
-> `feat/receiver-ack` and `feat/sender-authentication`, and held with them), not on `main`.**
+> **An MCP stdio surface: PR #39 (P2 slice c), on `main` as `a9dd1d1`.**
 > It is the `synapse-mcp` binary. Any MCP client, in any language, can `send`, `poll`, `list` and
 > `ack` through synapse, and gets sender verdicts and receiver acknowledgement. Keys and peers can
 > only be changed in the config file. Design: `docs/superpowers/specs/2026-09-17-mcp-surface-design.md`.
-> **`main` has no agent-facing surface until that branch merges.**
+> Before #39, `main` had no agent-facing surface.
 
 | direction | status |
 |---|---|
