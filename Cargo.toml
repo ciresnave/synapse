@@ -84,8 +84,8 @@ config = { version = "0.15.13", optional = true }
 
 # Networking - optional
 reqwest = { version = "0.12.22", features = ["json"], optional = true }
-tokio-tungstenite = { version = "0.27.0", optional = true }
-tungstenite = { version = "0.27.0", optional = true }
+tokio-tungstenite = { version = "0.30.0", optional = true }
+tungstenite = { version = "0.30.0", optional = true }
 futures-util = { version = "0.3", optional = true }
 
 # NAT traversal dependencies for real implementation

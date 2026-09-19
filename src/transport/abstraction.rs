@@ -803,7 +803,9 @@ impl TransportFactory for MdnsTransportFactory {
     }
 }
 
-// WebSocket Transport Factory (RE-ENABLED)
+/// Factory for the WebSocket transport (`websocket_unified`). The config keys, their defaults, and
+/// what the limits bound are in that module's documentation; `create_transport` and
+/// `validate_config` refuse the same invalid values.
 pub struct WebSocketTransportFactory;
 
 #[async_trait]
@@ -822,22 +824,34 @@ impl TransportFactory for WebSocketTransportFactory {
     }
 
     fn default_config(&self) -> HashMap<String, String> {
-        let mut config = HashMap::new();
-        config.insert("local_port".to_string(), "0".to_string());
-        config.insert("connection_timeout_ms".to_string(), "30000".to_string());
-        config.insert("max_message_size".to_string(), "16777216".to_string()); // 16MB
-        config
+        use crate::transport::websocket_unified as ws;
+        [
+            (ws::LOCAL_PORT_KEY, 0),
+            (
+                ws::CONNECTION_TIMEOUT_MS_KEY,
+                ws::DEFAULT_CONNECTION_TIMEOUT_MS,
+            ),
+            // In bytes of serialized JSON, the unit sender and receiver both enforce.
+            (ws::MAX_MESSAGE_SIZE_KEY, ws::DEFAULT_MAX_MESSAGE_SIZE),
+            (
+                ws::MAX_CONCURRENT_CONNECTIONS_KEY,
+                ws::DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+            ),
+            (ws::MAX_QUEUED_BYTES_KEY, ws::DEFAULT_MAX_QUEUED_BYTES),
+            (
+                ws::HANDSHAKE_TIMEOUT_MS_KEY,
+                ws::DEFAULT_HANDSHAKE_TIMEOUT_MS,
+            ),
+            (ws::IDLE_TIMEOUT_MS_KEY, ws::DEFAULT_IDLE_TIMEOUT_MS),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
     }
 
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(port_str) = config.get("local_port")
-            && port_str.parse::<u16>().is_err()
-        {
-            return Err(crate::error::SynapseError::Config(
-                "Invalid port number".to_string(),
-            ));
-        }
-        Ok(())
+        // The same check `new` applies, so validating and constructing cannot disagree.
+        crate::transport::websocket_unified::validate_config(config)
     }
 }
 

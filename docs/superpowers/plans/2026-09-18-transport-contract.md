@@ -12,7 +12,7 @@ deletions, honesty, the sealed receive, `protocol_version`, and the email valida
 green. **PR B (Tasks 7–10)** is the four repairs, each proven by an end-to-end test over a real loopback
 socket. Task 11 verifies and opens each PR.
 
-**Tech Stack:** Rust, `tokio`, `tokio-tungstenite` 0.27 (already a dependency), `reqwest` (already),
+**Tech Stack:** Rust, `tokio`, `tokio-tungstenite` (already a dependency; moved from 0.27 to the latest, 0.30, in Task 8), `reqwest` (already),
 and **one new dependency, `axum`**, for a real HTTP server — `Cargo.toml` has none today. Per
 CireSnave's standing rule it is added at its latest published version, under the existing `http`
 feature.
@@ -420,6 +420,43 @@ just a `WebSocketConnection` record, per connection.
 - [ ] **Test:** `websocket_carries_a_verified_message_end_to_end`. Control: record that it fails
   before the double-bind fix, because the accept loop never starts.
 - [ ] Commit: `fix(websocket): bind once, perform the real handshake, and receive`.
+
+**As built:** one message per connection, as for TCP, rather than a connection kept open per peer: a
+kept-open connection needs a stored write half per peer, reconnects and idle expiry, and a write into
+a connection whose peer has silently died still "succeeds" into the local buffer, which would weaken
+`Sent`. The receipt is `Sent` once the frame is written and flushed; there is no application-level
+ack, so never `Delivered`. The limits, keys and memory-bound formula are TCP's (the module doc of
+`websocket_unified.rs` states them), with a handshake timeout in place of TCP's first-byte timeout.
+
+#### Breaking changes (unreleased 2.0.0), from Task 8
+
+Quote this list in PR B's body, with Task 7's.
+
+- WebSocket's `send_message` sends instead of refusing. Its receipt claims `Sent`, never `Delivered`.
+- The wire format is one JSON `SecureMessage` in one binary frame per connection, after a real
+  HTTP-upgrade handshake; the receiver drops a text message, and a second message on one connection.
+- WebSocket's error for an oversize message changed from `SynapseError::TransportError` to
+  `SynapseError::MessageRefused`, returned before connecting, and the manager no longer counts it
+  against WebSocket.
+- `max_message_size`'s default fell from 16 MiB to 1 MiB of serialized JSON, and it now also sets
+  tungstenite's `max_message_size` and `max_frame_size`. New keys: `max_concurrent_connections` 64,
+  `max_queued_bytes` 4 MiB, `handshake_timeout_ms` and `idle_timeout_ms` 5 s.
+  `connection_timeout_ms` (still 30 s) now bounds the connect and handshake, and then the write.
+- An unparseable or zero limit or timeout, a `local_port` that is not a port number, or a
+  `max_queued_bytes` below `max_message_size` or above `u32::MAX`, is refused at construction, and by
+  `WebSocketTransportFactory::validate_config`, instead of silently becoming the default.
+  `validate_config` used to check `local_port` only. `default_config` returns every key.
+- A target must carry an address that is a `ws://` URL or `host:port`. An identifier-only target, a
+  missing port (the default was 8080), and `http://`, `https://` and `wss://` addresses are refused;
+  `can_reach` says so without touching the network. `wss://` needs TLS, and this build has none.
+- `start()` sets the status to `Failed` when its bind fails (it used to stay `Starting`), and a second
+  `start()` on the same instance is an error.
+- `test_connectivity` and `estimate_metrics` perform a real handshake with the target. They report
+  connected, available and a round-trip time only when it completes. `metrics()` reports real
+  counts, and a `reliability_score` of successful sends over attempts (0 before any attempt).
+- `capabilities()` reports the configured `max_message_size`, `encrypted: false`, and the features
+  `http_upgrade`, `binary_frames` and `one_message_per_connection`.
+- `tokio-tungstenite` and `tungstenite` moved from 0.27.0 to 0.30.0. No public API names their types.
 
 ### Task 9: HTTP
 

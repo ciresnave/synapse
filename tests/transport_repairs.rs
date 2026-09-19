@@ -431,10 +431,18 @@ async fn tcp_carries_a_large_verified_message() {
 /// (300 sealed messages took 19 s in one run here, against about 5 s signed only).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn tcp_loses_no_message_under_concurrent_sends() {
-    const N: usize = 400;
-    let pair =
-        Arc::new(Pair::new(TransportType::Tcp, tcp(), tcp(), free_port(), free_port()).await);
-    let messages: Vec<SecureMessage> = (0..N)
+    loses_no_message_under_concurrent_sends(TransportType::Tcp, tcp, 400).await;
+}
+
+/// Send `n` signed messages from Alice to Bob over `kind` at once, while Bob polls, and check that
+/// every one arrives exactly once, Verified, with the body it was sent with.
+async fn loses_no_message_under_concurrent_sends(
+    kind: TransportType,
+    factory: fn() -> Box<dyn TransportFactory>,
+    n: usize,
+) {
+    let pair = Arc::new(Pair::new(kind, factory(), factory(), free_port(), free_port()).await);
+    let messages: Vec<SecureMessage> = (0..n)
         .map(|i| pair.signed(format!("concurrent {i}").as_bytes()))
         .collect();
     // Each message id with the body it carries, so every arrival is checked against its own body.
@@ -442,15 +450,15 @@ async fn tcp_loses_no_message_under_concurrent_sends() {
         .iter()
         .map(|m| (m.message_id.0.to_string(), m.encrypted_content.clone()))
         .collect();
-    assert_eq!(sent.len(), N, "message ids must be distinct");
+    assert_eq!(sent.len(), n, "message ids must be distinct");
 
     let poller = {
         let pair = Arc::clone(&pair);
         tokio::spawn(async move {
             let mut received = Vec::new();
-            // Generous for a slow CI runner: a passing run returns as soon as all N arrive.
+            // Generous for a slow CI runner: a passing run returns as soon as all n arrive.
             let deadline = Instant::now() + Duration::from_secs(60);
-            while received.len() < N && Instant::now() < deadline {
+            while received.len() < n && Instant::now() < deadline {
                 received.extend(pair.bob_node.receive_messages().await.expect("receive"));
                 tokio::task::yield_now().await;
             }
@@ -492,9 +500,9 @@ async fn tcp_loses_no_message_under_concurrent_sends() {
     }
     assert_eq!(
         received.len(),
-        N,
-        "{} of {N} concurrently sent messages were lost",
-        N - received.len()
+        n,
+        "{} of {n} concurrently sent messages were lost",
+        n - received.len()
     );
     tokio::time::sleep(Duration::from_millis(200)).await;
     let after = pair.bob_node.receive_messages().await.expect("receive");
@@ -1005,4 +1013,404 @@ async fn tcp_closes_silent_connections_so_they_cannot_hold_every_permit() {
          they never held the permits and the test shows nothing"
     );
     drop((idle_one, idle_two));
+}
+
+// ---------------------------------------------------------------------------------------------
+// WebSocket (plan Task 8): one message per connection, over a real handshake.
+// ---------------------------------------------------------------------------------------------
+
+fn ws() -> Box<dyn TransportFactory> {
+    Box::new(synapse::transport::WebSocketTransportFactory)
+}
+
+/// A config naming `key` = `value`, for any transport.
+fn one_key(key: &str, value: &str) -> HashMap<String, String> {
+    HashMap::from([(key.to_string(), value.to_string())])
+}
+
+/// Before the repair, `send_message` refused ("not implemented yet"), and behind the refusal
+/// `start` bound twice, so the accept loop never ran, and the handshake was skipped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_carries_a_verified_message_end_to_end() {
+    let (received, receipt) = round_trip(
+        TransportType::WebSocket,
+        ws(),
+        ws(),
+        free_port(),
+        free_port(),
+        b"repaired",
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+    assert_eq!(received.incoming.transport_type, TransportType::WebSocket);
+    assert_eq!(receipt.transport_used, TransportType::WebSocket);
+    assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
+}
+
+/// A 16 KiB body serialises to well over one 8 KiB read buffer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_carries_a_large_verified_message() {
+    let payload: Vec<u8> = (0..16 * 1024).map(|i| (i % 251) as u8).collect();
+    let (received, _receipt) = round_trip(
+        TransportType::WebSocket,
+        ws(),
+        ws(),
+        free_port(),
+        free_port(),
+        &payload,
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+    assert!(received.payload == Payload::Opened(payload));
+}
+
+/// Each message must arrive exactly once through the manager, however many times Bob polls after.
+/// `receive_raw` once put back everything it drained, but the manager's replay record drops a
+/// signed message it has seen, so this test passes even with that bug restored (checked: it did).
+/// The transport-level check is websocket_unified's `receive_raw_hands_each_message_out_once`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_delivers_each_message_once_across_polls() {
+    const K: usize = 5;
+    const EXTRA_POLLS: usize = 10;
+    let pair = Pair::new(
+        TransportType::WebSocket,
+        ws(),
+        ws(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let messages: Vec<SecureMessage> = (0..K)
+        .map(|i| pair.signed(format!("once {i}").as_bytes()))
+        .collect();
+    for message in &messages {
+        let receipt = pair
+            .alice_node
+            .send_message(&pair.bob_target(), message)
+            .await
+            .expect("the transport sends");
+        pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    }
+    let mut arrived = poll_bob(&pair, K, Duration::from_secs(5)).await;
+    let before_extra_polls = arrived.len();
+    for _ in 0..EXTRA_POLLS {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        arrived.extend(pair.bob_node.receive_messages().await.expect("receive"));
+    }
+    let mut seen = HashSet::new();
+    for message in &arrived {
+        let id = message.incoming.message.message_id.0.to_string();
+        assert!(seen.insert(id.clone()), "message {id} arrived twice");
+        pair.assert_verified_as_alice(message);
+    }
+    let sent: HashSet<String> = messages
+        .iter()
+        .map(|m| m.message_id.0.to_string())
+        .collect();
+    assert_eq!(
+        seen, sent,
+        "every message must arrive ({before_extra_polls} arrived before the extra polls)"
+    );
+    assert_eq!(arrived.len(), K, "{EXTRA_POLLS} more polls found repeats");
+}
+
+/// N = 200 connections at once, half TCP's 400: every WebSocket send costs two handshakes (the
+/// manager's `estimate_metrics` probes once before each send), so 400 would be needlessly slow in
+/// a debug build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn websocket_loses_no_message_under_concurrent_sends() {
+    loses_no_message_under_concurrent_sends(TransportType::WebSocket, ws, 200).await;
+}
+
+/// The sender refuses a message whose serialized form is over its `max_message_size` as
+/// `MessageRefused` -- a fault of the message, which the manager does not count against the
+/// transport -- and does so before connecting: the refusal comes back from a target where nothing
+/// listens, where a connect would have failed differently (the control). Ten refusals through the
+/// manager leave WebSocket Running (the manager's breaker would open at the 10th failure) and the
+/// next message goes through. Before, the refusal was a `TransportError`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_refuses_an_oversize_message_and_stays_running() {
+    const LIMIT: usize = 4096;
+    const REFUSALS: usize = 10;
+    let config = one_key("max_message_size", &LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::WebSocket,
+        ws(),
+        ws(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+
+    let alice_transport = synapse::transport::WebSocketTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("a transport with the same limit");
+    let (over, over_size) = measured(&pair, LIMIT, false);
+    let nobody =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{}", free_port()));
+    match alice_transport.send_message(&nobody, &over).await {
+        Err(synapse::SynapseError::MessageRefused(reason)) => assert!(
+            reason.contains("max_message_size")
+                && reason.contains(&over_size.to_string())
+                && reason.contains(&LIMIT.to_string()),
+            "the refusal must name the limit and both sizes: {reason}"
+        ),
+        Err(other) => panic!("a {over_size}-byte message must be MessageRefused, not {other:?}"),
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+    }
+    // Control: a message that fits, to the same nowhere, reaches the connect and fails there.
+    let (fits, _) = measured(&pair, LIMIT, true);
+    match alice_transport.send_message(&nobody, &fits).await {
+        Err(synapse::SynapseError::TransportError(_)) => {}
+        other => panic!("a message that fits must reach the connect and fail there: {other:?}"),
+    }
+
+    for attempt in 1..=REFUSALS {
+        let (over, over_size) = measured(&pair, LIMIT, false);
+        let error = match pair
+            .alice_node
+            .send_message(&pair.bob_target(), &over)
+            .await
+        {
+            Ok(receipt) => panic!(
+                "refusal {attempt}: a {over_size}-byte message must be refused, not {:?}",
+                receipt.confirmation
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            error.contains("WebSocket")
+                && error.contains("max_message_size")
+                && error.contains(&over_size.to_string()),
+            "refusal {attempt}: the manager's error must carry WebSocket's own reason: {error}"
+        );
+        assert_eq!(
+            pair.alice_node
+                .get_transport_status()
+                .await
+                .get(&TransportType::WebSocket),
+            Some(&TransportStatus::Running),
+            "refusal {attempt}: a refused message must not mark WebSocket failed"
+        );
+    }
+
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &fits)
+        .await
+        .expect("after the refusals, the next message must still go through WebSocket");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    let arrived = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(arrived.len(), 1, "only the message that fits may arrive");
+    assert_eq!(arrived[0].incoming.message.message_id.0, fits.message_id.0);
+    pair.assert_verified_as_alice(&arrived[0]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after = pair.bob_node.receive_messages().await.expect("receive");
+    assert!(after.is_empty(), "{} more messages arrived", after.len());
+}
+
+/// Refuses `config`, with an error naming `key`.
+async fn websocket_refuses(config: HashMap<String, String>, key: &str) {
+    match synapse::transport::WebSocketTransportFactory
+        .create_transport(&config)
+        .await
+    {
+        Ok(_) => panic!("{config:?} must be refused"),
+        Err(e) => assert!(
+            e.to_string().contains(key),
+            "the error for {config:?} must name {key}: {e}"
+        ),
+    }
+    assert!(
+        synapse::transport::WebSocketTransportFactory
+            .validate_config(&config)
+            .is_err(),
+        "validate_config must refuse {config:?} too"
+    );
+}
+
+/// Every limit, timeout and the port refuse a value that does not parse, or a zero, naming the
+/// key, instead of silently becoming the default; the queue budget must hold the largest message
+/// and fit a `u32`. Valid values are the positive controls. Before, `max_message_size` fell back
+/// to 16 MiB on a typo, `local_port` to 0, and there were no other limits.
+#[tokio::test]
+async fn websocket_refuses_an_invalid_config() {
+    let factory = synapse::transport::WebSocketTransportFactory;
+    for key in [
+        "max_message_size",
+        "max_concurrent_connections",
+        "connection_timeout_ms",
+        "handshake_timeout_ms",
+        "idle_timeout_ms",
+    ] {
+        for bad in ["", "abc", "0", "-1", "1MiB"] {
+            websocket_refuses(one_key(key, bad), key).await;
+        }
+        assert!(
+            factory
+                .create_transport(&one_key(key, "4096"))
+                .await
+                .is_ok(),
+            "{key} = 4096 must be accepted"
+        );
+    }
+    for bad in ["", "abc", "-1", "65536"] {
+        websocket_refuses(one_key("local_port", bad), "local_port").await;
+    }
+    assert!(
+        factory
+            .create_transport(&one_key("local_port", "0"))
+            .await
+            .is_ok()
+    );
+
+    let budget = |budget: &str, message: &str| {
+        HashMap::from([
+            ("max_queued_bytes".to_string(), budget.to_string()),
+            ("max_message_size".to_string(), message.to_string()),
+        ])
+    };
+    let over_u32 = (u64::from(u32::MAX) + 1).to_string();
+    for (b, m) in [
+        ("4095", "4096"),
+        ("0", "4096"),
+        ("abc", "4096"),
+        (over_u32.as_str(), over_u32.as_str()),
+    ] {
+        websocket_refuses(budget(b, m), "max_queued_bytes").await;
+    }
+    // Without `max_message_size`, the budget is checked against its default of 1 MiB.
+    websocket_refuses(one_key("max_queued_bytes", "4096"), "max_queued_bytes").await;
+    assert!(
+        factory
+            .create_transport(&budget("4096", "4096"))
+            .await
+            .is_ok()
+    );
+
+    websocket_refuses(one_key("bind_scope", "everywhere"), "bind_scope").await;
+    assert!(factory.validate_config(&factory.default_config()).is_ok());
+}
+
+/// Connected only after a real handshake: against Bob's node the probe completes and reports a
+/// measured round trip, and `estimate_metrics` says available; against a port where nothing
+/// listens, neither is claimed. (A listener that accepts TCP but never upgrades is covered by
+/// websocket_unified's unit test.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_reports_connectivity_only_after_a_real_handshake() {
+    let pair = Pair::new(
+        TransportType::WebSocket,
+        ws(),
+        ws(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let transport = synapse::transport::WebSocketTransportFactory
+        .create_transport(&one_key("connection_timeout_ms", "2000"))
+        .await
+        .expect("construct");
+    let live = transport
+        .test_connectivity(&pair.bob_target())
+        .await
+        .expect("connectivity");
+    assert!(live.connected, "{live:?}");
+    assert!(
+        live.rtt.is_some(),
+        "a completed handshake is a measured round trip"
+    );
+    assert!(
+        transport
+            .estimate_metrics(&pair.bob_target())
+            .await
+            .expect("estimate")
+            .available
+    );
+
+    let nobody =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{}", free_port()));
+    let dead = transport
+        .test_connectivity(&nobody)
+        .await
+        .expect("connectivity");
+    assert!(!dead.connected, "{dead:?}");
+    assert_eq!(dead.rtt, None);
+    assert!(
+        !transport
+            .estimate_metrics(&nobody)
+            .await
+            .expect("estimate")
+            .available
+    );
+    // The probes are not messages.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        pair.bob_node
+            .receive_messages()
+            .await
+            .expect("receive")
+            .is_empty()
+    );
+}
+
+/// Slowloris, for the handshake: with a connection cap of 2, two peers connect and never send a
+/// handshake. The handshake timeout (500 ms here) closes them, so Alice's handshake, waiting in the
+/// backlog behind them, completes and her message is read within that timeout plus a margin. That
+/// it takes at least most of the 500 ms shows the silent connections really held both permits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_closes_connections_that_never_handshake() {
+    const HANDSHAKE: Duration = Duration::from_millis(500);
+    let config = HashMap::from([
+        ("max_concurrent_connections".to_string(), "2".to_string()),
+        (
+            "handshake_timeout_ms".to_string(),
+            HANDSHAKE.as_millis().to_string(),
+        ),
+    ]);
+    let pair = Pair::with_config(
+        TransportType::WebSocket,
+        ws(),
+        ws(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let bob = ("127.0.0.1", pair.bob_port);
+    let silent_one = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    let silent_two = tokio::net::TcpStream::connect(bob).await.expect("connect");
+
+    let message = pair.signed(b"behind two silent peers");
+    let start = Instant::now();
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &message)
+        .await
+        .expect("the handshake completes once the silent peers are closed");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    let arrived = poll_bob(&pair, 1, HANDSHAKE + Duration::from_secs(3)).await;
+    let waited = start.elapsed();
+
+    assert_eq!(
+        arrived.len(),
+        1,
+        "two silent connections held both permits for {waited:?}; the message was not read \
+         within the {HANDSHAKE:?} handshake timeout plus 3 s"
+    );
+    assert_eq!(
+        arrived[0].incoming.message.message_id.0,
+        message.message_id.0
+    );
+    pair.assert_verified_as_alice(&arrived[0]);
+    assert!(
+        waited >= HANDSHAKE - Duration::from_millis(150),
+        "the message arrived after {waited:?}, before the silent peers could have timed out, so \
+         they never held the permits and the test shows nothing"
+    );
+    drop((silent_one, silent_two));
 }

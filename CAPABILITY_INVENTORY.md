@@ -33,14 +33,13 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 |---|---|
 | **UDP round trip** | ✅ **DELIVERS** — payload intact, ~1 ms, via the factory path with `bind_port` set |
 | **TCP round trip** | 🔴 **SILENTLY DROPS** — `send_message` returns `Ok(confirmation: Sent)`; nothing ever arrives |
-| **WebSocket** | 🔴 same defect as TCP, read not run |
+| **WebSocket** | ✅ **DELIVERS** over loopback — a sealed, signed message arrives `Verified` and opens intact; the receipt claims `Sent` (transport contract PR B, Task 8) |
 | **QUIC** | 🔴 **simulation** — binds nothing, fabricates connections with a hardcoded RTT |
 
 > **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** QUIC — **deleted**: `quic_unified.rs` is gone and
-> `QuicTransportFactory` refuses to construct until the QUIC slice. WebSocket — the double
-> bind is **still open**; it is fixed in PR B (plan Task 8), not PR A. PR A makes WebSocket's
-> `send_message` refuse instead of claiming a delivery. The TCP and UDP rows are unchanged
-> by PR A.
+> `QuicTransportFactory` refuses to construct until the QUIC slice. PR A made WebSocket's
+> `send_message` refuse instead of claiming a delivery; PR B, Task 8 repaired it (below). The TCP
+> and UDP rows are unchanged by PR A.
 
 > **Status, 2026-09-18, PR B of the transport contract, Task 7 (branch `feat/transport-contract-b`, not
 > yet on `main`):** TCP — the public `synapse::transport::TcpTransportFactory` built `tcp_simple`, which
@@ -102,10 +101,50 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 >   each message at the closed budget.
 > - The manager does not drain a transport in recovery, so after one real send failure marks TCP
 >   failed, inbound TCP stalls for the 300 s recovery window.
-> - UDP (`udp_unified.rs:157`), WebSocket (`websocket_unified.rs:216`) and HTTP
->   (`http_unified.rs:211`) still return `TransportError` for an oversize message, which counts
->   against the transport. WebSocket and HTTP are handled in PR B Tasks 8 and 9; UDP needs its own fix.
+> - UDP (`udp_unified.rs:157`) and HTTP (`http_unified.rs:211`) still return `TransportError` for
+>   an oversize message, which counts against the transport. HTTP is handled in PR B Task 9; UDP
+>   needs its own fix. (WebSocket's refusal is `MessageRefused` since PR B, Task 8.)
 > - Cap `routing_path` and `metadata` lengths during deserialization, to bound `f` itself.
+
+> **Status, 2026-09-19, PR B of the transport contract, Task 8 (branch `feat/transport-contract-b`, not
+> yet on `main`):** WebSocket — `start()` bound a listener, stored it, then bound the same port again
+> inside the spawned accept task and swallowed that failure, so the accept loop never ran; the
+> client skipped the handshake (a bare TCP connect); `send_via_existing_connection` never wrote its
+> data; and `receive_raw` put back everything it drained, so every poll returned every message
+> again. Now `start()` binds once on the `BindScope` address (loopback by default) and the accept
+> loop serves that same listener; the server runs `tokio_tungstenite::accept_async` and the client
+> `connect_async`, a real HTTP-upgrade handshake; each message is one binary frame on its own
+> connection (as for TCP: no connection is kept per peer), and the receipt claims `Sent` once the
+> frame is written and flushed — never `Delivered`, since the receiver sends no application-level
+> acknowledgement; `receive_raw` drains. Limits are TCP's, with the same keys and defaults where
+> they overlap: `max_message_size` (1 MiB of serialized JSON, also tungstenite's message and frame
+> limit), `max_concurrent_connections` (64), `max_queued_bytes` (4 MiB, taken before parsing and
+> held until drained, closed by `stop()`), `handshake_timeout_ms` and `idle_timeout_ms` (5 s each),
+> and `connection_timeout_ms` (30 s, the sender's connect-and-handshake and write limit); an
+> unparseable or zero value, a bad `local_port`, or a `max_queued_bytes` below `max_message_size` or
+> above `u32::MAX` fails construction. The worst case an unauthenticated peer can make the receiver
+> hold is `C × (4M + 80 KiB) + B × f`, about 333 MiB at peak with the defaults and `f` = 18 — four
+> times TCP's first term, because tungstenite's frame and fragment buffers may each grow to twice
+> the message; this is an upper estimate from reading tungstenite 0.30, not a measurement. The
+> sender refuses an oversize message with `SynapseError::MessageRefused` before connecting.
+> `test_connectivity` reports connected, with the handshake's measured round trip, only after a
+> real handshake; `estimate_metrics` probes the same way and reports observed values; `metrics()`
+> counts real sends, receives and failures. `tokio-tungstenite` and `tungstenite` moved from 0.27.0
+> to 0.30.0, the latest published. What `tests/transport_repairs.rs` shows, over loopback in one
+> process only: a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`
+> and opens intact; five messages each arrive once however often Bob polls; 200 concurrent signed
+> sends all arrive once; an oversize message is `MessageRefused` even to a port where nothing
+> listens, and ten refusals through the manager leave WebSocket `Running` with the next message
+> arriving; two peers that never handshake, under a cap of 2 and a 500 ms handshake timeout, delay a
+> message behind them by that timeout, not 30 s; connectivity is reported against a live node and
+> not against a closed port, or a listener that accepts TCP but never upgrades. Nothing here was run
+> across machines.
+>
+> **Known gaps, not fixed in Task 8 (follow-ups):** as for TCP, `stop()` leaves the accept loop (and
+> so the listener) running; each send to a peer costs two handshakes through the manager, because
+> adaptive selection calls `estimate_metrics`, which probes; `wss://` is refused, since
+> `tokio-tungstenite` is built without TLS; `TransportCapabilities::websocket()` in `abstraction.rs`
+> still advertises 16 MB and WSS (the transport reports its own capabilities and does not use it).
 
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
 undocumented construction requirements.** That single fact matters more for planning than everything
@@ -499,7 +538,9 @@ once and assumes it forever will be right about one transport and wrong about th
 by reading the 12 lines following each definition and pattern-matching for `drain(` / `.clone()` /
 `Ok(vec![])`. **It produced a false positive: it classified `websocket_unified` as "always returns
 empty" because the first `Ok(Vec::new())` in its body is a circuit-breaker early return.** Reading
-the whole function shows it does call `receive_websocket_messages()` and has a real path.
+the whole function showed it did call `receive_websocket_messages()` and had a real path -- one
+that put back everything it drained, so each message repeated on every poll, until transport
+contract PR B, Task 8 made it drain.
 `websocket_unified` is **excluded** from the table above rather than reclassified, because I have not
 read every remaining implementation in full. **The rows shown are the ones I read; the others are
 unmeasured, not "other".** A window is not a function, and a heuristic over a window will confidently
@@ -778,15 +819,16 @@ not, and one of them does something worse.** Corrected by reading each `start_se
 | transport | server side | verdict |
 |---|---|---|
 | `tcp_unified` | bound, then re-bound inside `tokio::spawn`, until PR #11 (`6e8d058`, on `main`) made it serve the constructor's listener | 🔴 **defect MEASURED end-to-end** (above) at the time; fixed by #11 |
-| `websocket_unified` | **same shape** — binds at :904, stores it, then re-binds the same port at :931 inside the spawn | 🔴 **same defect, READ not run** |
+| `websocket_unified` | bound, stored it, then re-bound the same port inside the spawn, until transport contract PR B, Task 8 made `start()` bind once and serve that listener | ✅ **fixed; delivers end-to-end over loopback** (PR B, Task 8) |
 | `udp_unified` | binds once at :72, stores `Arc<UdpSocket>`, receive path uses `self.socket` | ✅ **structurally sound** — my speculation was wrong |
 | `quic_unified` | **does not bind anything** | 🔴 **simulation — see below** |
 | `http_unified` | no bind call in the file | no server side |
 | `tcp_simple` | had no bind call; the file is deleted in transport contract PR B, Task 7 | had no server side |
 
-⚠️ **`websocket_unified` is the same bug and is more silent than the TCP one.** It stores the real
-listener, then in the spawned task binds a second one on the same port and swallows the failure with
-`.ok()` — so unlike `tcp_unified` there is **no error log at all**, and the code comments admit it:
+⚠️ **`websocket_unified` had the same bug, more silently than the TCP one, until transport contract
+PR B, Task 8 fixed it.** It stored the real listener, then in the spawned task bound a second one on
+the same port and swallowed the failure with `.ok()` — so unlike `tcp_unified` there was **no error
+log at all**, and the code comments admitted it:
 
 ```rust
 tokio::spawn(async move {
@@ -817,10 +859,11 @@ orphaned `src/transport/quic.rs` (740 lines, §5.3) *does* contain a real `endpo
 **the working-looking implementation is the one excluded from the build.**
 
 > **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** `quic_unified` — **deleted**, and QUIC refuses to
-> construct. `websocket_unified`'s double bind — **still open**, fixed in PR B (plan Task
-> 8), not PR A; PR A only makes its send refuse. The orphaned `quic.rs` is deleted too.
+> construct. `websocket_unified`'s double bind — **fixed in PR B, Task 8**, which also added the real
+> handshake, send and draining receive; PR A only made its send refuse. The orphaned `quic.rs` is deleted too.
 
-**Still unmeasured end-to-end:** UDP, WebSocket, QUIC, HTTP, email. The table above is a reading of
+**Still unmeasured end-to-end:** UDP, QUIC, HTTP, email. (WebSocket is measured over loopback by
+`tests/transport_repairs.rs` since transport contract PR B, Task 8.) The table above is a reading of
 `start_server` in each, not a round trip. **`udp_unified` being structurally sound is not a claim that
 it delivers.**
 
