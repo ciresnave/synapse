@@ -34,10 +34,7 @@ fn valid_address(address: &str) -> bool {
     if local.is_empty() || domain.is_empty() {
         return false;
     }
-    match domain.split_once('.') {
-        Some((before, after)) => !before.is_empty() && !after.is_empty(),
-        None => false,
-    }
+    domain.contains('.') && domain.split('.').all(|label| !label.is_empty())
 }
 
 /// The error returned by every operation this transport cannot honestly
@@ -261,6 +258,8 @@ mod tests {
             "a@example",
             "a@.com",
             "a@example.",
+            "a@b..c",
+            "a@b.c.",
         ] {
             assert!(!valid_address(bad), "{bad} must be refused");
         }
