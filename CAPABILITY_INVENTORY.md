@@ -42,6 +42,15 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > `send_message` refuse instead of claiming a delivery (`8087c3e`). The TCP and UDP rows are unchanged
 > by PR A.
 
+> **Status, 2026-09-18, PR B of the transport contract, Task 7 (branch `feat/transport-contract-b`, not
+> yet on `main`):** TCP — the public `synapse::transport::TcpTransportFactory` built `tcp_simple`, which
+> has no listener, not `tcp_unified`: `abstraction.rs` defined a second `TcpTransportFactory` and the
+> glob re-export made it the public one. That factory and `tcp_simple.rs` are deleted, and
+> `tcp_unified::TcpTransportFactory` is re-exported by name. `tests/transport_repairs.rs`
+> (`tcp_carries_a_verified_message_end_to_end`) now sends a signed message between two managers over
+> loopback TCP and receives it `Verified`; against the old factory the same test fails at send
+> (`All transports failed`: nothing listens on the receiver's port).
+
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
 undocumented construction requirements.** That single fact matters more for planning than everything
 else in this document.
@@ -447,6 +456,10 @@ mis-read an early return as the whole body.
 > (`manager.rs:653`), and the unrelated `email.rs:162` and `router.rs:109`, which are not transports.
 > Of the semantics above, the two cloning implementations (`production_http`, `quic_unified`) are
 > deleted; `tcp_simple` and `discovery` still add nothing, and `email_simple` now refuses.
+
+> **Status, 2026-09-18, PR B Task 7 (branch `feat/transport-contract-b`, not yet on `main`):**
+> `tcp_simple.rs` is deleted, with the shadowing `TcpTransportFactory` that built it; the public
+> factory is now `tcp_unified`'s, whose receive drains a real listener's queue.
 
 #### ⚠️ NO MESSAGE'S SENDER IS EVER AUTHENTICATED, AND THE TYPE SAYS OTHERWISE
 

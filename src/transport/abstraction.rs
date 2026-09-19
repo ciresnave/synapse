@@ -689,43 +689,6 @@ pub trait TransportFactory: Send + Sync {
 
 // Factory implementations for unified transports
 
-/// TCP Transport Factory
-pub struct TcpTransportFactory;
-
-#[async_trait]
-impl TransportFactory for TcpTransportFactory {
-    async fn create_transport(
-        &self,
-        _config: &HashMap<String, String>,
-    ) -> Result<Box<dyn Transport>> {
-        let transport = crate::transport::tcp_simple::SimpleTcpTransport::new();
-        Ok(Box::new(transport))
-    }
-
-    fn transport_type(&self) -> TransportType {
-        TransportType::Tcp
-    }
-
-    fn default_config(&self) -> HashMap<String, String> {
-        let mut config = HashMap::new();
-        config.insert("listen_port".to_string(), "0".to_string());
-        config.insert("connection_timeout_ms".to_string(), "30000".to_string());
-        config.insert("max_message_size".to_string(), "1048576".to_string()); // 1MB
-        config
-    }
-
-    fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(port_str) = config.get("listen_port")
-            && port_str.parse::<u16>().is_err()
-        {
-            return Err(crate::error::SynapseError::Config(
-                "Invalid port number".to_string(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// UDP Transport Factory (temporarily disabled)
 pub struct UdpTransportFactory;
 
