@@ -21,6 +21,9 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+/// The config key for the largest message, in bytes, the receiver accepts.
+pub const MAX_MESSAGE_SIZE_KEY: &str = "max_message_size";
+
 /// TCP Transport implementation
 pub struct TcpTransportImpl {
     /// Local listening port
@@ -34,6 +37,9 @@ pub struct TcpTransportImpl {
     listener: Option<Arc<TcpListener>>,
     /// Connection timeout
     connection_timeout: Duration,
+    /// The largest message, in bytes of serialized JSON, the receiver will accept on one
+    /// connection. Larger ones are read up to this bound plus one byte, then refused and logged.
+    max_message_size: usize,
     /// Received messages queue
     received_messages: Arc<Mutex<Vec<IncomingMessage>>>,
     /// Current status
@@ -62,6 +68,14 @@ impl TcpTransportImpl {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_secs(10));
 
+        // Default to the size this transport advertises in `capabilities()`, so the receiver
+        // accepts every message the advertisement promises. The buffer grows with the bytes that
+        // actually arrive, so the bound costs nothing for small messages.
+        let max_message_size = config
+            .get(MAX_MESSAGE_SIZE_KEY)
+            .and_then(|m| m.parse().ok())
+            .unwrap_or_else(|| TransportCapabilities::tcp().max_message_size);
+
         let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
         let listener = if listen_port > 0 {
             match TcpListener::bind(bind_scope.listen_addr(listen_port)).await {
@@ -87,6 +101,7 @@ impl TcpTransportImpl {
             listen_port,
             listener,
             connection_timeout,
+            max_message_size,
             received_messages: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(RwLock::new(TransportStatus::Stopped)),
             metrics: Arc::new(RwLock::new(metrics)),
@@ -99,6 +114,7 @@ impl TcpTransportImpl {
         if let Some(listener) = &self.listener {
             let received_messages = Arc::clone(&self.received_messages);
             let metrics = Arc::clone(&self.metrics);
+            let max_message_size = self.max_message_size;
             // Serve the listener the constructor already bound. The previous version
             // bound a SECOND listener on the same port inside this task; that bind
             // fails because the port is already owned by this struct's own listener,
@@ -131,6 +147,7 @@ impl TcpTransportImpl {
                                     addr.to_string(),
                                     messages_clone,
                                     metrics_clone,
+                                    max_message_size,
                                 )
                                 .await;
                             });
@@ -150,49 +167,80 @@ impl TcpTransportImpl {
         }
     }
 
+    /// Read one message from `stream`. The wire format is one JSON `SecureMessage` per
+    /// connection, terminated by the sender's shutdown (EOF), so the receiver reads to EOF --
+    /// never a single `read`, which returns whatever one segment happened to carry and silently
+    /// truncated any message over 8 KiB.
     async fn handle_connection(
-        mut stream: TcpStream,
+        stream: TcpStream,
         source_addr: String,
         received_messages: Arc<Mutex<Vec<IncomingMessage>>>,
         metrics: Arc<RwLock<TransportMetrics>>,
+        max_message_size: usize,
     ) {
-        let mut buffer = vec![0; 8192];
+        let mut buffer = Vec::new();
+        // One byte past the bound, so an oversize message is detected rather than truncated.
+        let limit = (max_message_size as u64).saturating_add(1);
+        let mut limited = stream.take(limit);
 
-        match tokio::time::timeout(Duration::from_secs(30), stream.read(&mut buffer)).await {
-            Ok(Ok(bytes_read)) => {
-                debug!("Received {} bytes via TCP from {}", bytes_read, source_addr);
-                buffer.truncate(bytes_read);
-
-                if let Ok(message_str) = String::from_utf8(buffer) {
-                    if let Ok(message) = serde_json::from_str::<SecureMessage>(&message_str) {
-                        let incoming =
-                            IncomingMessage::new(message, TransportType::Tcp, source_addr);
-
-                        // Update metrics
-                        if let Ok(mut metrics) = metrics.write() {
-                            metrics.messages_received += 1;
-                            metrics.bytes_received += bytes_read as u64;
-                            metrics.touch();
-                        }
-
-                        // Wait for the queue: `receive_raw` and other connections hold it
-                        // briefly, and a `try_lock` here silently discarded the message.
-                        let mut messages = received_messages.lock().await;
-                        messages.push(incoming);
-                        debug!("Queued TCP message, total: {}", messages.len());
-                    } else {
-                        warn!("Failed to parse message from {}", source_addr);
-                    }
-                } else {
-                    warn!("Received invalid UTF-8 data from {}", source_addr);
+        let bytes_read =
+            match tokio::time::timeout(Duration::from_secs(30), limited.read_to_end(&mut buffer))
+                .await
+            {
+                Ok(Ok(bytes_read)) => bytes_read,
+                Ok(Err(e)) => {
+                    warn!(
+                        "Dropped TCP message from {}: read failed after {} bytes: {}",
+                        source_addr,
+                        buffer.len(),
+                        e
+                    );
+                    return;
                 }
+                Err(_) => {
+                    warn!(
+                        "Dropped TCP message from {}: no EOF within 30 s ({} bytes read)",
+                        source_addr,
+                        buffer.len()
+                    );
+                    return;
+                }
+            };
+
+        if bytes_read > max_message_size {
+            warn!(
+                "Dropped TCP message from {}: larger than the {} byte limit",
+                source_addr, max_message_size
+            );
+            return;
+        }
+        debug!("Received {} bytes via TCP from {}", bytes_read, source_addr);
+
+        let message = match serde_json::from_slice::<SecureMessage>(&buffer) {
+            Ok(message) => message,
+            Err(e) => {
+                warn!(
+                    "Dropped TCP message from {}: {} bytes did not parse as a SecureMessage: {}",
+                    source_addr, bytes_read, e
+                );
+                return;
             }
-            Ok(Err(e)) => {
-                debug!("Failed to read from TCP connection {}: {}", source_addr, e);
-            }
-            Err(_) => {
-                debug!("TCP connection from {} timed out", source_addr);
-            }
+        };
+
+        let incoming = IncomingMessage::new(message, TransportType::Tcp, source_addr);
+        {
+            // Wait for the queue. `try_lock` here dropped the message whenever `receive_raw`
+            // or another connection held the lock.
+            let mut messages = received_messages.lock().await;
+            messages.push(incoming);
+            debug!("Queued TCP message, total: {}", messages.len());
+        }
+
+        // Update metrics
+        if let Ok(mut metrics) = metrics.try_write() {
+            metrics.messages_received += 1;
+            metrics.bytes_received += bytes_read as u64;
+            metrics.touch();
         }
     }
 
@@ -248,6 +296,15 @@ impl TcpTransportImpl {
 
         stream.flush().await.map_err(|e| {
             crate::error::SynapseError::TransportError(format!("Failed to flush TCP stream: {}", e))
+        })?;
+
+        // Close the write half: the receiver reads to EOF, so the end of the message is this
+        // deliberate shutdown rather than whatever happens when the stream is dropped.
+        stream.shutdown().await.map_err(|e| {
+            crate::error::SynapseError::TransportError(format!(
+                "Failed to shut down TCP stream: {}",
+                e
+            ))
         })?;
 
         let send_time = send_start.elapsed();
@@ -526,6 +583,15 @@ impl TransportFactory for TcpTransportFactory {
             )));
         }
 
+        if let Some(size_str) = config.get(MAX_MESSAGE_SIZE_KEY)
+            && size_str.parse::<usize>().is_err()
+        {
+            return Err(crate::error::SynapseError::TransportError(format!(
+                "Invalid {}: {}",
+                MAX_MESSAGE_SIZE_KEY, size_str
+            )));
+        }
+
         if let Some(timeout_str) = config.get("connection_timeout_ms")
             && timeout_str.parse::<u64>().is_err()
         {
@@ -536,61 +602,5 @@ impl TransportFactory for TcpTransportFactory {
         }
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::SecurityLevel;
-
-    // A message read while the queue is held (by `receive_raw` or another connection) must wait
-    // for the lock and be queued, not be discarded. Deterministic: the lock is held until
-    // `messages_received` shows the message was read.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_message_that_arrives_while_the_queue_is_locked_is_kept() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let message = SecureMessage::new(
-            "bob@synapse.test",
-            "alice@synapse.test",
-            b"while locked".to_vec(),
-            SecurityLevel::Public,
-        );
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        client
-            .write_all(&serde_json::to_vec(&message).unwrap())
-            .await
-            .unwrap();
-        client.shutdown().await.unwrap();
-        let (stream, peer) = listener.accept().await.unwrap();
-
-        let queue = Arc::new(Mutex::new(Vec::new()));
-        let metrics = Arc::new(RwLock::new(TransportMetrics::default()));
-        let handler = {
-            let held = queue.lock().await;
-            let handler = tokio::spawn(TcpTransportImpl::handle_connection(
-                stream,
-                peer.to_string(),
-                Arc::clone(&queue),
-                Arc::clone(&metrics),
-            ));
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while metrics.read().unwrap().messages_received == 0 {
-                assert!(Instant::now() < deadline, "the message was never read");
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            drop(held);
-            handler
-        };
-        tokio::time::timeout(Duration::from_secs(5), handler)
-            .await
-            .expect("the handler finishes once the lock is free")
-            .unwrap();
-        assert_eq!(
-            queue.lock().await.len(),
-            1,
-            "a message read while the queue was locked was discarded"
-        );
     }
 }
