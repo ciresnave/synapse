@@ -776,10 +776,11 @@ pub struct QuicTransportFactory;
 impl TransportFactory for QuicTransportFactory {
     async fn create_transport(
         &self,
-        config: &HashMap<String, String>,
+        _config: &HashMap<String, String>,
     ) -> Result<Box<dyn Transport>> {
-        let transport = crate::transport::quic_unified::QuicTransportImpl::new(config).await?;
-        Ok(Box::new(transport))
+        Err(crate::error::SynapseError::TransportError(
+            "QUIC is not implemented yet; it arrives in the QUIC slice".to_string(),
+        ))
     }
 
     fn transport_type(&self) -> TransportType {

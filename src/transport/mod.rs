@@ -54,8 +54,6 @@ pub mod tcp_unified; // Primary TCP implementation
 #[cfg(not(target_arch = "wasm32"))]
 pub mod llm_discovery;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod quic_unified;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod router;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod websocket_unified; // Re-enable WebSocket unified implementation
@@ -615,8 +613,6 @@ pub use llm_discovery::{
 pub use mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use nat_traversal::{IceCandidate, NatTraversalTransport};
-#[cfg(not(target_arch = "wasm32"))]
-pub use quic_unified::QuicTransportImpl;
 #[cfg(not(target_arch = "wasm32"))]
 pub use router::MultiTransportRouter;
 #[cfg(not(target_arch = "wasm32"))]
