@@ -1,7 +1,6 @@
 # The Transport Contract (pre-2.0)
 
-**Status:** draft for CireSnave's review. The four decisions in §2 are his; everything else is
-proposed.
+**Status: APPROVED by CireSnave, 2026-09-18** (selecting *"Approved — write the plan and build it"*).
 **Branch:** `design/transport-contract`, from `main` at `bbd4bf0` (after P2 slices a–e and f1).
 **Precedes:** QUIC, then email (authenticated by construction), then f2 (certificates-only trust).
 **Ruled into the 2.0 set** (CireSnave, 2026-09-18, EXPECTATIONS §5.1b): *"Receiving messages needs to
@@ -207,11 +206,10 @@ fabricated `quic_unified.rs`; `tcp_simple.rs` and the shadowing `TcpTransportFac
 uncompiled files under `src/wasm/`. Each deletion is checked by building, since an uncompiled file can
 only be deleted safely once nothing refers to it.
 
-## 12. Open for CireSnave
+## 12. Decided at review
 
-1. **Is a real WASM transport pre-2.0?** It is a new build like QUIC and email (§9). Recommended: its
-   own slice, after 2.0, because nothing in the 2.0 set depends on it and it would be the first code
-   in the crate to run in a browser.
+1. **WASM — decided:** *"Its own slice, after 2.0."* Nothing in the 2.0 set depends on it. This slice
+   still deletes the six WASM files that never compile.
 2. **Everything else in this document** — the receive API (§3), the delivery claims (§4) and
    `protocol_version` on the wire (§5) — is proposed within decisions he has already made, and needs
    only his review of the spec as a whole.
