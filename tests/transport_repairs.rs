@@ -425,8 +425,8 @@ async fn tcp_carries_a_large_verified_message() {
     assert!(received.payload == Payload::Opened(payload));
 }
 
-/// Many connections at once, while Bob polls: every message must be queued, however busy the
-/// queue is when it arrives. The messages are signed but not sealed: the other two tests carry
+/// 400 messages, 32 connections at a time, while Bob polls: every message must be queued, however
+/// busy the queue is when it arrives. The messages are signed but not sealed: the other two tests carry
 /// sealing, and sealing plus opening costs tens of milliseconds per message in a debug build
 /// (300 sealed messages took 19 s in one run here, against about 5 s signed only).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -434,8 +434,18 @@ async fn tcp_loses_no_message_under_concurrent_sends() {
     loses_no_message_under_concurrent_sends(TransportType::Tcp, tcp, 400).await;
 }
 
-/// Send `n` signed messages from Alice to Bob over `kind` at once, while Bob polls, and check that
-/// every one arrives exactly once, Verified, with the body it was sent with.
+/// How many of the concurrent test's sends are in flight at once. Enough to contend for the
+/// receiver's queue lock (the old `try_lock` code lost messages under it), and well under any
+/// platform's listen backlog: the receiver takes a connection permit before each `accept`, so while
+/// its handlers hold their permits new connections wait in the kernel's backlog, and 400 connects
+/// at once overflowed it on Windows (os error 10061, 1 run in 3). That refusal is the transport
+/// being honest -- the send returns `Err` -- not a lost message; the test was wrong to expect the
+/// backlog to absorb every send at once.
+const MAX_SENDS_IN_FLIGHT: usize = 32;
+
+/// Send `n` signed messages from Alice to Bob over `kind`, [`MAX_SENDS_IN_FLIGHT`] at a time, while
+/// Bob polls, and check that every one arrives exactly once, Verified, with the body it was sent
+/// with.
 async fn loses_no_message_under_concurrent_sends(
     kind: TransportType,
     factory: fn() -> Box<dyn TransportFactory>,
@@ -466,11 +476,14 @@ async fn loses_no_message_under_concurrent_sends(
         })
     };
 
+    let in_flight = Arc::new(tokio::sync::Semaphore::new(MAX_SENDS_IN_FLIGHT));
     let sends: Vec<_> = messages
         .into_iter()
         .map(|message| {
             let pair = Arc::clone(&pair);
+            let in_flight = Arc::clone(&in_flight);
             tokio::spawn(async move {
+                let _slot = in_flight.acquire_owned().await.expect("never closed");
                 pair.alice_node
                     .send_message(&pair.bob_target(), &message)
                     .await
@@ -1114,7 +1127,8 @@ async fn websocket_delivers_each_message_once_across_polls() {
     assert_eq!(arrived.len(), K, "{EXTRA_POLLS} more polls found repeats");
 }
 
-/// N = 200 connections at once, half TCP's 400: every WebSocket send costs two handshakes (the
+/// N = 200 messages, 32 connections at a time, half TCP's 400: every WebSocket send costs two
+/// handshakes (the
 /// manager's `estimate_metrics` probes once before each send), so 400 would be needlessly slow in
 /// a debug build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -1413,4 +1427,208 @@ async fn websocket_closes_connections_that_never_handshake() {
          they never held the permits and the test shows nothing"
     );
     drop((silent_one, silent_two));
+}
+
+/// A raw WebSocket client: connect to Bob and complete the upgrade by hand, so a test controls
+/// every byte that follows.
+async fn raw_websocket_client(port: u16) -> tokio::net::TcpStream {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    stream
+        .write_all(
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await
+        .expect("write the upgrade request");
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .await
+            .expect("read the upgrade response");
+        response.push(byte[0]);
+    }
+    assert!(
+        response.starts_with(b"HTTP/1.1 101"),
+        "the upgrade must be accepted: {}",
+        String::from_utf8_lossy(&response)
+    );
+    stream
+}
+
+/// One final, masked client frame with `opcode` carrying `payload`. The mask key is zero, so the
+/// payload goes out unchanged.
+fn client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0x80 | opcode];
+    match payload.len() {
+        len if len < 126 => frame.push(0x80 | len as u8),
+        len if len <= usize::from(u16::MAX) => {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(len as u16).to_be_bytes());
+        }
+        len => {
+            frame.push(0x80 | 127);
+            frame.extend_from_slice(&(len as u64).to_be_bytes());
+        }
+    }
+    frame.extend_from_slice(&[0, 0, 0, 0]);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Wait up to `within` for the server to close `stream`: a read that returns 0 bytes or fails.
+/// Anything the server writes first is read and ignored. Returns how long the close took, or
+/// `None` if the connection was still open.
+async fn closed_within(stream: &mut tokio::net::TcpStream, within: Duration) -> Option<Duration> {
+    use tokio::io::AsyncReadExt;
+    let start = Instant::now();
+    let mut sink = [0u8; 1024];
+    tokio::time::timeout(within, async {
+        loop {
+            match stream.read(&mut sink).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .ok()
+    .map(|()| start.elapsed())
+}
+
+/// The wire format never sends Ping or Pong, so the receiver closes a connection that sends one:
+/// answering instead let one peer that pinged and never read grow the receiver's heap without
+/// limit (4 GiB in 8.4 s, measured), each ping also restarting the idle timer. With a cap of one
+/// connection and idle and handshake timeouts of 20 s, a peer that sends a Ping (then, in a second
+/// round, a Pong) must be closed within 2 s -- far sooner than any timeout could close it -- and a
+/// legitimate message sent next must get the one permit and arrive, while the raw client's socket
+/// is still held open on our side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_closes_a_peer_that_sends_a_control_frame_and_frees_its_permit() {
+    use tokio::io::AsyncWriteExt;
+    const PING: u8 = 0x9;
+    const PONG: u8 = 0xA;
+    let config = HashMap::from([
+        ("max_concurrent_connections".to_string(), "1".to_string()),
+        ("idle_timeout_ms".to_string(), "20000".to_string()),
+        ("handshake_timeout_ms".to_string(), "20000".to_string()),
+    ]);
+    let pair = Pair::with_config(
+        TransportType::WebSocket,
+        ws(),
+        ws(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    for (name, opcode) in [("Ping", PING), ("Pong", PONG)] {
+        let mut peer = raw_websocket_client(pair.bob_port).await;
+        peer.write_all(&client_frame(opcode, b"are you there"))
+            .await
+            .expect("write the control frame");
+        let closed = closed_within(&mut peer, Duration::from_secs(2)).await;
+        assert!(
+            closed.is_some(),
+            "a peer that sent a {name} must be closed at once, not held until a 20 s timeout"
+        );
+
+        let message = pair.signed(format!("after a {name}").as_bytes());
+        let receipt = pair
+            .alice_node
+            .send_message(&pair.bob_target(), &message)
+            .await
+            .unwrap_or_else(|e| panic!("the permit the {name} peer held must be free: {e}"));
+        pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+        let arrived = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+        assert_eq!(
+            arrived.len(),
+            1,
+            "the message after the {name} peer must arrive"
+        );
+        assert_eq!(
+            arrived[0].incoming.message.message_id.0,
+            message.message_id.0
+        );
+        pair.assert_verified_as_alice(&arrived[0]);
+        drop(peer);
+    }
+}
+
+/// Send `frame` to a new raw connection to Bob in `chunks` roughly equal pieces, `gap` apart. Stops
+/// at the first write that fails: a receiver that cut the connection off may reset it. Returns the
+/// connection and whether every chunk was written.
+async fn trickle(
+    port: u16,
+    frame: &[u8],
+    chunks: usize,
+    gap: Duration,
+) -> (tokio::net::TcpStream, bool) {
+    use tokio::io::AsyncWriteExt;
+    let mut peer = raw_websocket_client(port).await;
+    for (i, chunk) in frame.chunks(frame.len().div_ceil(chunks)).enumerate() {
+        if i > 0 {
+            tokio::time::sleep(gap).await;
+        }
+        if peer.write_all(chunk).await.is_err() || peer.flush().await.is_err() {
+            return (peer, false);
+        }
+    }
+    (peer, true)
+}
+
+/// `idle_timeout_ms` is a gap between reads, not a deadline for a whole message. With it at 300 ms,
+/// a message whose frame arrives in 10 chunks 100 ms apart -- about 0.9 s in all, three times the
+/// idle timeout -- must be read and delivered. Before, the timeout wrapped the read of a whole
+/// message, so a legitimate 1 MiB message on a link slower than about 210 KB/s was always cut off
+/// at the default 5 s. The control: the same kind of frame with one gap of 900 ms, three times the
+/// idle timeout, must be cut off, so the timeout is really enforced between reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_idle_timeout_is_a_gap_between_reads_not_a_deadline_for_a_message() {
+    const IDLE: Duration = Duration::from_millis(300);
+    let config = one_key("idle_timeout_ms", &IDLE.as_millis().to_string());
+    let pair = Pair::with_config(
+        TransportType::WebSocket,
+        ws(),
+        ws(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+
+    let slow = pair.signed(b"slow but steady");
+    let frame = client_frame(0x2, &serde_json::to_vec(&slow).expect("serialize"));
+    let start = Instant::now();
+    let (_peer, whole) = trickle(pair.bob_port, &frame, 10, Duration::from_millis(100)).await;
+    let took = start.elapsed();
+    let arrived = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(
+        arrived.len(),
+        1,
+        "a frame whose bytes kept coming, never more than 100 ms apart, must not be cut off by a \
+         {IDLE:?} idle timeout (every chunk written: {whole}; writing took {took:?})"
+    );
+    assert!(
+        whole && took > IDLE * 2,
+        "the frame must take well over the idle timeout to arrive, or this shows nothing: every \
+         chunk written: {whole}, in {took:?}"
+    );
+    assert_eq!(arrived[0].incoming.message.message_id.0, slow.message_id.0);
+    pair.assert_verified_as_alice(&arrived[0]);
+
+    // Control: one gap of three idle timeouts inside the frame cuts it off.
+    let stalled = pair.signed(b"stalls mid-frame");
+    let frame = client_frame(0x2, &serde_json::to_vec(&stalled).expect("serialize"));
+    let (_peer, _) = trickle(pair.bob_port, &frame, 2, IDLE * 3).await;
+    let arrived = poll_bob(&pair, 1, Duration::from_secs(1)).await;
+    assert!(
+        arrived.is_empty(),
+        "a frame that went silent for {:?} mid-way must be cut off by the {IDLE:?} idle timeout",
+        IDLE * 3
+    );
 }

@@ -417,16 +417,30 @@ the `#[allow(dead_code)]` markers Task 6 put on the now-unreachable send helpers
 repair must actually write the frame to the connection's stream, which means keeping the stream, not
 just a `WebSocketConnection` record, per connection.
 
-- [ ] **Test:** `websocket_carries_a_verified_message_end_to_end`. Control: record that it fails
-  before the double-bind fix, because the accept loop never starts.
+- [ ] **Test:** `websocket_carries_a_verified_message_end_to_end`. Control, as run: at `800d294` the
+  test fails on PR A's refusal (`send_message` refused before connecting), so it never reaches the
+  accept loop and cannot show the double bind; that control was isolated separately (control B).
 - [ ] Commit: `fix(websocket): bind once, perform the real handshake, and receive`.
 
 **As built:** one message per connection, as for TCP, rather than a connection kept open per peer: a
 kept-open connection needs a stored write half per peer, reconnects and idle expiry, and a write into
 a connection whose peer has silently died still "succeeds" into the local buffer, which would weaken
 `Sent`. The receipt is `Sent` once the frame is written and flushed; there is no application-level
-ack, so never `Delivered`. The limits, keys and memory-bound formula are TCP's (the module doc of
+ack, so never `Delivered`. The limits and keys are TCP's (the module doc of
 `websocket_unified.rs` states them), with a handshake timeout in place of TCP's first-byte timeout.
+Fix round 1 (review of `22e68c5`): the
+receiver closes a connection that sends a Ping, a Pong or any control frame but Close, and caps its
+write buffer at 64 KiB (a peer that pinged and never read grew the heap by 4 GiB in 8.4 s, measured);
+the sender's write buffer is capped at one frame of the largest message, header included;
+`idle_timeout_ms` is a gap between reads, enforced by a reader around the socket, not a deadline on
+a whole message; targets with any scheme but `ws`, an empty host, or a missing, zero or invalid port
+are refused; a failed `estimate_metrics` probe reports the connection timeout as latency, with
+confidence 0.3. The memory bound's first term is now taken from a measurement, not TCP's formula:
+about `C × (2.625M + 75 KiB) + B × f`, about 245 MiB at peak with the defaults and `f` = 18.
+The `2.625M` (a fragmented message's transient peak; 2.06 MiB held for one whole frame at `M` =
+1 MiB) and 11 KiB per connection after the handshake are measured (counting allocator, release
+build, Windows); the 64 KiB write-buffer cap and the scaling to other `M` are derived. As first
+built it stated `C × (4M + 80 KiB)`, about 333 MiB, read from tungstenite's code, which was high.
 
 #### Breaking changes (unreleased 2.0.0), from Task 8
 
@@ -446,9 +460,20 @@ Quote this list in PR B's body, with Task 7's.
   `max_queued_bytes` below `max_message_size` or above `u32::MAX`, is refused at construction, and by
   `WebSocketTransportFactory::validate_config`, instead of silently becoming the default.
   `validate_config` used to check `local_port` only. `default_config` returns every key.
-- A target must carry an address that is a `ws://` URL or `host:port`. An identifier-only target, a
-  missing port (the default was 8080), and `http://`, `https://` and `wss://` addresses are refused;
-  `can_reach` says so without touching the network. `wss://` needs TLS, and this build has none.
+- A target must carry an address that is a `ws://` URL or `host:port`, and either must name a
+  non-empty host and a port from 1 to 65535. An identifier-only target, a missing port (the default
+  was 8080; a `ws://` URL without a port is refused too), port 0 or a port over 65535, an empty
+  host, an unbracketed IPv6 host, and any scheme but `ws://` -- `http://`, `https://`, `ftp://`, and
+  `wss://` -- are refused; `can_reach` says so without touching the network. `wss://` needs TLS, and
+  this build has none. (As first built, `22e68c5` accepted `http://` and `https://` addresses and
+  dialled `ws://http://...`; fix round 1 refuses them.)
+- The receiver closes a connection, logging at `warn`, as soon as it reads a Ping, a Pong or any
+  control frame but Close; it used to answer pings. The wire format never sends them.
+- `idle_timeout_ms` is the longest gap between two reads on an inbound connection after its
+  handshake, not a deadline for each whole frame: a message whose bytes keep arriving is read up to
+  the 30 s connection lifetime. A message cut off by any timeout is logged at `warn`.
+- `estimate_metrics` on a failed probe reports the connection timeout as `latency` and a
+  `confidence` of 0.3; it reported the time the failure took, with confidence 1.0.
 - `start()` sets the status to `Failed` when its bind fails (it used to stay `Starting`), and a second
   `start()` on the same instance is an error.
 - `test_connectivity` and `estimate_metrics` perform a real handshake with the target. They report
@@ -456,7 +481,8 @@ Quote this list in PR B's body, with Task 7's.
   counts, and a `reliability_score` of successful sends over attempts (0 before any attempt).
 - `capabilities()` reports the configured `max_message_size`, `encrypted: false`, and the features
   `http_upgrade`, `binary_frames` and `one_message_per_connection`.
-- `tokio-tungstenite` and `tungstenite` moved from 0.27.0 to 0.30.0. No public API names their types.
+- `tokio-tungstenite` moved from 0.27.0 to 0.30.0. No public API names its types. The direct
+  `tungstenite` dependency is removed: nothing used it but through `tokio_tungstenite::tungstenite`.
 
 ### Task 9: HTTP
 

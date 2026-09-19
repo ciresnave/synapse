@@ -36,7 +36,7 @@
 //! | [`MAX_CONCURRENT_CONNECTIONS_KEY`] (`max_concurrent_connections`) | [`DEFAULT_MAX_CONCURRENT_CONNECTIONS`] (64) | how many inbound connections are handled at once |
 //! | [`MAX_QUEUED_BYTES_KEY`] (`max_queued_bytes`) | [`DEFAULT_MAX_QUEUED_BYTES`] (4 MiB) | how many bytes of received messages, **counted as serialized JSON**, may wait for the application to poll; at least `max_message_size` and at most `u32::MAX` |
 //! | [`HANDSHAKE_TIMEOUT_MS_KEY`] (`handshake_timeout_ms`) | [`DEFAULT_HANDSHAKE_TIMEOUT_MS`] (5000) | how long a new inbound connection may take to complete the WebSocket handshake |
-//! | [`IDLE_TIMEOUT_MS_KEY`] (`idle_timeout_ms`) | [`DEFAULT_IDLE_TIMEOUT_MS`] (5000) | how long a connection may stay silent between two frames, on either side |
+//! | [`IDLE_TIMEOUT_MS_KEY`] (`idle_timeout_ms`) | [`DEFAULT_IDLE_TIMEOUT_MS`] (5000) | on the receiver, how long an inbound connection may go without a single byte arriving, once its handshake is done (a gap between reads, not a deadline for a whole frame); on the sender, how long it waits for the receiver's close |
 //!
 //! `local_port` must parse as a port number, and every other key but `bind_scope` as a positive
 //! integer: [`WebSocketTransportImpl::new`] (and so the factory's `create_transport`) refuses
@@ -61,25 +61,32 @@
 //! as measured for TCP, take `f` ≈ 18 while parsing and ≈ 12 retained (the largest factors
 //! measured, not proven maxima). The worst case is the sum of:
 //!
-//! - **connection buffers:** `C × (4M + 80 KiB)` bytes. At most `C` connections are handled at
-//!   once. Each holds, from reading tungstenite 0.30 and `bytes` rather than from a measurement:
-//!   the handshake buffer, which tungstenite refuses to grow past 64 KiB; a frame buffer, which
-//!   starts as the 8 KiB read buffer and which tungstenite grows to hold one whole frame of at most
-//!   `M` bytes (it checks the frame's length against `max_frame_size` before reserving), and whose
-//!   growth may double, so up to `2(M + 8 KiB)`; and, for a message sent in fragments, a collector
-//!   at most `M` long whose growth may also double, up to `2M`. Once the message is read, the
-//!   handler keeps an exact-size copy (`M` at most) and drops the rest, before it waits for queue
-//!   budget and while it parses; this term counts it in both.
+//! - **connection buffers:** about `C × (2.63 M + 75 KiB)` bytes. At most `C` connections are
+//!   handled at once. What one holds was **measured**, with a counting allocator around a release
+//!   build on Windows, at `M` = 1 MiB and 16 connections at once, each sending a frame shaped to
+//!   make tungstenite 0.30's buffers grow as far as they can: above the heap each connection held
+//!   once its handshake was done, one whole frame of `M` bytes held 2.06 MiB per connection while
+//!   the handler kept it (tungstenite's frame buffer plus the handler's exact-size copy), and a
+//!   message sent in two fragments reached a transient peak of 2.63 MiB (2.625 `M`) per connection,
+//!   settling to 2.13 MiB. The heap each connection held after its handshake, with nothing sent,
+//!   was 11.0 KiB, also measured (the 8 KiB read buffer and the connection's state). **Derived, not
+//!   measured:** the write buffer adds at most [`SERVER_MAX_WRITE_BUFFER`] (64 KiB), its cap; that
+//!   the peak scales as `2.625 M` for other values of `M`, since the buffers that grow are sized
+//!   by the frame; and the handshake buffer, which tungstenite refuses to grow past 64 KiB, is not
+//!   added, because it is released before any frame is read. So each connection holds at most
+//!   about `2.625 M + 11 KiB + 64 KiB`. The earlier `4M + 80 KiB`, read from tungstenite's code
+//!   rather than measured, assumed every buffer doubled at once, which the measurement did not
+//!   show.
 //! - **parsed messages:** `B × f`. Before parsing, a handler takes budget for its message's JSON
 //!   length, and the queued message keeps that budget until the application drains it, so every
 //!   message being parsed or waiting in the queue holds budget for its own raw bytes, and together
 //!   they hold at most `B`.
 //!
-//! With the defaults (`C` = 64, `M` = 1 MiB, `B` = 4 MiB) that is 64 × (4 MiB + 80 KiB) =
-//! 261 MiB, plus 4 MiB × 18 = 72 MiB while parsing: 349,175,808 bytes, about 333 MiB at peak
-//! (309 MiB with every message parsed and retained at `f` = 12). The first term is four times
-//! TCP's because tungstenite, not this crate, sizes the frame buffers. Lower `M` or `C` to shrink
-//! it, and `B` to shrink the second.
+//! With the defaults (`C` = 64, `M` = 1 MiB, `B` = 4 MiB) that is 64 × (2.625 MiB + 75 KiB) =
+//! 172.7 MiB, plus 4 MiB × 18 = 72 MiB while parsing: 256,573,440 bytes, about 245 MiB at peak
+//! (231,407,616 bytes, about 221 MiB, with every message parsed and retained at `f` = 12). The
+//! first term is about 2.7 times TCP's (`M + 1 + 8 KiB` per connection) because tungstenite, not
+//! this crate, sizes the frame buffers. Lower `M` or `C` to shrink it, and `B` to shrink the second.
 //!
 //! The bound ends where a message is drained. `receive_raw` releases a message's budget before the
 //! manager verifies and opens it, so while the manager processes a batch, up to `B × f` of drained
@@ -100,11 +107,25 @@
 //! # Slow and silent peers
 //!
 //! An inbound connection is closed if it has not completed the handshake within
-//! `handshake_timeout_ms` of being accepted, if it sends no frame for `idle_timeout_ms`, or if it
-//! has not ended 30 s after it was accepted. So a peer that connects and sends nothing holds a
-//! permit for at most `handshake_timeout_ms` (5 s by default); one that trickles a frame (a ping,
-//! say) just inside every `idle_timeout_ms` can hold it for the full 30 s. A message whose frame
-//! arrived whole is kept even if its peer then fails to close.
+//! `handshake_timeout_ms` of being accepted, if, after the handshake, no byte arrives for
+//! `idle_timeout_ms`, or if it has not ended 30 s after it was accepted. The idle timeout is a gap
+//! between reads, as TCP's is, not a deadline for a whole frame: the socket is wrapped in a reader
+//! that fails a read with `TimedOut` once `idle_timeout_ms` has passed since the last byte arrived,
+//! so a large message on a slow link is read for as long as its bytes keep coming, up to the 30 s
+//! lifetime. So a peer that connects and sends nothing holds a permit for at most
+//! `handshake_timeout_ms` (5 s by default); one that trickles a byte just inside every
+//! `idle_timeout_ms` can hold it for the full 30 s. A message whose frame arrived whole is kept even
+//! if its peer then fails to close. A message cut off by any of these timeouts is logged at `warn`,
+//! with the bytes received after the handshake.
+//!
+//! # Control frames
+//!
+//! The wire format never sends Ping or Pong. The receiver closes a connection, and logs at `warn`,
+//! as soon as it reads a Ping, a Pong, or any control frame but Close. Answering pings instead let
+//! one peer that sends pings and never reads pile up queued pongs in the receiver's write buffer
+//! without limit (measured before the fix: 4 GiB of heap in 8.4 s from one connection), each ping
+//! also restarting the idle timer. As a second bound, the receiver's write buffer is capped at
+//! [`SERVER_MAX_WRITE_BUFFER`] (64 KiB); the only frame it ever writes is the reply to a Close.
 
 use super::abstraction::*;
 use crate::{
@@ -115,14 +136,18 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use std::{
     collections::HashMap,
+    future::Future,
+    io,
+    pin::Pin,
     sync::{
         Arc, RwLock,
         atomic::{AtomicU32, AtomicU64, Ordering},
     },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
 };
@@ -172,8 +197,9 @@ pub const HANDSHAKE_TIMEOUT_MS_KEY: &str = "handshake_timeout_ms";
 /// The default for [`HANDSHAKE_TIMEOUT_MS_KEY`].
 pub const DEFAULT_HANDSHAKE_TIMEOUT_MS: usize = 5_000;
 
-/// The config key for how long, in milliseconds, a connection may send no frame before it is
-/// closed: the receiver's wait for each frame, and the sender's wait for the receiver's close.
+/// The config key for how long, in milliseconds, an inbound connection may go without a single byte
+/// arriving, once its handshake is done, before the receiver closes it (a gap between reads, not a
+/// deadline for a whole frame); and how long the sender waits for the receiver's close.
 pub const IDLE_TIMEOUT_MS_KEY: &str = "idle_timeout_ms";
 
 /// The default for [`IDLE_TIMEOUT_MS_KEY`].
@@ -185,6 +211,16 @@ const CONNECTION_LIFETIME: Duration = Duration::from_secs(30);
 /// tungstenite's read buffer, allocated eagerly per connection. Its default is 128 KiB; the
 /// module documentation's bound assumes this size.
 const READ_BUFFER_SIZE: usize = 8 * 1024;
+
+/// The largest the receiver's write buffer may grow. The receiver writes nothing but the reply to a
+/// Close, and closes a connection that sends a Ping, so this is a second bound, not a working limit:
+/// tungstenite's default is `usize::MAX`, under which one peer that sent pings and never read made
+/// the receiver queue pongs without limit.
+pub const SERVER_MAX_WRITE_BUFFER: usize = 64 * 1024;
+
+/// The longest header a client frame can have: 2 bytes, an 8-byte extended length, and a 4-byte
+/// mask key.
+const MAX_CLIENT_FRAME_HEADER: usize = 14;
 
 /// The longest `estimate_metrics` waits for its probe handshake.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -288,8 +324,63 @@ fn ws_config(max_message_size: usize) -> WebSocketConfig {
         .max_frame_size(Some(max_message_size))
 }
 
-/// The `ws://` URL for `target`'s address: a `ws://` URL as given, or `host:port`. There is no
-/// default port, and `wss://` is refused, because this build has no TLS.
+/// The receiver's config: [`ws_config`], with every frame written straight away and the write
+/// buffer capped at [`SERVER_MAX_WRITE_BUFFER`].
+fn server_ws_config(max_message_size: usize) -> WebSocketConfig {
+    ws_config(max_message_size)
+        .write_buffer_size(0)
+        .max_write_buffer_size(SERVER_MAX_WRITE_BUFFER)
+}
+
+/// The sender's config: [`ws_config`], with the write buffer capped at exactly one frame of the
+/// largest message, header included, so a message of `max_message_size` bytes still fits.
+fn client_ws_config(max_message_size: usize) -> WebSocketConfig {
+    ws_config(max_message_size)
+        .write_buffer_size(0)
+        .max_write_buffer_size(max_message_size.saturating_add(MAX_CLIENT_FRAME_HEADER))
+}
+
+/// A refusal of `address` as a WebSocket target, saying why.
+fn bad_target(address: &str, why: &str) -> SynapseError {
+    SynapseError::TransportError(format!(
+        "WebSocket target {address:?} is refused: {why}; give a ws:// URL with a port, or host:port"
+    ))
+}
+
+/// `host:port` checked: a non-empty host and a port from 1 to 65535. The host must not contain a
+/// character that would end the authority of a URL, or `a/b:80` would dial `a` on port 80's
+/// default instead.
+fn check_authority(address: &str, authority: &str) -> Result<()> {
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return Err(bad_target(address, "it has no port"));
+    };
+    if host.is_empty() || host == "[]" {
+        return Err(bad_target(address, "its host is empty"));
+    }
+    if host.contains(['/', '?', '#', '@']) || host.chars().any(char::is_whitespace) {
+        return Err(bad_target(
+            address,
+            "its host is not a host name or address",
+        ));
+    }
+    // An IPv6 address must be bracketed, or its last group would be read as the port.
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        return Err(bad_target(address, "an IPv6 host must be in brackets"));
+    }
+    match port.parse::<u16>() {
+        Ok(0) => Err(bad_target(address, "port 0 cannot be dialled")),
+        Ok(_) => Ok(()),
+        Err(_) => Err(bad_target(
+            address,
+            &format!("its port {port:?} is not a number from 1 to 65535"),
+        )),
+    }
+}
+
+/// The `ws://` URL for `target`'s address: a `ws://` URL as given, or `host:port`. Either form must
+/// name a host and a port; no default port is guessed. Any other scheme is refused: `wss://`
+/// because this build has no TLS, and `http://`, `https://` and the rest because they are not
+/// WebSocket URLs (`http://host:80` once became `ws://http://host:80/`).
 fn ws_url(target: &TransportTarget) -> Result<String> {
     let address = target.address.as_deref().ok_or_else(|| {
         SynapseError::TransportError(format!(
@@ -297,30 +388,147 @@ fn ws_url(target: &TransportTarget) -> Result<String> {
             target.identifier
         ))
     })?;
-    if address.starts_with("wss://") {
-        return Err(SynapseError::TransportError(format!(
-            "WebSocket target {address}: wss:// is not supported, because this build of the \
-             WebSocket transport has no TLS"
-        )));
-    }
-    let url = if address.starts_with("ws://") {
-        address.to_string()
-    } else {
-        match address.rsplit_once(':') {
-            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {
-                format!("ws://{address}/")
-            }
-            _ => {
-                return Err(SynapseError::TransportError(format!(
-                    "WebSocket target {address:?} is neither a ws:// URL nor host:port"
-                )));
-            }
+    let url = match address.split_once("://") {
+        Some(("ws", rest)) => {
+            // The authority ends at the first `/`, `?` or `#`.
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            check_authority(address, authority)?;
+            address.to_string()
+        }
+        Some(("wss", _)) => {
+            return Err(SynapseError::TransportError(format!(
+                "WebSocket target {address}: wss:// is not supported, because this build of the \
+                 WebSocket transport has no TLS"
+            )));
+        }
+        Some((scheme, _)) => {
+            return Err(bad_target(
+                address,
+                &format!("{scheme}:// is not a WebSocket scheme"),
+            ));
+        }
+        None => {
+            check_authority(address, address)?;
+            format!("ws://{address}/")
         }
     };
-    Url::parse(&url).map_err(|e| {
+    let parsed = Url::parse(&url).map_err(|e| {
         SynapseError::TransportError(format!("WebSocket target {address:?} is not a URL: {e}"))
     })?;
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err(bad_target(address, "its host is empty"));
+    }
     Ok(url)
+}
+
+/// An inbound socket whose reads fail with [`io::ErrorKind::TimedOut`] once `idle` has passed with
+/// no byte arriving: a gap between reads, as TCP's `idle_timeout_ms` is, rather than a deadline on
+/// `ws.next()`, which returns only when a whole message is in and so cut off any message that took
+/// longer than `idle` to arrive, however steadily its bytes came.
+///
+/// The timer runs only once [`arm`](Self::arm) is called, after the handshake, which has its own
+/// total timeout. Each read that returns bytes restarts it. It is checked only while a read is
+/// waiting, so time the handler spends not reading never counts against the peer. tungstenite
+/// passes the error up as `Error::Io`, and the handler closes the connection.
+struct IdleTimeoutStream {
+    inner: TcpStream,
+    idle: Duration,
+    /// When the next read must have returned a byte by; `None` until armed.
+    deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// Bytes read since the timer was armed, for the log when a message is cut off. Bytes the
+    /// handshake read ahead of its end are not counted.
+    received: Arc<AtomicU64>,
+}
+
+impl IdleTimeoutStream {
+    fn new(inner: TcpStream, idle: Duration, received: Arc<AtomicU64>) -> Self {
+        Self {
+            inner,
+            idle,
+            deadline: None,
+            received,
+        }
+    }
+
+    /// Start the idle timer: from now, each read must return a byte within `idle` of the last.
+    fn arm(&mut self) {
+        self.deadline = Some(Box::pin(tokio::time::sleep(self.idle)));
+    }
+}
+
+impl AsyncRead for IdleTimeoutStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = &mut *self;
+        let before = buf.filled().len();
+        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let read = buf.filled().len() - before;
+                if read > 0
+                    && let Some(deadline) = this.deadline.as_mut()
+                {
+                    deadline
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + this.idle);
+                    this.received.fetch_add(read as u64, Ordering::Relaxed);
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => {
+                let expired = this
+                    .deadline
+                    .as_mut()
+                    .is_some_and(|deadline| deadline.as_mut().poll(cx).is_ready());
+                if expired {
+                    Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("no byte arrived for {:?}", this.idle),
+                    )))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    }
+}
+
+impl AsyncWrite for IdleTimeoutStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
+
+/// Whether `error` is [`IdleTimeoutStream`]'s timeout.
+fn is_idle_timeout(error: &tokio_tungstenite::tungstenite::Error) -> bool {
+    matches!(error, tokio_tungstenite::tungstenite::Error::Io(e) if e.kind() == io::ErrorKind::TimedOut)
 }
 
 /// Start the closing handshake on `ws` and wait, for at most `wait`, for the peer's close frame.
@@ -497,9 +705,11 @@ impl WebSocketTransportImpl {
         stream: TcpStream,
         source: &str,
         inbound: &Inbound,
+        received: &Arc<AtomicU64>,
         message: &mut Option<Vec<u8>>,
     ) {
-        let config = ws_config(inbound.max_message_size);
+        let config = server_ws_config(inbound.max_message_size);
+        let stream = IdleTimeoutStream::new(stream, inbound.idle_timeout, Arc::clone(received));
         let mut ws = match tokio::time::timeout(
             inbound.handshake_timeout,
             accept_async_with_config(stream, Some(config)),
@@ -519,24 +729,10 @@ impl WebSocketTransportImpl {
                 return;
             }
         };
+        // From here on, each read must bring a byte within `idle_timeout` of the last one.
+        ws.get_mut().arm();
         loop {
-            let next = match tokio::time::timeout(inbound.idle_timeout, ws.next()).await {
-                Ok(next) => next,
-                Err(_) => {
-                    debug!(
-                        "Closed WebSocket connection from {}: no frame within {:?} ({})",
-                        source,
-                        inbound.idle_timeout,
-                        if message.is_some() {
-                            "after its message"
-                        } else {
-                            "and no message"
-                        }
-                    );
-                    return;
-                }
-            };
-            match next {
+            match ws.next().await {
                 // The closing handshake finished, or the stream ended.
                 None => return,
                 Some(Ok(Message::Binary(bytes))) => {
@@ -562,8 +758,51 @@ impl WebSocketTransportImpl {
                 // tungstenite queues the reply to a close and sends it on the next poll, after
                 // which the stream ends.
                 Some(Ok(Message::Close(_))) => {}
-                // tungstenite answers pings itself; a raw frame is never returned while reading.
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
+                // The wire format sends no Ping or Pong. Answering them let a peer that pinged and
+                // never read pile pongs up in the write buffer, and each ping kept the connection
+                // alive; so any control frame but Close ends the connection. (A raw frame is never
+                // returned while reading; it is listed so nothing falls through.)
+                Some(Ok(control @ (Message::Ping(_) | Message::Pong(_) | Message::Frame(_)))) => {
+                    let kind = match control {
+                        Message::Ping(_) => "Ping",
+                        Message::Pong(_) => "Pong",
+                        _ => "raw",
+                    };
+                    warn!(
+                        "Closed WebSocket connection from {}: it sent a {} frame, and the wire \
+                         format has no control frames but Close ({})",
+                        source,
+                        kind,
+                        if message.is_some() {
+                            "after its message, which is kept"
+                        } else {
+                            "before any message"
+                        }
+                    );
+                    return;
+                }
+                Some(Err(e)) if is_idle_timeout(&e) => {
+                    let bytes = received.load(Ordering::Relaxed);
+                    if message.is_none() && bytes > 0 {
+                        warn!(
+                            "Cut off a WebSocket message from {}: no byte arrived for {:?}, with \
+                             {} bytes received after the handshake",
+                            source, inbound.idle_timeout, bytes
+                        );
+                    } else {
+                        debug!(
+                            "Closed WebSocket connection from {}: no byte arrived for {:?} ({})",
+                            source,
+                            inbound.idle_timeout,
+                            if message.is_some() {
+                                "after its message"
+                            } else {
+                                "and it sent nothing after the handshake"
+                            }
+                        );
+                    }
+                    return;
+                }
                 Some(Err(e)) => {
                     if message.is_some() {
                         debug!(
@@ -587,17 +826,27 @@ impl WebSocketTransportImpl {
     async fn handle_connection(stream: TcpStream, source: String, inbound: Inbound) {
         let _active = ActiveConnection::new(&inbound.active_connections);
         let mut data = None;
+        let received = Arc::new(AtomicU64::new(0));
         if tokio::time::timeout(
             CONNECTION_LIFETIME,
-            Self::read_connection(stream, &source, &inbound, &mut data),
+            Self::read_connection(stream, &source, &inbound, &received, &mut data),
         )
         .await
         .is_err()
         {
-            debug!(
-                "Closed WebSocket connection from {}: it did not end within {:?}",
-                source, CONNECTION_LIFETIME
-            );
+            let bytes = received.load(Ordering::Relaxed);
+            if data.is_none() && bytes > 0 {
+                warn!(
+                    "Cut off a WebSocket message from {}: the connection did not end within {:?}, \
+                     with {} bytes received after the handshake",
+                    source, CONNECTION_LIFETIME, bytes
+                );
+            } else {
+                debug!(
+                    "Closed WebSocket connection from {}: it did not end within {:?}",
+                    source, CONNECTION_LIFETIME
+                );
+            }
         }
         let Some(data) = data else {
             debug!(
@@ -670,7 +919,7 @@ impl WebSocketTransportImpl {
         url: &str,
         wait: Duration,
     ) -> Result<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>> {
-        let config = ws_config(self.limits.max_message_size);
+        let config = client_ws_config(self.limits.max_message_size);
         match tokio::time::timeout(wait, connect_async_with_config(url, Some(config), true)).await {
             Ok(Ok((ws, _response))) => Ok(ws),
             Ok(Err(e)) => Err(SynapseError::TransportError(format!(
@@ -841,28 +1090,35 @@ impl Transport for WebSocketTransportImpl {
         ws_url(target).is_ok()
     }
 
-    /// A real handshake with `target`, as `test_connectivity` does, bounded at 3 s. Every number
-    /// is observed: `latency` is the handshake's round trip (or the time it took to fail);
-    /// `reliability` is the share of this transport's sends that succeeded, counting this probe
-    /// as one attempt; `bandwidth` is bytes sent per second spent sending, or 1 until a send has
-    /// been measured (the manager's score takes its log, so 1 counts for nothing and 0 would be
-    /// minus infinity). `cost` is the same relative unit TCP reports.
+    /// A real handshake with `target`, as `test_connectivity` does, bounded at 3 s. When it
+    /// completes, `latency` is its measured round trip and `confidence` is 1. When it fails, the
+    /// target is reported unavailable, with `latency` equal to the connection timeout (as TCP
+    /// reports its 30 s) rather than the time the failure took, which would read as a fast link,
+    /// and a low `confidence` of 0.3, TCP's. `reliability` is the share of this transport's sends
+    /// that succeeded, counting this probe as one attempt; `bandwidth` is bytes sent per second
+    /// spent sending, or 1 until a send has been measured -- no figure is invented (the manager's
+    /// score takes its log, so 1 counts for nothing and 0 would be minus infinity). `cost` is the
+    /// same relative unit TCP reports.
     async fn estimate_metrics(&self, target: &TransportTarget) -> Result<TransportEstimate> {
         let url = ws_url(target)?;
         let wait = self.limits.connection_timeout.min(PROBE_TIMEOUT);
-        let start = Instant::now();
         let probe = self.probe(&url, wait).await;
         let (sent, failures, bandwidth) = self.observed();
         let available = probe.is_ok();
         let successes = sent + u64::from(available);
+        let (latency, confidence) = match probe {
+            // Availability and the round trip were observed just now.
+            Ok(rtt) => (rtt, 1.0),
+            // The failure was observed, but it measures no link.
+            Err(_) => (self.limits.connection_timeout, 0.3),
+        };
         Ok(TransportEstimate {
-            latency: probe.unwrap_or_else(|_| start.elapsed()),
+            latency,
             reliability: successes as f64 / (sent + failures + 1) as f64,
             bandwidth: bandwidth.unwrap_or(1),
             cost: 1.0,
             available,
-            // Availability and latency were observed just now.
-            confidence: 1.0,
+            confidence,
         })
     }
 
@@ -1011,8 +1267,33 @@ mod tests {
         assert_eq!(connectivity.rtt, None);
         let why = connectivity.error.expect("says why it is not connected");
         assert!(why.contains("handshake"), "{why}");
-        assert!(!transport.estimate_metrics(&target).await.unwrap().available);
+        let estimate = transport.estimate_metrics(&target).await.unwrap();
+        assert!(!estimate.available);
+        assert_eq!(estimate.latency, Duration::from_millis(300));
+        assert!(estimate.confidence < 0.5, "{}", estimate.confidence);
         holder.abort();
+    }
+
+    /// A failed probe says so: unavailable, with the connection timeout as its latency and a low
+    /// confidence. Before, a refused connect reported the ~1 ms it took to fail as the latency, with
+    /// confidence 1.0, which reads as the fastest link there is.
+    #[tokio::test]
+    async fn a_failed_probe_reports_no_link_not_a_fast_one() {
+        let nobody = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let transport = WebSocketTransportImpl::new(&HashMap::new()).await.unwrap();
+        let target = TransportTarget::new("nobody".to_string()).with_address(nobody.to_string());
+        let estimate = transport.estimate_metrics(&target).await.unwrap();
+        assert!(!estimate.available);
+        assert_eq!(
+            estimate.latency,
+            Duration::from_millis(DEFAULT_CONNECTION_TIMEOUT_MS as u64)
+        );
+        assert!(estimate.confidence < 0.5, "{}", estimate.confidence);
+        // No send has been measured, so no bandwidth is claimed.
+        assert_eq!(estimate.bandwidth, 1);
     }
 
     /// `receive_raw` drains: each message is handed out once, however often it is polled. Before
@@ -1085,8 +1366,9 @@ mod tests {
         assert_eq!(alice.metrics().await.messages_sent, K as u64);
     }
 
-    /// A target address is a `ws://` URL or `host:port`; no default port is guessed and `wss://`
-    /// is refused, since this build has no TLS.
+    /// A target address is a `ws://` URL or `host:port`, and either must name a host and a port:
+    /// no default port is guessed. `wss://` is refused, since this build has no TLS, and so is
+    /// every other scheme: `http://example.test:80` once became `ws://http://example.test:80/`.
     #[test]
     fn target_addresses() {
         let target =
@@ -1100,10 +1382,102 @@ mod tests {
             ws_url(&target("ws://example.test:81/x")).unwrap(),
             "ws://example.test:81/x"
         );
-        for bad in ["example.test", "wss://example.test", ":9000", "host:port"] {
-            assert!(ws_url(&target(bad)).is_err(), "{bad}");
+        // A port equal to ws's default is still a port the address names.
+        assert_eq!(
+            ws_url(&target("ws://example.test:80")).unwrap(),
+            "ws://example.test:80"
+        );
+        assert_eq!(
+            ws_url(&target("ws://[::1]:9000/")).unwrap(),
+            "ws://[::1]:9000/"
+        );
+        for bad in [
+            // Not WebSocket schemes.
+            "http://example.test:80",
+            "https://example.test:443",
+            "http://127.0.0.1:9",
+            "ftp://x:1",
+            "wss://example.test",
+            "wss://example.test:443",
+            // A missing, empty or invalid port, or an empty host.
+            "example.test",
+            "ws://example.test",
+            "ws://example.test/x",
+            ":80",
+            "ws://:80/",
+            "[]:80",
+            "host:",
+            "host:99999",
+            "host:0",
+            "host:port",
+            ":9000",
+            // A host that is not one: it would dial `a`, on no port it names.
+            "a/b:80",
+            "::1:9000",
+        ] {
+            assert!(ws_url(&target(bad)).is_err(), "{bad} must be refused");
         }
         assert!(ws_url(&TransportTarget::new("no-address".to_string())).is_err());
+    }
+
+    /// The sender's write buffer is capped at one frame of the largest message, header included:
+    /// a message whose JSON is exactly `max_message_size` bytes -- 128 KiB here, over 64 KiB so its
+    /// frame takes the longest, 14-byte header -- is sent and received whole. Checked the other way:
+    /// with the cap at `max_message_size` alone, without the header, this send fails with
+    /// `WriteBufferFull`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_message_of_exactly_the_largest_size_is_sent_and_received() {
+        const M: usize = 128 * 1024;
+        let config = HashMap::from([(MAX_MESSAGE_SIZE_KEY.to_string(), M.to_string())]);
+        let bob = WebSocketTransportImpl::new(&config).await.unwrap();
+        bob.start().await.unwrap();
+        let alice = WebSocketTransportImpl::new(&config).await.unwrap();
+        let target = TransportTarget::new("bob".to_string())
+            .with_address(bob.local_addr().unwrap().to_string());
+
+        // Grow the body until the JSON is exactly M bytes: each extra `0` adds two characters
+        // (`,0`), and turning one `0` into `10` adds one.
+        let mut message = SecureMessage::new(
+            "bob",
+            "alice",
+            Vec::new(),
+            crate::types::SecurityLevel::Public,
+        );
+        let size = |m: &SecureMessage| serde_json::to_vec(m).unwrap().len();
+        message.encrypted_content = vec![0; (M - size(&message)) / 2];
+        while size(&message) < M {
+            if M - size(&message) >= 2 {
+                message.encrypted_content.push(0);
+            } else {
+                let zero = message.encrypted_content.iter_mut().find(|b| **b == 0);
+                *zero.expect("a zero to widen") = 10;
+            }
+        }
+        assert_eq!(size(&message), M, "the message must be exactly the limit");
+
+        let receipt = alice
+            .send_message(&target, &message)
+            .await
+            .expect("a message of exactly max_message_size is sent");
+        assert!(matches!(receipt.confirmation, DeliveryConfirmation::Sent));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut arrived = Vec::new();
+        while arrived.is_empty() && Instant::now() < deadline {
+            let mut inbox = RawInbox::new();
+            bob.receive_raw(&mut inbox).await.unwrap();
+            arrived.extend(inbox.drain());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(arrived.len(), 1, "the message must arrive");
+        assert_eq!(arrived[0].message.message_id.0, message.message_id.0);
+        assert_eq!(bob.metrics().await.bytes_received, M as u64);
+
+        // One byte over is refused before connecting.
+        message.encrypted_content.push(0);
+        assert!(matches!(
+            alice.send_message(&target, &message).await,
+            Err(SynapseError::MessageRefused(_))
+        ));
     }
 
     /// `validate_config` applies the same rule as `new`.

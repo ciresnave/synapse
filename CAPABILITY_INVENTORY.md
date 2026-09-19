@@ -84,7 +84,7 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > reason. A limit or timeout that does not parse, or is 0, fails construction instead of silently
 > becoming the default. What `tests/transport_repairs.rs` shows, over loopback in one process only:
 > a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`, pinned to the
-> sender's certificate, and opens intact; 400 concurrent signed sends all arrive once, each pinned
+> sender's certificate, and opens intact; 400 signed sends, 32 in flight at a time, all arrive once, each pinned
 > to the sender and carrying its own body; a message over a 4096-byte limit is refused at send
 > while one under it arrives; after such a refusal TCP stays `Running` and the next message
 > arrives; with a cap of 2 and two connections held open, a third is read only after one closes;
@@ -123,21 +123,38 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > and `connection_timeout_ms` (30 s, the sender's connect-and-handshake and write limit); an
 > unparseable or zero value, a bad `local_port`, or a `max_queued_bytes` below `max_message_size` or
 > above `u32::MAX` fails construction. The worst case an unauthenticated peer can make the receiver
-> hold is `C × (4M + 80 KiB) + B × f`, about 333 MiB at peak with the defaults and `f` = 18 — four
-> times TCP's first term, because tungstenite's frame and fragment buffers may each grow to twice
-> the message; this is an upper estimate from reading tungstenite 0.30, not a measurement. The
-> sender refuses an oversize message with `SynapseError::MessageRefused` before connecting.
+> hold is about `C × (2.625M + 75 KiB) + B × f`, about 245 MiB at peak with the defaults and `f` =
+> 18. The `2.625M` per connection (2.63 MiB at `M` = 1 MiB, a fragmented message's transient peak;
+> 2.06 MiB held for one whole frame) and the 11 KiB each connection holds after its handshake were
+> measured with a counting allocator, release build, Windows, 16 connections at once; the 64 KiB
+> write-buffer cap, and the scaling to other `M`, are derived. (As first built, `22e68c5` stated
+> `C × (4M + 80 KiB)`, about 333 MiB, an estimate from reading tungstenite 0.30 that the
+> measurement showed was high.) Fix round 1 also closed a hole the formula did not cover: the
+> receiver answered pings, with an unbounded write buffer, so one peer that pinged and never read
+> grew the receiver's heap by 4 GiB in 8.4 s (measured by the reviewer at `22e68c5`); the receiver
+> now closes a connection on any Ping, Pong or other control frame but Close, and caps its write
+> buffer at 64 KiB (the same flood, re-measured: 0.1 MiB of growth, the connection closed after
+> 0.2 MiB had been sent). `idle_timeout_ms` is a gap between reads, as TCP's is, not a deadline for
+> a whole message, and a target with any scheme but `ws://`, an empty host, or a missing, zero or
+> invalid port is refused (`22e68c5` accepted `http://host:80` and dialled `ws://http://host:80/`).
+> The sender refuses an oversize message with `SynapseError::MessageRefused` before connecting.
 > `test_connectivity` reports connected, with the handshake's measured round trip, only after a
-> real handshake; `estimate_metrics` probes the same way and reports observed values; `metrics()`
-> counts real sends, receives and failures. `tokio-tungstenite` and `tungstenite` moved from 0.27.0
-> to 0.30.0, the latest published. What `tests/transport_repairs.rs` shows, over loopback in one
+> real handshake; `estimate_metrics` probes the same way and reports observed values (a failed probe
+> reports unavailable, the connection timeout as latency, and confidence 0.3); `metrics()`
+> counts real sends, receives and failures. `tokio-tungstenite` moved from 0.27.0 to 0.30.0, the
+> latest published; the direct `tungstenite` dependency, which nothing used, was removed. What `tests/transport_repairs.rs` shows, over loopback in one
 > process only: a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`
-> and opens intact; five messages each arrive once however often Bob polls; 200 concurrent signed
-> sends all arrive once; an oversize message is `MessageRefused` even to a port where nothing
+> and opens intact; five messages each arrive once however often Bob polls; 200 signed sends, 32 in
+> flight at a time, all arrive once; a peer that sends a Ping or a Pong is closed within 2 s and,
+> under a cap of 1, its permit goes to the next message; a frame trickled in 100 ms apart over about
+> 0.9 s arrives under a 300 ms idle timeout, while one with a 900 ms gap is cut off; an oversize
+> message is `MessageRefused` even to a port where nothing
 > listens, and ten refusals through the manager leave WebSocket `Running` with the next message
 > arriving; two peers that never handshake, under a cap of 2 and a 500 ms handshake timeout, delay a
 > message behind them by that timeout, not 30 s; connectivity is reported against a live node and
-> not against a closed port, or a listener that accepts TCP but never upgrades. Nothing here was run
+> not against a closed port. That a listener that accepts TCP but never upgrades is reported not
+> connected is shown by the unit test `a_bare_tcp_listener_is_not_a_websocket_connection` in
+> `src/transport/websocket_unified.rs`, not by `tests/transport_repairs.rs`. Nothing here was run
 > across machines.
 >
 > **Known gaps, not fixed in Task 8 (follow-ups):** as for TCP, `stop()` leaves the accept loop (and
@@ -814,16 +831,18 @@ its de facto schema. **The blocking defect is the receive path, not the protocol
 
 ⚠️ **I originally wrote that `udp_unified`, `quic_unified` and `websocket_unified` "follow the same
 `bind-then-spawn-and-bind-again` shape." I had not checked. One of the three does; the other two do
-not, and one of them does something worse.** Corrected by reading each `start_server`:
+not, and one of them does something worse.** Corrected by reading each `start_server`. The rows
+were read at different times, so each says when: **2026-09-09** is the original reading, at #10
+(`9f63707`); later rows or updates name their own date and ref.
 
-| transport | server side | verdict |
-|---|---|---|
-| `tcp_unified` | bound, then re-bound inside `tokio::spawn`, until PR #11 (`6e8d058`, on `main`) made it serve the constructor's listener | 🔴 **defect MEASURED end-to-end** (above) at the time; fixed by #11 |
-| `websocket_unified` | bound, stored it, then re-bound the same port inside the spawn, until transport contract PR B, Task 8 made `start()` bind once and serve that listener | ✅ **fixed; delivers end-to-end over loopback** (PR B, Task 8) |
-| `udp_unified` | binds once at :72, stores `Arc<UdpSocket>`, receive path uses `self.socket` | ✅ **structurally sound** — my speculation was wrong |
-| `quic_unified` | **does not bind anything** | 🔴 **simulation — see below** |
-| `http_unified` | no bind call in the file | no server side |
-| `tcp_simple` | had no bind call; the file is deleted in transport contract PR B, Task 7 | had no server side |
+| transport | as of | server side | verdict |
+|---|---|---|---|
+| `tcp_unified` | 2026-09-09 at `9f63707`; fixed by #11 (`6e8d058`, 2026-09-09, on `main`) | bound, then re-bound inside `tokio::spawn`, until #11 made it serve the constructor's listener | 🔴 **defect MEASURED end-to-end** (above) at the time; fixed by #11 |
+| `websocket_unified` | current: 2026-09-19, branch `feat/transport-contract-b` (PR B, Task 8), not yet on `main` | bound, stored it, then re-bound the same port inside the spawn, until PR B, Task 8 made `start()` bind once and serve that listener | ✅ **fixed; delivers end-to-end over loopback** (PR B, Task 8) |
+| `udp_unified` | 2026-09-09 at `9f63707` (the bind is at :77 on 2026-09-19) | binds once at :72, stores `Arc<UdpSocket>`, receive path uses `self.socket` | ✅ **structurally sound** — my speculation was wrong |
+| `quic_unified` | 2026-09-09 at `9f63707`; deleted 2026-09-18 by PR A (#44, `b6a1904`) | **did not bind anything** | 🔴 **was a simulation — see below** |
+| `http_unified` | 2026-09-09 at `9f63707`; unchanged in this respect on 2026-09-19 (PR B, Task 9 adds a server) | no bind call in the file | no server side |
+| `tcp_simple` | 2026-09-19: deleted in PR B, Task 7 | had no bind call | had no server side |
 
 ⚠️ **`websocket_unified` had the same bug, more silently than the TCP one, until transport contract
 PR B, Task 8 fixed it.** It stored the real listener, then in the spawned task bound a second one on
