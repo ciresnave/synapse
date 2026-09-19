@@ -92,12 +92,13 @@ async fn a_receipted_tcp_message_actually_arrives() {
         .expect("receiver.start() should succeed");
     // `TransportManager::start()` swallows a per-transport start error (it logs and continues, so
     // that one bad transport doesn't stop the others), so the `expect` above cannot fail even if
-    // TCP itself never came up, and neither can this: `get_transport_status` only reports what
-    // `start()` recorded, which is `Running` whenever `start()` returned `Ok` regardless of
-    // whether the underlying `start_transport` call actually succeeded for TCP specifically. This
-    // pair of checks proves only that the manager *registered and attempted* a TCP transport, not
-    // that TCP is actually listening -- that is FACT 1 below (a real connect), which is the one
-    // that can actually fail.
+    // TCP itself never came up. But the two checks below are not vacuous for TCP specifically:
+    // `start_transport` (src/transport/manager.rs) only records `Running` and inserts into the
+    // `transports` map AFTER BOTH `factory.create_transport` and `transport.start()` return `Ok`;
+    // on an error from either it returns early and the status is left at `Starting`, never
+    // `Running`. So both checks below are real evidence that TCP's own `start()` returned `Ok`
+    // -- they just don't prove the socket accepts connections, which is FACT 1 below (a real
+    // connect), the one check that can actually fail for TCP.
     assert_eq!(
         receiver
             .get_transport_status()

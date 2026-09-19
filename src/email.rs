@@ -69,6 +69,7 @@ impl EmailTransport {
             security_level: SecurityLevel::Authenticated,
             routing_path: vec![],
             metadata: simple_msg.metadata.clone(),
+            protocol_version: crate::types::PROTOCOL_VERSION,
         };
         let email_message =
             self.create_email_message(&secure_msg, from_email, to_email, simple_msg)?;

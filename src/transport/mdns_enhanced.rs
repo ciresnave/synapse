@@ -456,7 +456,10 @@ impl EnhancedMdnsTransport {
 
     fn build_txt_records(&self) -> HashMap<String, String> {
         let mut txt_records = HashMap::new();
-        txt_records.insert("version".to_string(), "1.0".to_string());
+        txt_records.insert(
+            "synapse_protocol".to_string(),
+            crate::types::PROTOCOL_VERSION.to_string(),
+        );
         txt_records.insert("protocol".to_string(), "synapse".to_string());
         txt_records.insert("entity_id".to_string(), self.entity_id.clone());
         txt_records.insert(
@@ -1472,7 +1475,10 @@ impl EnhancedMdnsTransport {
             port: self.local_port,
             txt_records: HashMap::from([
                 ("entity_id".to_string(), self.entity_id.clone()),
-                ("version".to_string(), "1.0".to_string()),
+                (
+                    "synapse_protocol".to_string(),
+                    crate::types::PROTOCOL_VERSION.to_string(),
+                ),
                 (
                     "capabilities".to_string(),
                     "routing,discovery,secure_messaging".to_string(),
@@ -1512,9 +1518,9 @@ impl EnhancedMdnsTransport {
 
                 let protocol_version = service
                     .txt_records
-                    .get("version")
+                    .get("synapse_protocol")
                     .cloned()
-                    .unwrap_or_else(|| "1.0".to_string());
+                    .unwrap_or_else(|| crate::types::PROTOCOL_VERSION.to_string());
 
                 let entity_id = service
                     .txt_records

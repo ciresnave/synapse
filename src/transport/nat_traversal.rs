@@ -596,6 +596,7 @@ impl NatTraversalTransport {
                     security_level: SecurityLevel::Public,
                     routing_path: Vec::new(),
                     metadata: metadata.clone(),
+                    protocol_version: crate::types::PROTOCOL_VERSION,
                 };
 
                 let mut incoming_metadata = HashMap::new();
@@ -634,6 +635,7 @@ impl NatTraversalTransport {
                     security_level: SecurityLevel::Public,
                     routing_path: Vec::new(),
                     metadata: metadata.clone(),
+                    protocol_version: crate::types::PROTOCOL_VERSION,
                 };
 
                 let mut incoming_metadata = HashMap::new();

@@ -89,15 +89,20 @@ pub(crate) fn put(out: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 /// The bytes a sender signs (spec §4, v1). Each field is a 4-byte big-endian length followed by
-/// its bytes, in this order: domain tag, `message_id` (16 raw bytes), `from_global_id`,
-/// `to_global_id`, timestamp (Unix microseconds, i64 BE), `security_level` (serde name),
-/// `sender_proof.key_id`, SHA-256(`encrypted_content`), metadata. The metadata field's bytes are
-/// a 4-byte count followed by each (key, value) pair, each length-prefixed, sorted by key bytes.
+/// its bytes, in this order: domain tag, `protocol_version` (2 raw bytes, big-endian),
+/// `message_id` (16 raw bytes), `from_global_id`, `to_global_id`, timestamp (Unix microseconds, i64
+/// BE), `security_level` (serde name), `sender_proof.key_id`, SHA-256(`encrypted_content`),
+/// metadata. The metadata field's bytes are a 4-byte count followed by each (key, value) pair, each
+/// length-prefixed, sorted by key bytes.
+///
+/// `protocol_version` sits immediately after the domain tag so a relay that rewrites it (for
+/// example to downgrade two peers to an older wire format) invalidates the signature.
 ///
 /// `routing_path` is NOT covered: relays append to it.
 pub fn canonical_input(message: &SecureMessage) -> Vec<u8> {
     let mut out = Vec::new();
     put(&mut out, CANONICAL_DOMAIN_TAG);
+    put(&mut out, &message.protocol_version.to_be_bytes());
     put(&mut out, message.message_id.0.as_bytes());
     put(&mut out, message.from_global_id.as_bytes());
     put(&mut out, message.to_global_id.as_bytes());
@@ -155,6 +160,10 @@ impl SenderVerdict {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnverifiableReason {
+    /// `protocol_version` is not in [`crate::types::SUPPORTED_PROTOCOL_VERSIONS`]. Checked first,
+    /// before any other interpretation of the message -- including the signature itself, since an
+    /// unsupported version may not even mean what this build assumes it means.
+    UnsupportedVersion,
     /// The sender declared `alg: none`.
     Unsigned,
     /// No key is pinned for `from_global_id`, and the message carries no certificate chain.
@@ -462,6 +471,16 @@ impl TrustStore {
     /// expiry boundary can be tested without racing the real clock, and so one delivered message
     /// gets one answer no matter how many times it is checked.
     pub fn verify_at(&self, message: &SecureMessage, now: DateTime<Utc>) -> SenderVerdict {
+        // Checked before anything else: an unsupported version may not even mean what this build
+        // assumes it means, so nothing downstream -- not the timestamp check, not the signature --
+        // may be trusted to interpret the message correctly. Refused by name, never as a parse
+        // failure.
+        if !crate::types::SUPPORTED_PROTOCOL_VERSIONS.contains(&message.protocol_version) {
+            return SenderVerdict::Unverifiable {
+                reason: UnverifiableReason::UnsupportedVersion,
+            };
+        }
+
         // A non-canonical timestamp is outside the signed bytes on every route (direct pin or
         // chain), so it must be caught before either route runs: otherwise a relay could add
         // sub-microsecond digits to a chain-routed message and see it verify anyway.

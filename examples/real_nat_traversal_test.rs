@@ -126,6 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             metadata.insert("test".to_string(), "real_implementation".to_string());
             metadata
         },
+        protocol_version: synapse::types::PROTOCOL_VERSION,
     };
 
     // Test sending to localhost (this should work)

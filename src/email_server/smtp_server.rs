@@ -393,6 +393,7 @@ impl SynapseSmtpServer {
             security_level: crate::types::SecurityLevel::Private,
             routing_path: Vec::new(),
             metadata: std::collections::HashMap::new(),
+            protocol_version: crate::types::PROTOCOL_VERSION,
         };
 
         // Store message for each recipient

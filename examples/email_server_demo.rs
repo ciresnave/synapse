@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         security_level: SecurityLevel::Public,
         routing_path: vec![],
         metadata: HashMap::new(),
+        protocol_version: synapse::types::PROTOCOL_VERSION,
     };
 
     info!("✅ Test message created: {}", test_message.message_id);

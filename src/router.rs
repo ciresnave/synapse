@@ -70,6 +70,7 @@ impl SynapseRouter {
                 security_level: SecurityLevel::Authenticated,
                 routing_path: Vec::new(),
                 metadata: simple_msg.metadata.clone(),
+                protocol_version: crate::types::PROTOCOL_VERSION,
             }
         };
         // This path always sends Authenticated (signed, plaintext): the email router holds no
@@ -219,6 +220,7 @@ impl SynapseRouter {
             security_level: SecurityLevel::Authenticated,
             routing_path: Vec::new(),
             metadata: simple_msg.metadata.clone(),
+            protocol_version: crate::types::PROTOCOL_VERSION,
         };
 
         // Plain body at Authenticated: this router never seals (it has no pinned sealing keys).

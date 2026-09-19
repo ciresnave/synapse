@@ -349,6 +349,7 @@ pub fn verdict_reason(verdict: &SenderVerdict) -> &'static str {
     match verdict {
         SenderVerdict::Verified { .. } => "verified",
         SenderVerdict::Unverifiable { reason } => match reason {
+            UnverifiableReason::UnsupportedVersion => "unsupported_protocol_version",
             UnverifiableReason::Unsigned => "unsigned",
             UnverifiableReason::UnknownSender => "unknown_sender",
             UnverifiableReason::UnknownIssuer => "unknown_issuer",
