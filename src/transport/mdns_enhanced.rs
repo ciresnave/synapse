@@ -585,12 +585,16 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
         &self,
         target: &crate::transport::abstraction::TransportTarget,
     ) -> crate::error::Result<crate::transport::abstraction::ConnectivityResult> {
-        let reachable = self.can_reach(target).await;
+        // This used to report `connected` from `can_reach` alone and a fixed 50 ms round trip
+        // that nothing measured (spec §4). mDNS carries no messages, so it reports that.
         Ok(crate::transport::abstraction::ConnectivityResult {
-            connected: reachable,
-            rtt: Some(std::time::Duration::from_millis(50)),
-            error: None,
-            quality: if reachable { 1.0 } else { 0.0 },
+            connected: false,
+            rtt: None,
+            error: Some(format!(
+                "mDNS carries discovery only, not messages; this transport cannot send to {}",
+                target.identifier
+            )),
+            quality: 0.0,
             details: std::collections::HashMap::new(),
         })
     }

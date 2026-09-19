@@ -234,7 +234,8 @@ match arm each), `src/transport/mdns_enhanced.rs` and `src/transport/discovery.r
 ### Task 6: Honest delivery claims
 
 **Files:** `src/transport/websocket_unified.rs`, `src/transport/mdns_enhanced.rs`,
-`src/transport/providers.rs`, a new `tests/delivery_claims.rs`
+`src/transport/discovery.rs`, `src/transport/email_simple.rs`, `src/transport/providers.rs`, a new
+`tests/delivery_claims.rs`
 
 After Tasks 1 and 3, the remaining `Delivered` constructions are WebSocket (claimed off a bare TCP
 connect with the handshake skipped), mDNS (a simulated send) and the test mock. WebSocket's
@@ -248,9 +249,13 @@ the trait default's refusal applies. The mock keeps `Delivered` with a comment s
 double.
 
 - [ ] **Test:** a source scan over `src/transport/` asserting every `DeliveryConfirmation::Delivered`
-  construction has a comment within three lines naming its protocol event, and that no transport file
-  constructs `Acknowledged` or `Expired`. Control: the scan finds the manager's `Acknowledged`
-  construction when pointed at `manager.rs`, so it is capable of finding one.
+  construction has a comment within three lines naming its protocol event (rule 1), that no transport
+  file constructs `Acknowledged` or `Expired` (rule 2), and that no file aliases the enum or imports
+  its variants, which would hide a construction from rules 1 and 2 (rule 3). Control: the scan finds
+  the manager's `Acknowledged` and `Expired` constructions when pointed at `manager.rs`, counting only
+  **production** constructions — those outside its `#[cfg(test)] mod` block, so a test's expected
+  value cannot satisfy the control; any other `cfg` naming `test` fails the scan rather than being
+  counted as production.
 - [ ] Commit: `fix(transport): no transport claims a delivery it did not observe`.
 - [ ] **Open PR A** after Task 11's verification steps, into `main`.
 

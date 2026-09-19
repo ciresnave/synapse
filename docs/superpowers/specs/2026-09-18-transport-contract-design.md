@@ -115,24 +115,29 @@ socket, runs a real receive loop, and is the only transport `synapse-mcp` enable
 test registers it and nothing else. Everything below is either not compiled, not reachable from the
 manager, or not networked.
 
+Each cell reads **at `bbd4bf0`**; where PR A (branch `design/transport-contract`) changes a cell, the
+cell reads *at `bbd4bf0`* **→ after PR A**, with the commit. A cell with no arrow is unchanged by PR A.
+In every row, receive is reachable after PR A only through the manager (`fad7277`, `11cfddf`); what a
+receive returns is unchanged unless its cell says otherwise.
+
 | protocol | compiled implementation | reachable from the manager? | receive | send |
 |---|---|---|---|---|
 | UDP | `udp_unified` | **yes** — the only one | real | real, honest `Sent` |
 | TCP | `tcp_simple` and `tcp_unified` | only by accident (below) | `tcp_simple`: always empty | real, `Sent` |
-| HTTP | `http_unified` (`production_http` is orphaned) | no factory registered | queue nothing fills — no server is ever bound | real `reqwest` POST |
-| WebSocket | `websocket_unified` | factory exists, never registered | **double bind unfixed**: the accept loop never starts | handshake skipped, yet claims `Delivered` |
-| Email | `email_simple` | only via a separate provider, never the manager | always empty, "no actual checking performed" | **no network at all** — logs, sleeps 500 ms, reports `Sent` |
-| QUIC | `quic_unified` | factory never registered | always empty | fabricated, claims `Delivered` |
-| NAT traversal | `nat_traversal` | no factory at all | its own double bind | real |
+| HTTP | `http_unified` (`production_http` is orphaned) → `http_unified`; `production_http.rs` deleted (`a83c4d5`) | no factory registered | queue nothing fills — no server is ever bound | real `reqwest` POST |
+| WebSocket | `websocket_unified` | factory exists, never registered | **double bind unfixed**: the accept loop never starts (fixed in PR B, not PR A) | handshake skipped, yet claims `Delivered` → **refuses** until the WebSocket repair (plan Task 8): the path wrote nothing, so even `Sent` was false (`8087c3e`) |
+| Email | `email_simple` | only via a separate provider, never the manager | always empty, "no actual checking performed" → **refuses** (`a258703`) | **no network at all** — logs, sleeps 500 ms, reports `Sent` → **refuses** after validating the address (`a258703`) |
+| QUIC | `quic_unified` → none: `quic_unified.rs` deleted, `QuicTransportFactory` **refuses to construct** (`5fb180f`) | factory never registered | always empty → no transport exists to receive | fabricated, claims `Delivered` → no transport exists to send |
+| mDNS | `mdns_enhanced` | `MdnsTransportFactory` exists, never registered | always empty | simulated, claims `Delivered` with nothing sent → **refuses**: discovery only (`9d4b543`) |
+| Auto-discovery | `discovery` (`DiscoveryTransport`) | no factory; constructed directly | always empty | `Sent` whenever any service had been discovered, nothing written → **refuses**: discovery only (`8087c3e`) |
+| NAT traversal | `nat_traversal` | no factory at all | its own double bind (fixed in PR B, not PR A) | real |
 
-The table is the state at `bbd4bf0`. PR A changes the send column for WebSocket: its `send_message`
-refuses until the WebSocket repair (plan Task 8), because the measured path wrote nothing to report as
-`Sent` — the connect is a bare TCP connect with no handshake, and `send_via_existing_connection`
-discards its data. WebSocket does not send in PR A.
-
-**Nine transport files are not compiled at all** — `tcp.rs`, `tcp_enhanced.rs`, `udp.rs`, `quic.rs`,
-`nat_traversal_clean.rs`, `email_enhanced.rs`, `email_unified.rs`, `websocket.rs`, `mdns.rs` — and six
-of the seven files under `src/wasm/` are likewise never compiled in any configuration.
+**Eight transport files were not compiled at all** at `bbd4bf0` — `tcp.rs`, `tcp_enhanced.rs`,
+`udp.rs`, `quic.rs`, `nat_traversal_clean.rs`, `email_enhanced.rs`, `email_unified.rs`,
+`websocket.rs` — and six of the seven files under `src/wasm/` were likewise never compiled in any
+configuration. (An earlier draft of this list also named `mdns.rs`; that file did not exist at
+`bbd4bf0`, only a commented-out `mod mdns` line.) → **PR A deletes all fourteen, and
+`production_http.rs`** (`a83c4d5`).
 
 **The TCP trap.** `mod.rs` re-exports `abstraction::*`, and `abstraction.rs` defines its own
 `TcpTransportFactory` which builds `tcp_simple` — the implementation whose receive is always empty.

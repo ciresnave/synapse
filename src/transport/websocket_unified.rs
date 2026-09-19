@@ -139,6 +139,8 @@ impl WebSocketTransportImpl {
     }
 
     /// Connect to a WebSocket server
+    // Unreachable while `send_message` refuses; the WebSocket repair (plan Task 8) rewires it.
+    #[allow(dead_code)]
     async fn connect_to_server(&self, url: &str) -> Result<WebSocketConnection> {
         let start_time = Instant::now();
 
@@ -766,56 +768,23 @@ impl Transport for WebSocketTransportImpl {
     }
 
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
-        let start_time = Instant::now();
-
+        // Not connected, whatever a TCP connect would say (spec §4): this used to report
+        // `connected: true` and a round-trip time after a bare TCP connect with no WebSocket
+        // handshake, while `send_message` refuses. It reports what a caller can actually do.
+        let mut details = HashMap::new();
         if let Some(address) = &target.address {
-            // Try to establish a test connection
-            match self.connect_to_server(address).await {
-                Ok(connection) => {
-                    let rtt = start_time.elapsed();
-
-                    // Clean up test connection
-                    {
-                        let mut connections = self.connections.lock().await;
-                        connections.remove(&connection.id);
-                    }
-
-                    Ok(ConnectivityResult {
-                        connected: true,
-                        rtt: Some(rtt),
-                        error: None,
-                        quality: 0.9,
-                        details: {
-                            let mut map = HashMap::new();
-                            map.insert("target_url".to_string(), address.clone());
-                            map.insert(
-                                "connection_time_ms".to_string(),
-                                rtt.as_millis().to_string(),
-                            );
-                            map
-                        },
-                    })
-                }
-                Err(e) => {
-                    let rtt = start_time.elapsed();
-                    Ok(ConnectivityResult {
-                        connected: false,
-                        rtt: Some(rtt),
-                        error: Some(format!("Connection failed: {}", e)),
-                        quality: 0.0,
-                        details: HashMap::new(),
-                    })
-                }
-            }
-        } else {
-            Ok(ConnectivityResult {
-                connected: false,
-                rtt: None,
-                error: Some("No target address provided".to_string()),
-                quality: 0.0,
-                details: HashMap::new(),
-            })
+            details.insert("target_url".to_string(), address.clone());
         }
+        Ok(ConnectivityResult {
+            connected: false,
+            rtt: None,
+            error: Some(
+                "WebSocket send is not implemented yet (no handshake); this transport cannot send"
+                    .to_string(),
+            ),
+            quality: 0.0,
+            details,
+        })
     }
 
     async fn start(&self) -> Result<()> {
@@ -1014,5 +983,12 @@ mod tests {
         assert!(!estimate.available);
         assert_eq!(estimate.reliability, 0.0);
         assert_eq!(transport.metrics().await.reliability_score, 0.0);
+        // The listener would accept a TCP connect; connectivity still reports no connection.
+        let connectivity = transport.test_connectivity(&target).await.unwrap();
+        assert!(!connectivity.connected);
+        assert_eq!(connectivity.rtt, None);
+        let why = connectivity.error.expect("says why it is not connected");
+        assert!(why.contains("cannot send"), "{why}");
+        drop(listener);
     }
 }

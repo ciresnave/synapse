@@ -392,19 +392,20 @@ impl Transport for DiscoveryTransport {
             })
         };
 
+        // Discovery carries no messages, so it is never "connected" for sending. This used to
+        // report `connected` for any service seen in the last minute, with a fixed 10 ms round
+        // trip that nothing measured (spec §4). What it discovered stays in `details`.
+        let cannot_send = format!(
+            "auto-discovery carries discovery only, not messages; this transport cannot send to {}",
+            target.identifier
+        );
         if let Some(service) = service {
             let age = service.last_seen.elapsed();
-            let connected = age < Duration::from_secs(60); // Consider fresh if seen in last minute
-
             Ok(ConnectivityResult {
-                connected,
-                rtt: Some(Duration::from_millis(10)), // Local network RTT
-                quality: if connected { 1.0 } else { 0.0 },
-                error: if connected {
-                    None
-                } else {
-                    Some("Service not recently seen".to_string())
-                },
+                connected: false,
+                rtt: None,
+                quality: 0.0,
+                error: Some(cannot_send),
                 details: {
                     let mut details = HashMap::new();
                     details.insert("service_name".to_string(), service.name.clone());
@@ -419,7 +420,9 @@ impl Transport for DiscoveryTransport {
                 connected: false,
                 rtt: None,
                 quality: 0.0,
-                error: Some("No matching service discovered".to_string()),
+                error: Some(format!(
+                    "{cannot_send}; no matching service discovered either"
+                )),
                 details: HashMap::new(),
             })
         }
@@ -484,5 +487,15 @@ mod tests {
         let estimate = transport.estimate_metrics(&target).await.unwrap();
         assert!(!estimate.available);
         assert_eq!(estimate.reliability, 0.0);
+        // Nor does it claim a connection or a round trip it never measured.
+        let connectivity = transport.test_connectivity(&target).await.unwrap();
+        assert!(!connectivity.connected);
+        assert_eq!(connectivity.rtt, None);
+        let why = connectivity.error.expect("says why it is not connected");
+        assert!(why.contains("cannot send"), "{why}");
+        assert_eq!(
+            connectivity.details.get("service_name").map(String::as_str),
+            Some("peer")
+        );
     }
 }

@@ -10,6 +10,9 @@
 //!    `DeliveryConfirmation::Expired`; those are the manager's claims, never a transport's.
 //!    The control for this rule counts only the manager's *production* constructions: an
 //!    occurrence inside a `#[cfg(test)] mod` block (a test's expected value) does not satisfy it.
+//!    Any other `cfg` naming `test` in that file (`#[cfg(all(test, ..))]`, `#[cfg(test)] fn`,
+//!    `#[cfg(test)] pub mod`, an attribute between `cfg` and `mod`, `cfg!(test)`) fails the test
+//!    rather than being counted as production code.
 //! 3. No file aliases the enum (`use ... as`, `type X = ...DeliveryConfirmation`) or imports its
 //!    variants (`use ...DeliveryConfirmation::{..}`, `::*`, or a single `::Variant`), which would
 //!    let a construction hide from rules 1 and 2.
@@ -324,7 +327,58 @@ fn constructions(src: &str, variant: &str) -> Vec<Construction> {
 }
 
 /// Byte ranges of the joined code covered by `#[cfg(test)] mod NAME { ... }` blocks.
+///
+/// Fails closed: every `cfg` whose predicate names `test` (`#[cfg(..)]`, `#![cfg(..)]`,
+/// `#[cfg_attr(..)]` or `cfg!(..)`) must be exactly `#[cfg(test)]` followed directly by
+/// `mod NAME`. Any other form (`#[cfg(all(test, ..))]`, `#[cfg(test)] fn`, `#[cfg(test)] pub mod`,
+/// another attribute between the `cfg` and the `mod`) panics rather than being read as
+/// production code, because production code is what the manager control counts.
 fn test_module_ranges(code: &str) -> Vec<(usize, usize)> {
+    for word in ["cfg", "cfg_attr"] {
+        for at in word_positions(code, word) {
+            let after = code[at + word.len()..].trim_start();
+            let after = after.strip_prefix('!').unwrap_or(after).trim_start();
+            let Some(inner) = after.strip_prefix('(') else {
+                continue;
+            };
+            let mut depth = 1i32;
+            let close = inner
+                .char_indices()
+                .find(|&(_, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+                .map_or(inner.len(), |(i, _)| i);
+            let predicate = &inner[..close];
+            if word_positions(predicate, "test").next().is_none() {
+                continue;
+            }
+            let squashed_before: String = code[..at]
+                .chars()
+                .rev()
+                .take_while(|&c| c == '[' || c == '#' || c == '!' || c.is_whitespace())
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let tail = inner[close + 1..].trim_start();
+            let recognised = word == "cfg"
+                && squashed_before == "[#"
+                && after.starts_with('(')
+                && predicate.trim() == "test"
+                && tail.strip_prefix(']').is_some_and(|t| {
+                    t.trim_start()
+                        .strip_prefix("mod")
+                        .is_some_and(|m| m.starts_with(char::is_whitespace))
+                });
+            assert!(
+                recognised,
+                "byte {at}: a `{word}` naming `test` in a form this scan does not recognise                  (only `#[cfg(test)]` directly followed by `mod NAME` is); refusing rather than                  counting test code as production. Extend `test_module_ranges` to handle it."
+            );
+        }
+    }
     let mut ranges = Vec::new();
     for (at, attr) in code.match_indices("#[cfg(test)]") {
         let rest = code[at + attr.len()..].trim_start();
@@ -772,4 +826,63 @@ mod tests {
         assert_eq!(constructions(&mutated, "Acknowledged").len(), 1);
         assert_eq!(production_constructions(&mutated, "Acknowledged"), vec![]);
     }
+}
+
+/// Runs `test_module_ranges` on the joined code of `src` and returns its panic message, or
+/// `None` if it accepted the source.
+fn module_scan_refusal(src: &str) -> Option<String> {
+    let src = src.to_string();
+    std::panic::catch_unwind(move || {
+        let (code, _) = joined_code(&src);
+        test_module_ranges(&code);
+    })
+    .err()
+    .map(|e| {
+        e.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default()
+    })
+}
+
+#[test]
+fn control_the_test_module_scan_fails_closed_on_forms_it_does_not_recognise() {
+    // Forms that would otherwise let test code count as production: each is refused.
+    for src in [
+        "#[cfg(all(test, feature = \"x\"))]\nmod tests {\n}\n",
+        "#[cfg(test)]\n#[allow(unused)]\nmod tests {\n}\n",
+        "#[cfg(test)]\npub mod tests {\n}\n",
+        "#[cfg(test)]\npub(crate) mod tests {\n}\n",
+        "#[cfg(test)]\nfn helper() -> u8 { 1 }\n",
+        "#![cfg(test)]\nfn helper() {}\n",
+        "#[cfg_attr(test, derive(Debug))]\nstruct S;\n",
+        "fn f() { if cfg!(test) { g() } }\n",
+        "#[cfg(any(test, doc))]\nmod tests {\n}\n",
+    ] {
+        for text in [src.to_string(), src.replace('\n', "\r\n")] {
+            let why = module_scan_refusal(&text)
+                .unwrap_or_else(|| panic!("{text:?} must be refused by the test-module scan"));
+            assert!(why.contains("does not recognise"), "{text:?}: {why}");
+        }
+    }
+    // Controls: the recognised form (the one manager.rs uses), a `mod tests;` declaration,
+    // non-test cfgs, and `test` named only in a comment or string are all accepted.
+    for ok in [
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n",
+        "#[cfg(test)]\nmod tests;\n",
+        "#[cfg(not(target_arch = \"wasm32\"))]\npub mod x;\n#[cfg(feature = \"test-utils\")]\nfn f() {}\n",
+        "// #[cfg(all(test, x))]\nlet s = \"#[cfg(all(test, x))]\";\n",
+    ] {
+        assert_eq!(module_scan_refusal(ok), None, "{ok:?} must be accepted");
+        assert_eq!(
+            module_scan_refusal(&ok.replace('\n', "\r\n")),
+            None,
+            "{ok:?} (CRLF)"
+        );
+    }
+    // Control: the real manager.rs, whose test module uses the recognised form, is accepted and
+    // yields exactly one test-module range.
+    let manager = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src/transport/manager.rs"));
+    let (code, _) = joined_code(&manager);
+    assert_eq!(test_module_ranges(&code).len(), 1);
 }
