@@ -185,6 +185,7 @@ pub enum TransportType {
     Email,
     AutoDiscovery, // Replaces Mdns with more comprehensive discovery
     Quic,
+    NatTraversal,
     Custom(u32), // For extensibility
 }
 
@@ -198,6 +199,7 @@ impl std::fmt::Display for TransportType {
             TransportType::Email => write!(f, "Email"),
             TransportType::AutoDiscovery => write!(f, "Auto-Discovery"),
             TransportType::Quic => write!(f, "QUIC"),
+            TransportType::NatTraversal => write!(f, "NAT-Traversal"),
             TransportType::Custom(id) => write!(f, "Custom({id})"),
         }
     }
@@ -893,6 +895,53 @@ impl TransportFactory for QuicTransportFactory {
         {
             return Err(crate::error::SynapseError::Config(
                 "Invalid socket address".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Factory for the NAT traversal transport (`nat_traversal`). `local_port` (default 0, meaning
+/// let the OS choose) is the only config key it reads, plus the shared bind-scope key.
+pub struct NatTraversalTransportFactory;
+
+#[async_trait]
+impl TransportFactory for NatTraversalTransportFactory {
+    async fn create_transport(
+        &self,
+        config: &HashMap<String, String>,
+    ) -> Result<Box<dyn Transport>> {
+        self.validate_config(config)?;
+        let local_port = config
+            .get("local_port")
+            .map(|p| p.parse::<u16>())
+            .transpose()
+            .map_err(|_| crate::error::SynapseError::Config("Invalid port number".to_string()))?
+            .unwrap_or(0);
+        let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
+        let transport = crate::transport::nat_traversal::NatTraversalTransport::new_with_scope(
+            local_port, bind_scope,
+        )
+        .await?;
+        Ok(Box::new(transport))
+    }
+
+    fn transport_type(&self) -> TransportType {
+        TransportType::NatTraversal
+    }
+
+    fn default_config(&self) -> HashMap<String, String> {
+        let mut cfg = HashMap::new();
+        cfg.insert("local_port".to_string(), "0".to_string());
+        cfg
+    }
+
+    fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
+        if let Some(port_str) = config.get("local_port")
+            && port_str.parse::<u16>().is_err()
+        {
+            return Err(crate::error::SynapseError::Config(
+                "Invalid port number".to_string(),
             ));
         }
         Ok(())

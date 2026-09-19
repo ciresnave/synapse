@@ -26,7 +26,7 @@ const BOB: &str = "bob@repair.test";
 
 /// Every transport the builder enables by default, plus any a factory could register. `node`
 /// disables all of them except the one under test, so a round trip can only cross that transport.
-const ALL_TRANSPORTS: [TransportType; 7] = [
+const ALL_TRANSPORTS: [TransportType; 8] = [
     TransportType::Tcp,
     TransportType::Udp,
     TransportType::Http,
@@ -34,6 +34,7 @@ const ALL_TRANSPORTS: [TransportType; 7] = [
     TransportType::Email,
     TransportType::AutoDiscovery,
     TransportType::Quic,
+    TransportType::NatTraversal,
 ];
 
 /// The config key each transport reads its listening port from. They differ per transport, and a
@@ -47,12 +48,8 @@ fn port_key(kind: TransportType) -> &'static str {
         TransportType::Http => "server_port",
         // websocket_unified.rs reads `local_port` and binds it in `start`.
         TransportType::WebSocket => "local_port",
-        // NAT traversal (`TransportType::Custom(1)`, nat_traversal.rs) has no factory and reads no
-        // config key: `NatTraversalTransport::new_with_scope` takes its port as an argument, and
-        // providers.rs passes 8080. A test must construct it directly with the port it wants.
-        TransportType::Custom(1) => panic!(
-            "NAT traversal has no port config key; construct NatTraversalTransport with the port"
-        ),
+        // NatTraversalTransportFactory (abstraction.rs, PR B Task 10) reads the same key name.
+        TransportType::NatTraversal => "local_port",
         other => panic!("no port key recorded for {other:?}; add it to port_key"),
     }
 }
@@ -66,8 +63,8 @@ enum Socket {
 fn socket_of(kind: TransportType) -> Socket {
     match kind {
         TransportType::Tcp | TransportType::Http | TransportType::WebSocket => Socket::Tcp,
-        // NAT traversal (`Custom(1)`) listens on a `UdpSocket` (nat_traversal.rs, `start`).
-        TransportType::Udp | TransportType::Custom(1) => Socket::Udp,
+        // NAT traversal listens on a `UdpSocket` (nat_traversal.rs, `start`).
+        TransportType::Udp | TransportType::NatTraversal => Socket::Udp,
         other => panic!("no socket family recorded for {other:?}; add it to socket_of"),
     }
 }
@@ -2651,4 +2648,35 @@ async fn http_reports_connectivity_only_after_a_real_exchange() {
             .expect("receive")
             .is_empty()
     );
+}
+
+fn nat() -> Box<dyn TransportFactory> {
+    Box::new(synapse::transport::NatTraversalTransportFactory)
+}
+
+/// NAT traversal (`nat_traversal.rs`) had no `TransportType` and no factory, so nothing could
+/// register it; `receive_raw` also bound a second UDP socket to the address `start` already held,
+/// which the OS refuses, so it never received anything; and `send_message` built its wire format
+/// with `String::from_utf8_lossy(&message.encrypted_content)`, which replaces invalid-UTF-8 bytes
+/// in sealed ciphertext with U+FFFD, corrupting it. This test proves the repair: the transport
+/// registers, binds once, and carries a verified message intact over loopback. Real NAT traversal
+/// (STUN/UPnP/ICE) needs an actual NAT to exercise and is not what this test checks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nat_traversal_carries_a_verified_message_end_to_end() {
+    let (received, receipt) = round_trip(
+        TransportType::NatTraversal,
+        nat(),
+        nat(),
+        free_port(),
+        free_port(),
+        b"repaired",
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+    assert_eq!(
+        received.incoming.transport_type,
+        TransportType::NatTraversal
+    );
+    assert_eq!(receipt.transport_used, TransportType::NatTraversal);
+    assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
 }
