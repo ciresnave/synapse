@@ -1,5 +1,34 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! TCP Transport implementation conforming to the unified Transport trait
+//!
+//! # Wire format
+//!
+//! One JSON `SecureMessage` per connection. The sender writes it, then shuts down its write half;
+//! the receiver reads until the connection ends.
+//!
+//! # Config keys
+//!
+//! | key | default | meaning |
+//! |---|---|---|
+//! | `listen_port` | none (client-only) | the port to listen on; absent or `0` means send only |
+//! | `connection_timeout_ms` | `10000` | how long `send_message` waits to connect |
+//! | [`MAX_MESSAGE_SIZE_KEY`] (`max_message_size`) | [`DEFAULT_MAX_MESSAGE_SIZE`] (1 MiB) | the largest message, **in bytes of serialized JSON**, the receiver reads and the sender sends |
+//! | [`MAX_CONCURRENT_CONNECTIONS_KEY`] (`max_concurrent_connections`) | [`DEFAULT_MAX_CONCURRENT_CONNECTIONS`] (64) | how many inbound connections are read at once |
+//!
+//! The two limits must parse as a positive integer: [`TcpTransportImpl::new`] (and so the
+//! factory's `create_transport`) refuses an unparseable or zero value instead of falling back to
+//! the default.
+//!
+//! `max_message_size` counts serialized bytes, not body bytes: `encrypted_content` serializes as
+//! a JSON number array, a few characters per body byte, so the largest body that fits is several
+//! times smaller than the limit. Sender and receiver apply the same number to the same bytes, so a
+//! sender refuses exactly what a receiver with its limit would drop.
+//!
+//! Together the two limits bound what an unauthenticated peer can make the receiver hold:
+//! `max_concurrent_connections` buffers of at most `max_message_size + 1` bytes each, for at most
+//! 30 s each. At the cap the accept loop waits for a connection to finish before it accepts
+//! another (backpressure), so further connections queue in the kernel's backlog instead of being
+//! closed; the cost is that a peer holding every slot open delays other senders by up to 30 s.
 
 use super::abstraction::*;
 use crate::{
@@ -15,14 +44,76 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::Mutex,
+    sync::{Mutex, Semaphore},
 };
 use tracing::{debug, error, info, warn};
 
-/// The config key for the largest message, in bytes, the receiver accepts.
+/// The config key for the largest message, in bytes of serialized JSON, the receiver reads and
+/// the sender sends.
 pub const MAX_MESSAGE_SIZE_KEY: &str = "max_message_size";
+
+/// The default for [`MAX_MESSAGE_SIZE_KEY`]: 1 MiB of serialized JSON.
+pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
+/// The config key for how many inbound connections are read at once.
+pub const MAX_CONCURRENT_CONNECTIONS_KEY: &str = "max_concurrent_connections";
+
+/// The default for [`MAX_CONCURRENT_CONNECTIONS_KEY`].
+pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 64;
+
+/// How long the receiver waits for one connection to end.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The most the receiver reads, and the most it first reserves, in one step.
+const READ_CHUNK: usize = 8 * 1024;
+
+/// `config[key]` as a positive integer, or `default` when the key is absent. A value that does not
+/// parse, or is zero, is an error: silently falling back to the default would hide a typo.
+fn positive_limit(config: &HashMap<String, String>, key: &str, default: usize) -> Result<usize> {
+    match config.get(key) {
+        None => Ok(default),
+        Some(value) => match value.trim().parse::<usize>() {
+            Ok(0) => Err(crate::error::SynapseError::Config(format!(
+                "{key} must be a positive integer, got 0"
+            ))),
+            Ok(limit) => Ok(limit),
+            Err(e) => Err(crate::error::SynapseError::Config(format!(
+                "{key} must be a positive integer, got {value:?}: {e}"
+            ))),
+        },
+    }
+}
+
+/// Read from `reader` until it ends or until `buffer` holds `limit` bytes, whichever comes first.
+/// The buffer never reserves more than `limit` bytes: it starts at no more than one chunk and at
+/// most doubles, capped at `limit`, so a peer cannot make it over-reserve the way `Vec`'s
+/// amortised growth would (up to twice the bytes read).
+async fn read_bounded<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<()> {
+    let mut chunk = [0u8; READ_CHUNK];
+    while buffer.len() < limit {
+        let want = READ_CHUNK.min(limit - buffer.len());
+        let n = reader.read(&mut chunk[..want]).await?;
+        if n == 0 {
+            break;
+        }
+        if buffer.capacity() - buffer.len() < n {
+            let grown = buffer
+                .capacity()
+                .saturating_mul(2)
+                .max(buffer.len() + n)
+                .min(limit);
+            buffer.reserve_exact(grown - buffer.len());
+        }
+        buffer.extend_from_slice(&chunk[..n]);
+    }
+    Ok(())
+}
 
 /// TCP Transport implementation
 pub struct TcpTransportImpl {
@@ -38,8 +129,12 @@ pub struct TcpTransportImpl {
     /// Connection timeout
     connection_timeout: Duration,
     /// The largest message, in bytes of serialized JSON, the receiver will accept on one
-    /// connection. Larger ones are read up to this bound plus one byte, then refused and logged.
+    /// connection and the sender will send. The receiver reads at most this bound plus one byte,
+    /// then refuses and logs a larger message; the sender refuses it before connecting.
     max_message_size: usize,
+    /// Inbound connections being read at once. The accept loop takes a permit before each
+    /// `accept`, so at the cap it waits and new connections queue in the kernel's backlog.
+    connection_permits: Arc<Semaphore>,
     /// Received messages queue
     received_messages: Arc<Mutex<Vec<IncomingMessage>>>,
     /// Current status
@@ -55,7 +150,9 @@ pub struct TcpTransportImpl {
 }
 
 impl TcpTransportImpl {
-    /// Create a new TCP transport instance
+    /// Create a new TCP transport instance. See the module documentation for the config keys.
+    /// Fails if [`MAX_MESSAGE_SIZE_KEY`] or [`MAX_CONCURRENT_CONNECTIONS_KEY`] is present but not a
+    /// positive integer.
     pub async fn new(config: &HashMap<String, String>) -> Result<Self> {
         let listen_port = config
             .get("listen_port")
@@ -68,13 +165,14 @@ impl TcpTransportImpl {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_secs(10));
 
-        // Default to the size this transport advertises in `capabilities()`, so the receiver
-        // accepts every message the advertisement promises. The buffer grows with the bytes that
-        // actually arrive, so the bound costs nothing for small messages.
-        let max_message_size = config
-            .get(MAX_MESSAGE_SIZE_KEY)
-            .and_then(|m| m.parse().ok())
-            .unwrap_or_else(|| TransportCapabilities::tcp().max_message_size);
+        // `capabilities()` reports this same number, so what is advertised is what is enforced.
+        let max_message_size =
+            positive_limit(config, MAX_MESSAGE_SIZE_KEY, DEFAULT_MAX_MESSAGE_SIZE)?;
+        let max_concurrent_connections = positive_limit(
+            config,
+            MAX_CONCURRENT_CONNECTIONS_KEY,
+            DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+        )?;
 
         let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
         let listener = if listen_port > 0 {
@@ -102,6 +200,7 @@ impl TcpTransportImpl {
             listener,
             connection_timeout,
             max_message_size,
+            connection_permits: Arc::new(Semaphore::new(max_concurrent_connections)),
             received_messages: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(RwLock::new(TransportStatus::Stopped)),
             metrics: Arc::new(RwLock::new(metrics)),
@@ -115,6 +214,7 @@ impl TcpTransportImpl {
             let received_messages = Arc::clone(&self.received_messages);
             let metrics = Arc::clone(&self.metrics);
             let max_message_size = self.max_message_size;
+            let permits = Arc::clone(&self.connection_permits);
             // Serve the listener the constructor already bound. The previous version
             // bound a SECOND listener on the same port inside this task; that bind
             // fails because the port is already owned by this struct's own listener,
@@ -135,6 +235,14 @@ impl TcpTransportImpl {
             tokio::spawn(async move {
                 info!("TCP server started on {}", local_addr);
                 loop {
+                    // Backpressure: take a permit BEFORE accepting, so at the cap the loop waits
+                    // for a handler to finish and the waiting connections stay in the kernel's
+                    // backlog rather than each holding a buffer here. The semaphore is never
+                    // closed, so `acquire_owned` cannot fail while this task runs.
+                    let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+                        error!("TCP connection limit closed; the accept loop stops");
+                        return;
+                    };
                     match listener.accept().await {
                         Ok((stream, addr)) => {
                             debug!("Accepted TCP connection from {}", addr);
@@ -150,6 +258,8 @@ impl TcpTransportImpl {
                                     max_message_size,
                                 )
                                 .await;
+                                // Held for the whole read, released when the handler finishes.
+                                drop(permit);
                             });
                         }
                         Err(e) => {
@@ -170,7 +280,9 @@ impl TcpTransportImpl {
     /// Read one message from `stream`. The wire format is one JSON `SecureMessage` per
     /// connection, terminated by the sender's shutdown (EOF), so the receiver reads to EOF --
     /// never a single `read`, which returns whatever one segment happened to carry and silently
-    /// truncated any message over 8 KiB.
+    /// truncated any message over 8 KiB. A connection that closes having sent nothing is a
+    /// reachability probe (`can_reach`, `estimate_metrics` and `test_connectivity` connect and
+    /// close), not a dropped message, and is logged at debug.
     async fn handle_connection(
         stream: TcpStream,
         source_addr: String,
@@ -178,34 +290,45 @@ impl TcpTransportImpl {
         metrics: Arc<RwLock<TransportMetrics>>,
         max_message_size: usize,
     ) {
-        let mut buffer = Vec::new();
+        let mut stream = stream;
         // One byte past the bound, so an oversize message is detected rather than truncated.
-        let limit = (max_message_size as u64).saturating_add(1);
-        let mut limited = stream.take(limit);
+        let limit = max_message_size.saturating_add(1);
+        let mut buffer = Vec::with_capacity(limit.min(READ_CHUNK));
 
-        let bytes_read =
-            match tokio::time::timeout(Duration::from_secs(30), limited.read_to_end(&mut buffer))
-                .await
-            {
-                Ok(Ok(bytes_read)) => bytes_read,
-                Ok(Err(e)) => {
-                    warn!(
-                        "Dropped TCP message from {}: read failed after {} bytes: {}",
-                        source_addr,
-                        buffer.len(),
-                        e
-                    );
-                    return;
-                }
-                Err(_) => {
-                    warn!(
-                        "Dropped TCP message from {}: no EOF within 30 s ({} bytes read)",
-                        source_addr,
-                        buffer.len()
-                    );
-                    return;
-                }
-            };
+        let outcome =
+            tokio::time::timeout(READ_TIMEOUT, read_bounded(&mut stream, &mut buffer, limit)).await;
+        let bytes_read = buffer.len();
+        match outcome {
+            Ok(Ok(())) if bytes_read == 0 => {
+                debug!(
+                    "TCP connection from {} closed without sending anything (a probe)",
+                    source_addr
+                );
+                return;
+            }
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if bytes_read == 0 => {
+                debug!(
+                    "TCP connection from {} failed before sending anything: {}",
+                    source_addr, e
+                );
+                return;
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "Dropped TCP message from {}: read failed after {} bytes: {}",
+                    source_addr, bytes_read, e
+                );
+                return;
+            }
+            Err(_) => {
+                warn!(
+                    "Closed TCP connection from {}: it did not end within {:?} ({} bytes read)",
+                    source_addr, READ_TIMEOUT, bytes_read
+                );
+                return;
+            }
+        }
 
         if bytes_read > max_message_size {
             warn!(
@@ -251,8 +374,27 @@ impl TcpTransportImpl {
         message: &SecureMessage,
     ) -> Result<DeliveryReceipt> {
         let target_addr = format!("{}:{}", address, port);
-        debug!("Connecting to TCP target: {}", target_addr);
 
+        // Serialize first, and refuse what a receiver with this limit would drop: writing it
+        // would claim `Sent` for a message that is never delivered.
+        let message_json = serde_json::to_string(message).map_err(|e| {
+            crate::error::SynapseError::TransportError(format!(
+                "Failed to serialize message: {}",
+                e
+            ))
+        })?;
+        if message_json.len() > self.max_message_size {
+            return Err(crate::error::SynapseError::TransportError(format!(
+                "TCP message {} serializes to {} bytes, over this transport's {} of {} bytes \
+                 (serialized JSON); a receiver with that limit would drop it",
+                message.message_id.0,
+                message_json.len(),
+                MAX_MESSAGE_SIZE_KEY,
+                self.max_message_size
+            )));
+        }
+
+        debug!("Connecting to TCP target: {}", target_addr);
         let start_time = Instant::now();
 
         // Connect with timeout
@@ -271,14 +413,6 @@ impl TcpTransportImpl {
 
         let connect_time = start_time.elapsed();
         debug!("TCP connection established in {:?}", connect_time);
-
-        // Serialize message
-        let message_json = serde_json::to_string(message).map_err(|e| {
-            crate::error::SynapseError::TransportError(format!(
-                "Failed to serialize message: {}",
-                e
-            ))
-        })?;
 
         // Send message
         let mut stream = stream;
@@ -382,8 +516,13 @@ impl Transport for TcpTransportImpl {
         TransportType::Tcp
     }
 
+    /// TCP's capabilities, with `max_message_size` set to this instance's configured limit. That
+    /// limit is in bytes of serialized JSON, not body bytes: see the module documentation.
     fn capabilities(&self) -> TransportCapabilities {
-        TransportCapabilities::tcp()
+        TransportCapabilities {
+            max_message_size: self.max_message_size,
+            ..TransportCapabilities::tcp()
+        }
     }
 
     async fn can_reach(&self, target: &TransportTarget) -> bool {
@@ -549,7 +688,9 @@ impl TransportReceive for TcpTransportImpl {
     }
 }
 
-/// Factory for creating TCP transport instances
+/// Factory for creating TCP transport instances. The config keys, their defaults, and what the
+/// two limits bound are in the module documentation; `create_transport` refuses an unparseable or
+/// zero [`MAX_MESSAGE_SIZE_KEY`] or [`MAX_CONCURRENT_CONNECTIONS_KEY`].
 pub struct TcpTransportFactory;
 
 #[async_trait]
@@ -570,6 +711,15 @@ impl TransportFactory for TcpTransportFactory {
         let mut config = HashMap::new();
         config.insert("listen_port".to_string(), "8080".to_string());
         config.insert("connection_timeout_ms".to_string(), "10000".to_string());
+        // In bytes of serialized JSON, the unit sender and receiver both enforce.
+        config.insert(
+            MAX_MESSAGE_SIZE_KEY.to_string(),
+            DEFAULT_MAX_MESSAGE_SIZE.to_string(),
+        );
+        config.insert(
+            MAX_CONCURRENT_CONNECTIONS_KEY.to_string(),
+            DEFAULT_MAX_CONCURRENT_CONNECTIONS.to_string(),
+        );
         config
     }
 
@@ -583,14 +733,13 @@ impl TransportFactory for TcpTransportFactory {
             )));
         }
 
-        if let Some(size_str) = config.get(MAX_MESSAGE_SIZE_KEY)
-            && size_str.parse::<usize>().is_err()
-        {
-            return Err(crate::error::SynapseError::TransportError(format!(
-                "Invalid {}: {}",
-                MAX_MESSAGE_SIZE_KEY, size_str
-            )));
-        }
+        // The same check `new` applies, so validating and constructing cannot disagree.
+        positive_limit(config, MAX_MESSAGE_SIZE_KEY, DEFAULT_MAX_MESSAGE_SIZE)?;
+        positive_limit(
+            config,
+            MAX_CONCURRENT_CONNECTIONS_KEY,
+            DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+        )?;
 
         if let Some(timeout_str) = config.get("connection_timeout_ms")
             && timeout_str.parse::<u64>().is_err()
@@ -602,5 +751,70 @@ impl TransportFactory for TcpTransportFactory {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The buffer holds at most `limit` bytes and never reserves more, however much the peer
+    /// sends; a short message reserves no more than one chunk.
+    #[tokio::test]
+    async fn read_bounded_never_reserves_past_its_limit() {
+        let data = vec![b'x'; 200_000];
+        for limit in [
+            1,
+            100,
+            READ_CHUNK,
+            READ_CHUNK + 1,
+            50_001,
+            199_999,
+            200_000,
+            200_001,
+        ] {
+            let mut reader: &[u8] = &data;
+            let mut buffer = Vec::with_capacity(limit.min(READ_CHUNK));
+            read_bounded(&mut reader, &mut buffer, limit)
+                .await
+                .expect("read");
+            assert_eq!(buffer.len(), limit.min(data.len()), "limit {limit}");
+            assert!(
+                buffer.capacity() <= limit,
+                "limit {limit}: capacity {} exceeds it",
+                buffer.capacity()
+            );
+        }
+        let mut reader: &[u8] = b"short";
+        let mut buffer = Vec::with_capacity(READ_CHUNK);
+        read_bounded(&mut reader, &mut buffer, 1024 * 1024 + 1)
+            .await
+            .expect("read");
+        assert_eq!(buffer, b"short");
+        assert_eq!(buffer.capacity(), READ_CHUNK);
+    }
+
+    /// `validate_config` applies the same rule as `new`.
+    #[test]
+    fn validate_config_refuses_what_new_refuses() {
+        for key in [MAX_MESSAGE_SIZE_KEY, MAX_CONCURRENT_CONNECTIONS_KEY] {
+            for bad in ["0", "abc", ""] {
+                let config = HashMap::from([(key.to_string(), bad.to_string())]);
+                assert!(
+                    TcpTransportFactory.validate_config(&config).is_err(),
+                    "{key} = {bad:?}"
+                );
+            }
+            let config = HashMap::from([(key.to_string(), "7".to_string())]);
+            assert!(
+                TcpTransportFactory.validate_config(&config).is_ok(),
+                "{key}"
+            );
+        }
+        assert!(
+            TcpTransportFactory
+                .validate_config(&TcpTransportFactory.default_config())
+                .is_ok()
+        );
     }
 }

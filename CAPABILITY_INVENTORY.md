@@ -46,18 +46,27 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > yet on `main`):** TCP — the public `synapse::transport::TcpTransportFactory` built `tcp_simple`, which
 > had no listener, not `tcp_unified`: `abstraction.rs` defined a second `TcpTransportFactory` and the
 > glob re-export made it the public one. That factory and `tcp_simple.rs` are deleted, and
-> `tcp_unified::TcpTransportFactory` is re-exported by name (`7b036ff`); against the old factory the
+> `tcp_unified::TcpTransportFactory` is re-exported by name (transport contract PR B, Task 7); against the old factory the
 > end-to-end test fails at send (`All transports failed`: nothing listens on the receiver's port).
-> A review of `7b036ff` then found two ways `tcp_unified`'s receiver still lost messages behind a
+> A review of that commit then found two ways `tcp_unified`'s receiver still lost messages behind a
 > `Sent` receipt: it did one `read` of at most 8192 bytes, so any message whose JSON was larger was
 > dropped (a 2,000 B body is about 9.2 KB of JSON), and it queued with `try_lock`, dropping the message
-> whenever the queue was busy. The fix-round commit on the same branch reads each connection to EOF
-> (the sender now shuts down its write half), bounded by `max_message_size` (default 64 MiB, the size
-> `TransportCapabilities::tcp()` advertises; larger messages are refused with a logged warning), and
-> waits for the queue lock. What `tests/transport_repairs.rs` shows, over loopback in one process
-> only: a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`, pinned to
-> the sender's certificate, and opens intact; 400 concurrent signed sends all arrive once. Each
-> receipt still claims only `Sent`. Nothing here was run across machines.
+> whenever the queue was busy. The fix-round commits on the same branch read each connection to EOF
+> (the sender now shuts down its write half) and wait for the queue lock. What an unauthenticated
+> peer can make the receiver hold is bounded: at most `max_concurrent_connections` connections
+> (default 64) are read at once — at the cap the accept loop waits, so later connections queue in
+> the kernel's backlog — each into a buffer of at most `max_message_size` + 1 bytes (default 1 MiB),
+> for at most 30 s. `max_message_size` counts serialized JSON bytes, not body bytes
+> (`encrypted_content` serializes as a number array, a few characters per body byte); the sender
+> refuses with an error, rather than claiming `Sent`, any message over its own limit, and
+> `capabilities()` reports the configured limit. A limit that does not parse, or is 0, fails
+> construction instead of silently becoming the default. What `tests/transport_repairs.rs` shows,
+> over loopback in one process only: a sealed, signed message with an 8-byte and with a 16 KiB body
+> arrives `Verified`, pinned to the sender's certificate, and opens intact; 400 concurrent signed
+> sends all arrive once, each pinned to the sender and carrying its own body; a message just over a
+> 4096-byte limit is refused at send while the largest one under it arrives; with a cap of 2 and two
+> connections held open, a third is read only after one closes. Each receipt still claims only
+> `Sent`. Nothing here was run across machines.
 
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
 undocumented construction requirements.** That single fact matters more for planning than everything
@@ -423,10 +432,10 @@ thing.** My claim was true of the one I had read and unverifiable as stated.
 |---|---|
 | **DRAINS** (destructive — a second caller gets nothing) | `tcp_unified`, `udp_unified`, `http_unified` |
 | **clones** (non-destructive) | `production_http`, `quic_unified` |
-| **always returns empty** | `discovery`; also `tcp_simple` until PR B Task 7 deleted it (`7b036ff`, branch `feat/transport-contract-b`) |
+| **always returns empty** | `discovery`; also `tcp_simple` until transport contract PR B, Task 7 deleted it (branch `feat/transport-contract-b`) |
 
 ⚠️ **`tcp_simple::receive_messages` returned `Ok(vec![])` unconditionally, and said so** (quoted as
-of this audit; the file is deleted in `7b036ff`):
+of this audit; the file is deleted in transport contract PR B, Task 7):
 
 ```rust
 // For this simple implementation, we don't maintain persistent listeners
@@ -437,7 +446,7 @@ Ok(vec![])
 **That transport could never receive anything.** It was not broken by a bug — it had no receive path
 at all. ⚠️ **And it was the transport `unified_transport_demo` actually started** ("TCP Simple
 transport started" was the last line before that demo hung, §2.2), because the public
-`TcpTransportFactory` built it. Both the file and that factory are deleted in `7b036ff`.
+`TcpTransportFactory` built it. Both the file and that factory are deleted in transport contract PR B, Task 7.
 
 `discovery` also returns empty unconditionally, but legitimately: it is a service-discovery
 transport, not a message transport, and its comment says so. **Same code shape, opposite
@@ -445,7 +454,7 @@ significance — which is the point.**
 
 **Why this matters to a caller:** two implementations of one trait method, both typed
 `Result<Vec<IncomingMessage>>`, where one is destructive and one is not, and a third could never
-return anything (`tcp_simple`, until `7b036ff` deleted it). **A caller who reads `receive_messages`
+return anything (`tcp_simple`, until transport contract PR B, Task 7 deleted it). **A caller who reads `receive_messages`
 once and assumes it forever will be right about one transport and wrong about the others**, and the type signature is identical in every case.
 
 ⚠️ **METHOD CAVEAT, AND IT IS A CORRECTION AGAINST MY OWN CLASSIFIER.** I generated the table above
@@ -466,7 +475,7 @@ mis-read an early return as the whole body.
 > (`manager.rs:653`), and the unrelated `email.rs:162` and `router.rs:109`, which are not transports.
 > Of the semantics above, the two cloning implementations (`production_http`, `quic_unified`) are
 > deleted; `discovery` still adds nothing, `email_simple` now refuses, and `tcp_simple` added nothing
-> until PR B Task 7 deleted it (`7b036ff`, below).
+> until transport contract PR B, Task 7 deleted it (below).
 
 > **Status, 2026-09-18, PR B Task 7 (branch `feat/transport-contract-b`, not yet on `main`):**
 > `tcp_simple.rs` is deleted, with the shadowing `TcpTransportFactory` that built it; the public
@@ -738,7 +747,7 @@ not, and one of them does something worse.** Corrected by reading each `start_se
 | `udp_unified` | binds once at :72, stores `Arc<UdpSocket>`, receive path uses `self.socket` | ✅ **structurally sound** — my speculation was wrong |
 | `quic_unified` | **does not bind anything** | 🔴 **simulation — see below** |
 | `http_unified` | no bind call in the file | no server side |
-| `tcp_simple` | had no bind call; the file is deleted in `7b036ff` (PR B Task 7) | had no server side |
+| `tcp_simple` | had no bind call; the file is deleted in transport contract PR B, Task 7 | had no server side |
 
 ⚠️ **`websocket_unified` is the same bug and is more silent than the TCP one.** It stores the real
 listener, then in the spawned task binds a second one on the same port and swallows the failure with

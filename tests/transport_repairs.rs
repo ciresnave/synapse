@@ -43,6 +43,16 @@ fn port_key(kind: TransportType) -> &'static str {
     match kind {
         TransportType::Tcp => "listen_port",
         TransportType::Udp => "bind_port",
+        // http_unified.rs reads `server_port` (0, the default, means no server is bound).
+        TransportType::Http => "server_port",
+        // websocket_unified.rs reads `local_port` and binds it in `start`.
+        TransportType::WebSocket => "local_port",
+        // NAT traversal (`TransportType::Custom(1)`, nat_traversal.rs) has no factory and reads no
+        // config key: `NatTraversalTransport::new_with_scope` takes its port as an argument, and
+        // providers.rs passes 8080. A test must construct it directly with the port it wants.
+        TransportType::Custom(1) => panic!(
+            "NAT traversal has no port config key; construct NatTraversalTransport with the port"
+        ),
         other => panic!("no port key recorded for {other:?}; add it to port_key"),
     }
 }
@@ -56,7 +66,8 @@ enum Socket {
 fn socket_of(kind: TransportType) -> Socket {
     match kind {
         TransportType::Tcp | TransportType::Http | TransportType::WebSocket => Socket::Tcp,
-        TransportType::Udp => Socket::Udp,
+        // NAT traversal (`Custom(1)`) listens on a `UdpSocket` (nat_traversal.rs, `start`).
+        TransportType::Udp | TransportType::Custom(1) => Socket::Udp,
         other => panic!("no socket family recorded for {other:?}; add it to socket_of"),
     }
 }
@@ -82,6 +93,7 @@ async fn node(
     port: u16,
     store: TrustStore,
     sealing_key: SealingKeyPair,
+    extra_config: &HashMap<String, String>,
 ) -> TransportManager {
     assert!(
         !port_is_held(kind, port),
@@ -96,6 +108,7 @@ async fn node(
             .config_value()
             .to_string(),
     );
+    config.extend(extra_config.clone());
     let mut builder = TransportManagerBuilder::new();
     for other in ALL_TRANSPORTS {
         if other != kind {
@@ -180,6 +193,26 @@ impl Pair {
         alice_port: u16,
         bob_port: u16,
     ) -> Self {
+        Self::with_config(
+            kind,
+            alice_factory,
+            bob_factory,
+            alice_port,
+            bob_port,
+            &HashMap::new(),
+        )
+        .await
+    }
+
+    /// As `new`, with `extra_config` added to both nodes' transport config.
+    async fn with_config(
+        kind: TransportType,
+        alice_factory: Box<dyn TransportFactory>,
+        bob_factory: Box<dyn TransportFactory>,
+        alice_port: u16,
+        bob_port: u16,
+        extra_config: &HashMap<String, String>,
+    ) -> Self {
         assert_ne!(
             alice_port, bob_port,
             "Alice and Bob need different ports, or one node's bind fails"
@@ -204,9 +237,18 @@ impl Pair {
             alice_port,
             TrustStore::new(),
             alice_sealing,
+            extra_config,
         )
         .await;
-        let bob_node = node(kind, bob_factory, bob_port, bob_store, bob_sealing).await;
+        let bob_node = node(
+            kind,
+            bob_factory,
+            bob_port,
+            bob_store,
+            bob_sealing,
+            extra_config,
+        )
+        .await;
         Self {
             kind,
             alice,
@@ -246,14 +288,7 @@ impl Pair {
             received.incoming.transport_type, self.kind,
             "the message must arrive over the transport under test"
         );
-        match &received.sender {
-            SenderVerdict::Verified { key_id } => assert_eq!(
-                key_id,
-                &synapse::sender_auth::key_id(&self.alice_signing_key),
-                "the verdict must pin Alice's signing key"
-            ),
-            other => panic!("the message must arrive Verified: {other:?}"),
-        }
+        self.assert_verified_as_alice(received);
         let chain = received
             .certificate
             .as_ref()
@@ -271,6 +306,18 @@ impl Pair {
                 Payload::Opened(b) => format!("Opened({} bytes)", b.len()),
             }
         );
+    }
+
+    /// Bob's verdict on a message from Alice pins Alice's signing key.
+    fn assert_verified_as_alice(&self, received: &ReceivedMessage) {
+        match &received.sender {
+            SenderVerdict::Verified { key_id } => assert_eq!(
+                key_id,
+                &synapse::sender_auth::key_id(&self.alice_signing_key),
+                "the verdict must pin Alice's signing key"
+            ),
+            other => panic!("the message must arrive Verified: {other:?}"),
+        }
     }
 
     fn assert_receipt(&self, receipt: &DeliveryReceipt, expected: &DeliveryConfirmation) {
@@ -390,9 +437,10 @@ async fn tcp_loses_no_message_under_concurrent_sends() {
     let messages: Vec<SecureMessage> = (0..N)
         .map(|i| pair.signed(format!("concurrent {i}").as_bytes()))
         .collect();
-    let sent: HashSet<String> = messages
+    // Each message id with the body it carries, so every arrival is checked against its own body.
+    let sent: HashMap<String, Vec<u8>> = messages
         .iter()
-        .map(|m| m.message_id.0.to_string())
+        .map(|m| (m.message_id.0.to_string(), m.encrypted_content.clone()))
         .collect();
     assert_eq!(sent.len(), N, "message ids must be distinct");
 
@@ -400,7 +448,8 @@ async fn tcp_loses_no_message_under_concurrent_sends() {
         let pair = Arc::clone(&pair);
         tokio::spawn(async move {
             let mut received = Vec::new();
-            let deadline = Instant::now() + Duration::from_secs(10);
+            // Generous for a slow CI runner: a passing run returns as soon as all N arrive.
+            let deadline = Instant::now() + Duration::from_secs(60);
             while received.len() < N && Instant::now() < deadline {
                 received.extend(pair.bob_node.receive_messages().await.expect("receive"));
                 tokio::task::yield_now().await;
@@ -431,9 +480,15 @@ async fn tcp_loses_no_message_under_concurrent_sends() {
     for message in &received {
         let id = message.incoming.message.message_id.0.to_string();
         assert!(seen.insert(id.clone()), "message {id} arrived twice");
-        assert!(sent.contains(&id), "message {id} was never sent");
-        assert!(message.sender.is_verified(), "{:?}", message.sender);
-        assert!(message.payload.is_open(), "{:?}", message.payload);
+        let expected = sent
+            .get(&id)
+            .unwrap_or_else(|| panic!("message {id} was never sent"));
+        pair.assert_verified_as_alice(message);
+        assert_eq!(
+            message.payload,
+            Payload::Plain(expected.clone()),
+            "message {id} must arrive with the body it was sent with"
+        );
     }
     assert_eq!(
         received.len(),
@@ -444,4 +499,195 @@ async fn tcp_loses_no_message_under_concurrent_sends() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let after = pair.bob_node.receive_messages().await.expect("receive");
     assert!(after.is_empty(), "{} extra messages arrived", after.len());
+}
+
+/// A TCP config naming `key` = `value`.
+fn tcp_config(key: &str, value: &str) -> HashMap<String, String> {
+    HashMap::from([(key.to_string(), value.to_string())])
+}
+
+/// A limit that does not parse, or is zero, must refuse construction: before, a typo silently
+/// became the default and `0` was accepted. A valid value is the positive control.
+#[tokio::test]
+async fn tcp_refuses_an_unparseable_or_zero_limit() {
+    for key in ["max_message_size", "max_concurrent_connections"] {
+        for bad in ["", "abc", "0", "-1", "1MiB"] {
+            match synapse::transport::TcpTransportFactory
+                .create_transport(&tcp_config(key, bad))
+                .await
+            {
+                Ok(_) => panic!("{key} = {bad:?} must be refused, not replaced by a default"),
+                Err(e) => assert!(
+                    e.to_string().contains(key),
+                    "the error for {key} = {bad:?} must name the key: {e}"
+                ),
+            }
+        }
+        assert!(
+            synapse::transport::TcpTransportFactory
+                .create_transport(&tcp_config(key, "4096"))
+                .await
+                .is_ok(),
+            "{key} = 4096 must be accepted"
+        );
+    }
+}
+
+/// The sender refuses a message whose serialized form is over its `max_message_size`, instead of
+/// writing it and claiming `Sent` for a message a receiver with the same limit drops. The largest
+/// message that fits still crosses, so the limit is the same number on both sides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_refuses_at_send_a_message_over_its_limit() {
+    const LIMIT: usize = 4096;
+    let config = tcp_config("max_message_size", &LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::Tcp,
+        tcp(),
+        tcp(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+
+    // The largest message at or under the limit, and the first one over it. Each extra body byte
+    // adds two or three serialized characters, so "over" is over by only a few bytes.
+    let mut fits = None;
+    let mut over = None;
+    for len in 0..LIMIT {
+        let message = pair.signed(&vec![7u8; len]);
+        let size = serde_json::to_vec(&message).expect("serialize").len();
+        if size <= LIMIT {
+            fits = Some((message, size));
+        } else {
+            over = Some((message, size));
+            break;
+        }
+    }
+    let (fits, fits_size) = fits.expect("some message fits the limit");
+    let (over, over_size) = over.expect("some message exceeds the limit");
+    assert!(
+        over_size - LIMIT <= 8,
+        "the refused message must be just over the limit: {over_size} bytes against {LIMIT}"
+    );
+
+    // The one that fits crosses, and Bob, with the same limit, accepts it.
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &fits)
+        .await
+        .unwrap_or_else(|e| panic!("a message of {fits_size} bytes fits the limit: {e}"));
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    let mut arrived = Vec::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        arrived.extend(pair.bob_node.receive_messages().await.expect("receive"));
+        if !arrived.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        arrived.len(),
+        1,
+        "the {fits_size}-byte message must arrive once"
+    );
+    assert_eq!(arrived[0].incoming.message.message_id.0, fits.message_id.0);
+    pair.assert_verified_as_alice(&arrived[0]);
+
+    // The one over is refused by the transport itself, with an error that says why.
+    let alice_transport = synapse::transport::TcpTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("a client-only transport with the same limit");
+    let refusal = match alice_transport
+        .send_message(&pair.bob_target(), &over)
+        .await
+    {
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        refusal.contains("max_message_size")
+            && refusal.contains(&over_size.to_string())
+            && refusal.contains(&LIMIT.to_string()),
+        "the refusal must name the limit and both sizes: {refusal}"
+    );
+    // And through the manager, the send fails rather than claiming a delivery.
+    assert!(
+        pair.alice_node
+            .send_message(&pair.bob_target(), &over)
+            .await
+            .is_err(),
+        "the manager must not report the over-limit message as sent"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = pair.bob_node.receive_messages().await.expect("receive");
+    assert!(
+        after.is_empty(),
+        "nothing over the limit may reach Bob; {} arrived",
+        after.len()
+    );
+}
+
+/// With `max_concurrent_connections` = 2 and two connections held open, a third is not read
+/// until one of them closes: the accept loop waits for a permit, so an unauthenticated peer can
+/// make the receiver hold at most that many buffers at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tcp_reads_no_more_connections_at_once_than_its_cap() {
+    let pair = Pair::with_config(
+        TransportType::Tcp,
+        tcp(),
+        tcp(),
+        free_port(),
+        free_port(),
+        &tcp_config("max_concurrent_connections", "2"),
+    )
+    .await;
+    let bob = ("127.0.0.1", pair.bob_port);
+    let first = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    let second = tokio::net::TcpStream::connect(bob).await.expect("connect");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let message = pair.signed(b"behind the cap");
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &message)
+        .await
+        .expect("the kernel accepts the connection into the backlog");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let early = pair.bob_node.receive_messages().await.expect("receive");
+    assert!(
+        early.is_empty(),
+        "with two connections held and a cap of 2, a third was read anyway"
+    );
+
+    drop(first);
+    let mut arrived = Vec::new();
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        arrived.extend(pair.bob_node.receive_messages().await.expect("receive"));
+        if !arrived.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        arrived.len(),
+        1,
+        "once a held connection closes, the waiting message must be read"
+    );
+    assert_eq!(
+        arrived[0].incoming.message.message_id.0,
+        message.message_id.0
+    );
+    pair.assert_verified_as_alice(&arrived[0]);
+    assert_eq!(
+        arrived[0].payload,
+        Payload::Plain(b"behind the cap".to_vec())
+    );
+    drop(second);
 }
