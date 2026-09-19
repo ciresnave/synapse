@@ -99,14 +99,23 @@ length followed by its bytes**, in this order:
 | # | field | bytes |
 |---|---|---|
 | 1 | domain tag | ASCII `synapse/sender-proof/v1` |
-| 2 | `message_id` | the UUID's 16 raw bytes |
-| 3 | `from_global_id` | UTF-8 |
-| 4 | `to_global_id` | UTF-8 |
-| 5 | `timestamp` | Unix time in **microseconds**, as an 8-byte big-endian signed integer |
-| 6 | `security_level` | its serde name in UTF-8 (`public`, `private`, `authenticated`, `secure`) |
-| 7 | `sender_proof.key_id` | UTF-8 |
-| 8 | payload | SHA-256 of `encrypted_content` (32 bytes) |
-| 9 | `metadata` | the field's bytes are a 4-byte count, then each pair as a length-prefixed key and a length-prefixed value, **sorted by key bytes** |
+| 2 | `protocol_version` | 2 raw bytes, big-endian (`u16`) |
+| 3 | `message_id` | the UUID's 16 raw bytes |
+| 4 | `from_global_id` | UTF-8 |
+| 5 | `to_global_id` | UTF-8 |
+| 6 | `timestamp` | Unix time in **microseconds**, as an 8-byte big-endian signed integer |
+| 7 | `security_level` | its serde name in UTF-8 (`public`, `private`, `authenticated`, `secure`) |
+| 8 | `sender_proof.key_id` | UTF-8 |
+| 9 | payload | SHA-256 of `encrypted_content` (32 bytes) |
+| 10 | `metadata` | the field's bytes are a 4-byte count, then each pair as a length-prefixed key and a length-prefixed value, **sorted by key bytes** |
+
+**Amended before 2.0 was published (transport-contract, Task 5).** Row 2, `protocol_version`, was
+added to this table after the rest of the layout was implemented and before any release shipped
+it. The domain tag deliberately stays `synapse/sender-proof/v1`: the old (9-field) and new
+(10-field) layouts can never be confused, because they differ at the very first byte after the
+tag -- the old layout's next field is `message_id`'s length, always `00000010` (16, a UUID); the
+new layout's next field is `protocol_version`'s length, always `00000002`. No published release
+ever produced the old (9-field) layout, so there is nothing in the wild to be confused with.
 
 **Not covered: `routing_path`.** Relays append to it, so a signature over it would break at the first
 hop. A consumer must treat `routing_path` as the relays' own claim.

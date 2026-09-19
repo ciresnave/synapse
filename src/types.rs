@@ -486,7 +486,7 @@ pub fn default_protocol_version() -> u16 {
 }
 
 /// Secure message for network transport
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct SecureMessage {
     pub message_id: UuidWrapper,
     pub to_global_id: String,
@@ -504,6 +504,27 @@ pub struct SecureMessage {
     /// which case it means version 1.
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u16,
+}
+
+// Hand-written, not `#[derive(Default)]`: a derived Default would give `protocol_version: 0`, a
+// version outside `SUPPORTED_PROTOCOL_VERSIONS` that no receiver accepts. Nothing calls
+// `SecureMessage::default()` today, but a future caller should not silently build an
+// unverifiable message.
+impl Default for SecureMessage {
+    fn default() -> Self {
+        Self {
+            message_id: UuidWrapper::default(),
+            to_global_id: String::default(),
+            from_global_id: String::default(),
+            encrypted_content: Vec::default(),
+            sender_proof: crate::sender_auth::SenderProof::default(),
+            timestamp: DateTimeWrapper::default(),
+            security_level: SecurityLevel::default(),
+            routing_path: Vec::default(),
+            metadata: HashMap::default(),
+            protocol_version: PROTOCOL_VERSION,
+        }
+    }
 }
 
 impl SecureMessage {

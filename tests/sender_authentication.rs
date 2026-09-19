@@ -81,10 +81,13 @@ const BOB_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMFECAQEwBQYDK2VwBCIEIJX5WiDi
 // the one embedded in the PEM.
 const EXPECTED_ALICE_KEY_ID: &str =
     "9acdd3973cd0929292a45aa964fc9847efb06b0ef0fee8fe5642096b025eb338";
-// Recomputed for spec §4's v1 canonical input plus `protocol_version` (2 raw bytes, big-endian,
-// length-prefixed like every other field) immediately after the domain tag -- Task 5, transport
-// contract. Same independent Python implementation and `cryptography` version as before; only the
-// two bytes `0000000200 01` (length 2, value 1) are new, right after the domain tag.
+// Recomputed for spec §4's v1 canonical input as AMENDED (Task 5, transport contract) to add
+// `protocol_version` (2 raw bytes, big-endian, length-prefixed like every other field) immediately
+// after the domain tag. Same Python script and `cryptography` version as the original test 8
+// values, but this is NOT independent confirmation of the new layout the way the original vector
+// was of spec §4 before this amendment: the script was written by, and the amendment reviewed by,
+// the same person implementing this change. Six bytes are new, right after the domain tag:
+// `00000002` (the 4-byte length, 2) followed by `0001` (the value, 1).
 const EXPECTED_CANONICAL_HEX: &str = "0000001773796e617073652f73656e6465722d70726f6f662f76310000000200010000001000112233445566778899aabbccddeeff00000012616c6963654073796e617073652e7465737400000010626f624073796e617073652e746573740000000800065ba5d156d2400000000d61757468656e746963617465640000004039616364643339373363643039323932393261343561613936346663393834376566623036623065663066656538666535363432303936623032356562333338000000203ca0d02d916ddbc62d938be706be3b9049079fc69763fe62421958bb1629b59d0000002c00000002000000046c616e650000000773796e6170736500000005746f706963000000086772656574696e67";
 const EXPECTED_SIG_HEX: &str = "b4126ae459fcdd9da7e80b23c0246ad2b3584a0e86ab4070d817071b898a951972792eb04bba015cf5d981929441f011aedffacac9e75e70f28e1d6d5b647d0a";
 

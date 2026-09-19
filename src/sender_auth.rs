@@ -98,6 +98,13 @@ pub(crate) fn put(out: &mut Vec<u8>, bytes: &[u8]) {
 /// `protocol_version` sits immediately after the domain tag so a relay that rewrites it (for
 /// example to downgrade two peers to an older wire format) invalidates the signature.
 ///
+/// **`protocol_version` was added to this layout before 2.0 was published** (transport-contract,
+/// Task 5) -- this changes the signed bytes, so a message or ack signed before this change does
+/// not verify after it. Acceptable as part of 2.0's single wire break. The domain tag stays
+/// `synapse/sender-proof/v1`: the old (9-field) and new (10-field) layouts cannot be confused,
+/// since they differ at the first byte after the tag, and no published release ever produced the
+/// old layout.
+///
 /// `routing_path` is NOT covered: relays append to it.
 pub fn canonical_input(message: &SecureMessage) -> Vec<u8> {
     let mut out = Vec::new();
@@ -1447,5 +1454,42 @@ mod tests {
         truncate_timestamp_to_micros(&mut m);
         assert!(!has_sub_micro_digits(&m));
         assert_eq!(m.timestamp.0.timestamp_subsec_nanos(), 123_456_000);
+    }
+
+    /// The relay test in `tests/protocol_version.rs` shows `verify_at`'s version-first gate
+    /// refuses a rewritten version, which alone does not prove the SIGNATURE binds to
+    /// `protocol_version` -- `verify_at` never even reaches the signature check for an
+    /// unsupported version. This calls `TrustStore::verify_against_pinned_key` directly, bypassing
+    /// the version gate entirely (it runs inside `verify_at`, not here), so a rewrite can only be
+    /// caught by the signature itself.
+    #[test]
+    fn verify_against_pinned_key_rejects_a_rewritten_version_on_the_signature() {
+        let agent = CryptoManager::new_with_keypair();
+        let pinned = agent.public_key_bytes().unwrap();
+
+        let mut message = SecureMessage::new("b", "a", b"hello".to_vec(), SecurityLevel::Public);
+        assert_eq!(message.protocol_version, crate::types::PROTOCOL_VERSION);
+        agent.sign_secure_message(&mut message).unwrap();
+
+        // Control: the message as signed verifies.
+        assert_eq!(
+            TrustStore::verify_against_pinned_key(&message, &pinned),
+            SenderVerdict::Verified {
+                key_id: key_id(&pinned)
+            }
+        );
+
+        // The relay's rewrite: change the version in place, WITHOUT re-signing. With the version
+        // gate bypassed (this function is called directly, not through `verify_at`), the only
+        // thing that can catch this is the signature no longer matching `canonical_input`.
+        let mut rewritten = message.clone();
+        rewritten.protocol_version = 2;
+        assert_eq!(
+            TrustStore::verify_against_pinned_key(&rewritten, &pinned),
+            SenderVerdict::Contradicted {
+                reason: ContradictedReason::BadSignature
+            },
+            "the signature must bind to protocol_version even with the version gate bypassed"
+        );
     }
 }

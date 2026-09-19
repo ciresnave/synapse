@@ -95,6 +95,15 @@ on, in a comment beside it.** A `Delivered` with no such event is the bug this s
   alongside the account key and certificate.
 - The mDNS `"version"` TXT record is **renamed** to `synapse_protocol` and carries the same integer, so
   discovery and the wire can no longer disagree about what "version" means.
+- **This changes the signed bytes** (sender-authentication spec §4, amended): `protocol_version` was
+  inserted as a signed field, so messages and acks signed before this change do not verify after it.
+  Acceptable as part of 2.0's single wire break; there is no in-place upgrade path for a signature
+  produced under the old canonical input.
+- **A value that does not fit a `u16`** (out of range, negative, or not a number at all) is a malformed
+  message, not an unsupported version: it is rejected by serde at deserialisation, before `verify_at`
+  runs, and the transport drops it silently the same way it drops any other malformed datagram. Only a
+  value that parses as a `u16` and is absent from `SUPPORTED_PROTOCOL_VERSIONS` reaches
+  `Unverifiable { UnsupportedVersion }`.
 
 ## 6. What actually works today
 

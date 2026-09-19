@@ -191,6 +191,35 @@ fn a_relay_cannot_downgrade_the_version_without_detection() {
     );
 }
 
+/// Extracts one function's body (from its `fn NAME` line through the matching closing brace, by
+/// simple brace counting) out of `src`, so the check below reads only the TXT-record builders and
+/// is not brittle against an unrelated `"1.0"` or `"version"` literal appearing anywhere else in a
+/// 1000+ line file.
+fn extract_fn<'a>(src: &'a str, fn_name: &str) -> &'a str {
+    let needle = format!("fn {fn_name}");
+    let start = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("fn {fn_name} not found in source"));
+    let body_start = src[start..]
+        .find('{')
+        .map(|i| start + i)
+        .expect("fn has a body");
+    let mut depth = 0usize;
+    for (offset, ch) in src[body_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &src[start..body_start + offset + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("fn {fn_name} body never closes");
+}
+
 /// Both mDNS TXT-record paths advertise `synapse_protocol=1` and neither advertises the old
 /// `version` key.
 ///
@@ -200,27 +229,45 @@ fn a_relay_cannot_downgrade_the_version_without_detection() {
 /// instantiating either live (as `mdns_enhanced.rs`'s own
 /// `test_enhanced_mdns_creation_refuses_under_loopback` shows for its default scope) either
 /// refuses outright or risks the Windows Firewall prompt this crate's tests are documented to
-/// avoid. So this reads the source directly: a regression that reintroduces the `"version"` key,
-/// or drops `"synapse_protocol"`, fails here.
+/// avoid. So this reads the source directly, scoped to the specific TXT-record-building functions
+/// (not the whole file, which would make this brittle against any future unrelated `"1.0"` or
+/// `"version"` literal elsewhere in either file): a regression that reintroduces the `"version"`
+/// key, or drops `"synapse_protocol"`, in one of these functions fails here.
 #[test]
 fn mdns_txt_records_advertise_synapse_protocol_not_version() {
     let discovery_src = include_str!("../src/transport/discovery.rs");
     let mdns_enhanced_src = include_str!("../src/transport/mdns_enhanced.rs");
 
-    for (name, src) in [
-        ("discovery.rs", discovery_src),
-        ("mdns_enhanced.rs", mdns_enhanced_src),
-    ] {
+    let sites = [
+        (
+            "discovery.rs::initialize_discovery",
+            extract_fn(discovery_src, "initialize_discovery"),
+        ),
+        (
+            "mdns_enhanced.rs::build_txt_records",
+            extract_fn(mdns_enhanced_src, "build_txt_records"),
+        ),
+        (
+            "mdns_enhanced.rs::create_service_responder",
+            extract_fn(mdns_enhanced_src, "create_service_responder"),
+        ),
+        (
+            "mdns_enhanced.rs::comprehensive_discovery",
+            extract_fn(mdns_enhanced_src, "comprehensive_discovery"),
+        ),
+    ];
+
+    for (name, body) in sites {
         assert!(
-            src.contains("\"synapse_protocol\""),
+            body.contains("\"synapse_protocol\""),
             "{name} must advertise the synapse_protocol TXT key"
         );
         assert!(
-            !src.contains("\"version\""),
+            !body.contains("\"version\""),
             "{name} must not advertise the old version TXT key"
         );
         assert!(
-            !src.contains("\"1.0\"") && !src.contains("\"1.1.0\""),
+            !body.contains("\"1.0\"") && !body.contains("\"1.1.0\""),
             "{name} must not hard-code the old 1.0/1.1.0 disagreement"
         );
     }
