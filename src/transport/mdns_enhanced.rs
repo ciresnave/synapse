@@ -571,18 +571,12 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
         target: &crate::transport::abstraction::TransportTarget,
         _message: &crate::types::SecureMessage,
     ) -> crate::error::Result<crate::transport::abstraction::DeliveryReceipt> {
-        // Use entity_id for sending
-        // Use entity_id for sending
-        let msg_id = target.identifier.clone();
-        // Simulate sending logic here, replace with actual send_to_peer if needed
-        Ok(crate::transport::abstraction::DeliveryReceipt {
-            message_id: msg_id,
-            transport_used: crate::transport::abstraction::TransportType::AutoDiscovery,
-            delivery_time: std::time::Duration::from_millis(50),
-            target_reached: target.identifier.clone(),
-            confirmation: crate::transport::abstraction::DeliveryConfirmation::Delivered,
-            metadata: std::collections::HashMap::new(),
-        })
+        // mDNS finds peers; it does not carry messages. This used to return a simulated
+        // `Delivered` receipt for a send that never happened (spec §4), so it refuses instead.
+        Err(crate::error::SynapseError::TransportError(format!(
+            "mDNS carries discovery only, not messages; cannot send to {}",
+            target.identifier
+        )))
     }
 
     async fn test_connectivity(

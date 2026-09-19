@@ -797,7 +797,12 @@ impl Transport for WebSocketTransportImpl {
                     transport_used: TransportType::WebSocket,
                     delivery_time: duration,
                     target_reached: connection_id.clone(),
-                    confirmation: DeliveryConfirmation::Delivered,
+                    // `Sent`, not `Delivered`: the connection is a bare TCP connect with the
+                    // WebSocket handshake skipped, so no protocol event shows the peer received
+                    // anything (spec §4). Even `Sent` overstates the existing-connection path:
+                    // `send_via_existing_connection` discards the bytes unwritten. Task 8 adds a
+                    // real handshake.
+                    confirmation: DeliveryConfirmation::Sent,
                     metadata: {
                         let mut map = HashMap::new();
                         map.insert("connection_id".to_string(), connection_id);

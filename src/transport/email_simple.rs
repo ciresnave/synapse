@@ -176,7 +176,9 @@ impl Transport for SimpleEmailTransport {
             bytes_sent: 0,
             bytes_received: 0,
             average_latency_ms: 60000, // 60 seconds
-            reliability_score: 0.95,
+            // Every send/receive/connect path refuses until the email slice lands, so nothing
+            // this transport does succeeds.
+            reliability_score: 0.0,
             active_connections: 0,
             last_updated_timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

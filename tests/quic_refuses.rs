@@ -31,8 +31,9 @@ async fn quic_factory_refuses_to_construct() {
 async fn udp_factory_still_constructs_control() {
     let factory = UdpTransportFactory;
     let mut config = factory.default_config();
-    // Bind loopback on an OS-chosen port -- never a wildcard address, which raises a
-    // Windows Firewall prompt on this machine.
+    // Constructing the UDP transport binds nothing: the factory calls `start_server` (the only
+    // bind) just when `bind_port` parses to a port above 0. Port 0 therefore skips it, so this
+    // control opens no socket -- no Windows Firewall prompt, no clash with the default port 8081.
     config.insert("bind_port".to_string(), "0".to_string());
 
     let result = factory.create_transport(&config).await;

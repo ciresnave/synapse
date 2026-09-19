@@ -286,6 +286,8 @@ impl Transport for MockTransport {
             transport_used: abstraction::TransportType::Tcp,
             delivery_time: self.latency,
             target_reached: target.identifier.clone(),
+            // protocol event: none -- this is a test double with no protocol and no peer; it
+            // claims `Delivered` only so tests can exercise that status.
             confirmation: abstraction::DeliveryConfirmation::Delivered,
             metadata: std::collections::HashMap::new(),
         })
