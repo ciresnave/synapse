@@ -95,11 +95,6 @@ jobs:
         override: true
         components: clippy, rustfmt
     
-    - name: Install wasm-pack
-      uses: jetli/wasm-pack-action@v0.4.0
-      with:
-        version: 'latest'
-    
     # Order and `if: always()` are deliberate.
     #
     # This job used to run fmt -> clippy -> build -> test with every step
@@ -140,17 +135,29 @@ jobs:
       if: always()
       run: cargo clippy -- -D warnings
 
-    # NOTE: this step has never executed. There is no `wasm/` directory in this
-    # repository and there never has been -- the only top-level wasm entries are
-    # Cargo-wasm.toml, build-wasm.sh and build-wasm.bat. Left in place and
-    # marked rather than silently deleted or "fixed": whether Synapse ships a
-    # wasm package is a decision, not a typo.
+  # The WebAssembly package has its own job so that `Build and Test` can be a
+  # required check. While it was a step of that job, it failed on every run with
+  # `cd: wasm: No such file or directory` -- there is no `wasm/` directory in this
+  # repository and there never has been (the only top-level wasm entries are
+  # Cargo-wasm.toml, build-wasm.sh and build-wasm.bat) -- so `Build and Test` was
+  # red on every run whatever the code did. This job stays red until the WASM
+  # slice (after Synapse 2.0) builds the package; it is deliberately not required.
+  wasm:
+    name: Build WebAssembly package
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install wasm-pack
+      uses: jetli/wasm-pack-action@v0.4.0
+      with:
+        version: 'latest'
+
     - name: Build WebAssembly package
-      if: always()
       run: |
         cd wasm
         wasm-pack build --target web
-    
+
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
