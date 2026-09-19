@@ -36,6 +36,12 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 | **WebSocket** | 🔴 same defect as TCP, read not run |
 | **QUIC** | 🔴 **simulation** — binds nothing, fabricates connections with a hardcoded RTT |
 
+> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** QUIC — **deleted**: `quic_unified.rs` is gone and
+> `QuicTransportFactory` refuses to construct until the QUIC slice (`5fb180f`). WebSocket — the double
+> bind is **still open**; it is fixed in PR B (plan Task 8), not PR A. PR A makes WebSocket's
+> `send_message` refuse instead of claiming a delivery (`8087c3e`). The TCP and UDP rows are unchanged
+> by PR A.
+
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
 undocumented construction requirements.** That single fact matters more for planning than everything
 else in this document.
@@ -168,6 +174,13 @@ The transport **accepted an invalid email address that the test asserts must be 
 not an infrastructure problem; it is the test doing its job. It took 8.08s, which suggests a network
 timeout path is involved. **Deliberately not fixed** — it is a behaviour question, and the code that
 owns it may not survive the merge.
+
+> **Status, 2026-09-18: fixed in PR A of the transport contract (branch `design/transport-contract`, not yet on `main`) (`a258703`, `2a4dd9f`).** `email_simple.rs` had three
+> disagreeing address checks; `test_connectivity` required only an `@`, so `invalid@` passed as
+> `connected: true`. One validator (`valid_address`) now serves all three, and the transport, which
+> touches no network, refuses to send, receive or report a connection for a well-formed address
+> ("not implemented yet; it arrives in the email slice") instead of faking one.
+> `transport_error_handling_test` passes; the full run at `593f1c9` shows 0 failures.
 
 ### 2.2 ⚠️ END-TO-END ROUND TRIP: MEASURED, AND IT FAILS WHILE REPORTING SUCCESS
 
@@ -361,6 +374,13 @@ networking at all.** `quic_unified.rs:415` constructs `Delivered` — a stronger
 `Sent` — with the comment *"QUIC provides delivery confirmation"*, in a module that binds nothing and
 fabricates its connections (§2.2). **The simulation out-claims every real transport.**
 
+> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** `quic_unified.rs` is **deleted** and QUIC refuses to
+> construct (`5fb180f`). The other `Delivered` claims named in the control above are gone too:
+> `mdns_enhanced.rs`'s send refuses (`9d4b543`), and `providers.rs`'s is the test mock, marked as a
+> test double. `tests/delivery_claims.rs` now scans `src/transport/` so every `Delivered`
+> construction names its protocol event and only the manager constructs `Acknowledged` or `Expired`
+> (`9d4b543`, `8087c3e`, `593f1c9`).
+
 **Not fixed here.** A receiver-derived acknowledgement is a protocol addition, not a repair, and it
 is precisely the kind of decision the pending merge should make deliberately. **Recorded because it
 is cheap to design in now and, in the FAM lane's words from having lived it, unfixable later.**
@@ -418,6 +438,15 @@ the whole function shows it does call `receive_websocket_messages()` and has a r
 read every remaining implementation in full. **The rows shown are the ones I read; the others are
 unmeasured, not "other".** A window is not a function, and a heuristic over a window will confidently
 mis-read an early return as the whole body.
+
+> **Status, 2026-09-18: fixed for transports in PR A of the transport contract (branch `design/transport-contract`, not yet on `main`).** The old `Transport` trait and
+> the files that never compiled are deleted (`a83c4d5`), and a transport's receive is now one
+> signature, `TransportReceive::receive_raw(&self, &mut RawInbox)`, which only the manager can call
+> (`fad7277`, `11cfddf`). `git grep -nE 'fn receive_messages\b' -- '*.rs'` finds 25 definitions in
+> 23 files at `origin/main` `624c62d` and 3 at `593f1c9`: `TransportManager::receive_messages`
+> (`manager.rs:653`), and the unrelated `email.rs:162` and `router.rs:109`, which are not transports.
+> Of the semantics above, the two cloning implementations (`production_http`, `quic_unified`) are
+> deleted; `tcp_simple` and `discovery` still add nothing, and `email_simple` now refuses.
 
 #### ⚠️ NO MESSAGE'S SENDER IS EVER AUTHENTICATED, AND THE TYPE SAYS OTHERWISE
 
@@ -717,6 +746,11 @@ nothing, while `quinn` is present in `Cargo.lock`. Its own comments say so:
 **So an operator enabling QUIC sees `QUIC transport started` in the logs and has no QUIC.** The
 orphaned `src/transport/quic.rs` (740 lines, §5.3) *does* contain a real `endpoint.accept()` loop —
 **the working-looking implementation is the one excluded from the build.**
+
+> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** `quic_unified` — **deleted**, and QUIC refuses to
+> construct (`5fb180f`). `websocket_unified`'s double bind — **still open**, fixed in PR B (plan Task
+> 8), not PR A; PR A only makes its send refuse (`8087c3e`). The orphaned `quic.rs` is deleted too
+> (`a83c4d5`).
 
 **Still unmeasured end-to-end:** UDP, WebSocket, QUIC, HTTP, email. The table above is a reading of
 `start_server` in each, not a round trip. **`udp_unified` being structurally sound is not a claim that
@@ -1081,6 +1115,11 @@ project's name.**
   check that reads it.
 - It only goes one way: `discovery.rs` never reads TXT records back (`txt_records: HashMap::new()`).
   Not fixed here. The merge decides what the key should mean.
+
+> **Status, 2026-09-18: fixed in PR A of the transport contract (branch `design/transport-contract`,
+> not yet on `main`) (`06f33a6`).** No `version` key is advertised any more: `discovery.rs` and both
+> `mdns_enhanced` advertisements carry `synapse_protocol=1` (the signed wire `protocol_version`), and
+> `mdns_enhanced`'s reader reads that key. The crate version is no longer advertised.
 
 ---
 
