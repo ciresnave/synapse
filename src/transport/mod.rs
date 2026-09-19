@@ -14,9 +14,6 @@ pub mod manager;
 // Dependency injection providers for testability
 pub mod providers;
 
-#[cfg(test)]
-mod providers_test;
-
 // Transport implementations
 #[cfg(not(target_arch = "wasm32"))]
 pub mod discovery; // New auto-discovery based implementation
@@ -44,59 +41,27 @@ pub mod tcp_simple;
 // Platform-specific transport modules (not available in WASM)
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http_unified;
-pub mod production_http; // Production-grade HTTP server with Axum
 // Consolidated TCP implementation - using tcp_unified as primary
 #[cfg(not(target_arch = "wasm32"))]
-pub mod tcp_unified; // Primary TCP implementation
-// Legacy TCP implementations - disable for consolidation
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod tcp;
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod tcp_enhanced;
-// Consolidated UDP implementation
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod udp_unified; // Already declared above - remove duplicate
-// Legacy UDP implementation - disable for consolidation
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod udp;
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod mdns;
-#[cfg(not(target_arch = "wasm32"))]
-// pub mod email_enhanced; // Temporarily disabled due to compilation issues
-#[cfg(not(target_arch = "wasm32"))]
 pub mod email_simple; // Simplified email transport avoiding TLS complexity
-#[cfg(not(target_arch = "wasm32"))]
-// pub mod email_unified; // Temporarily disabled due to complex dependency issues
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mdns_enhanced;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod nat_traversal;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tcp_unified; // Primary TCP implementation
 // Unified transport implementations
-#[cfg(not(target_arch = "wasm32"))]
-// pub mod quic; // Temporarily disabled due to trait mismatch
-#[cfg(not(target_arch = "wasm32"))]
-pub mod quic_unified;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod websocket_unified; // Re-enable WebSocket unified implementation
-// Legacy implementations - temporarily disabled
-// #[cfg(not(target_arch = "wasm32"))]
-// pub mod websocket; // Temporarily disabled due to trait mismatch
-// pub mod quic;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod llm_discovery;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod quic_unified;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod router;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod websocket_unified; // Re-enable WebSocket unified implementation
 
-use crate::{
-    circuit_breaker::{CircuitBreaker, RequestOutcome},
-    error::Result,
-    types::*,
-};
-use async_trait::async_trait;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use crate::error::Result;
+use std::time::{Duration, Instant};
 
 /// Available transport routes with performance characteristics
 #[derive(Debug, Clone)]
@@ -259,105 +224,6 @@ pub struct HybridConnection {
     pub connection_latency: Duration,
     pub total_setup_time: Duration,
     pub metrics: TransportMetrics,
-}
-
-/// Abstract transport trait for all communication methods
-#[async_trait]
-pub trait Transport: Send + Sync {
-    /// Send a message via this transport
-    async fn send_message(&self, target: &str, message: &SecureMessage) -> Result<String>;
-
-    /// Send a message with circuit breaker protection
-    async fn send_message_with_breaker(
-        &self,
-        target: &str,
-        message: &SecureMessage,
-        circuit_breaker: Option<Arc<CircuitBreaker>>,
-    ) -> Result<String> {
-        if let Some(breaker) = circuit_breaker {
-            // Check if circuit allows request
-            if !breaker.can_proceed().await {
-                return Err(crate::error::SynapseError::TransportError(
-                    "Circuit breaker open - request rejected".to_string(),
-                ));
-            }
-
-            // Attempt the request
-            match self.send_message(target, message).await {
-                Ok(result) => {
-                    breaker.record_outcome(RequestOutcome::Success).await;
-                    Ok(result)
-                }
-                Err(e) => {
-                    breaker
-                        .record_outcome(RequestOutcome::Failure(e.to_string()))
-                        .await;
-                    Err(e)
-                }
-            }
-        } else {
-            // No circuit breaker - direct call
-            self.send_message(target, message).await
-        }
-    }
-
-    /// Receive messages via this transport
-    async fn receive_messages(&self) -> Result<Vec<SecureMessage>>;
-
-    /// Test connectivity and measure latency
-    async fn test_connectivity(&self, target: &str) -> Result<TransportMetrics>;
-
-    /// Test connectivity with circuit breaker integration
-    async fn test_connectivity_with_breaker(
-        &self,
-        target: &str,
-        circuit_breaker: Option<Arc<CircuitBreaker>>,
-    ) -> Result<TransportMetrics> {
-        if let Some(breaker) = circuit_breaker {
-            if !breaker.can_proceed().await {
-                return Err(crate::error::SynapseError::TransportError(
-                    "Circuit breaker open - connectivity test rejected".to_string(),
-                ));
-            }
-
-            let start_time = Instant::now();
-            match self.test_connectivity(target).await {
-                Ok(metrics) => {
-                    breaker.record_outcome(RequestOutcome::Success).await;
-
-                    // Update circuit breaker with latest metrics
-                    breaker.check_external_triggers(&metrics).await;
-
-                    Ok(metrics)
-                }
-                Err(e) => {
-                    let elapsed = start_time.elapsed();
-                    if elapsed > Duration::from_secs(10) {
-                        breaker.record_outcome(RequestOutcome::Timeout).await;
-                    } else {
-                        breaker
-                            .record_outcome(RequestOutcome::Failure(e.to_string()))
-                            .await;
-                    }
-                    Err(e)
-                }
-            }
-        } else {
-            self.test_connectivity(target).await
-        }
-    }
-
-    /// Check if this transport can reach the target
-    async fn can_reach(&self, target: &str) -> bool;
-
-    /// Get transport-specific capabilities
-    fn get_capabilities(&self) -> Vec<String>;
-
-    /// Get estimated latency for this transport
-    fn estimated_latency(&self) -> Duration;
-
-    /// Get reliability score (0.0-1.0)
-    fn reliability_score(&self) -> f32;
 }
 
 /// Transport discovery and testing utilities
@@ -739,20 +605,6 @@ pub use tcp_simple::{SimpleTcpTransport, SimpleTcpTransportFactory};
 
 // Platform-specific re-exports (only on non-WASM platforms)
 #[cfg(not(target_arch = "wasm32"))]
-pub use tcp_unified::TcpTransportImpl;
-// #[cfg(not(target_arch = "wasm32"))]
-// pub use udp_unified::UdpTransportImpl; // Already exported above
-// Legacy TCP exports - disabled for consolidation
-// #[cfg(not(target_arch = "wasm32"))]
-// pub use tcp::TcpTransport;
-// #[cfg(not(target_arch = "wasm32"))]
-// pub use tcp_enhanced::EnhancedTcpTransport;
-// #[cfg(not(target_arch = "wasm32"))]
-// #[cfg(feature = "mdns")]
-// pub use mdns::{MdnsTransport, MdnsAdvertiser};
-#[cfg(not(target_arch = "wasm32"))]
-// pub use email_enhanced::EmailEnhancedTransport; // Temporarily disabled
-#[cfg(not(target_arch = "wasm32"))]
 pub use email_simple::{SimpleEmailTransport, SimpleEmailTransportFactory};
 #[cfg(not(target_arch = "wasm32"))]
 pub use llm_discovery::{
@@ -767,5 +619,7 @@ pub use nat_traversal::{IceCandidate, NatTraversalTransport};
 pub use quic_unified::QuicTransportImpl;
 #[cfg(not(target_arch = "wasm32"))]
 pub use router::MultiTransportRouter;
+#[cfg(not(target_arch = "wasm32"))]
+pub use tcp_unified::TcpTransportImpl;
 #[cfg(not(target_arch = "wasm32"))]
 pub use websocket_unified::WebSocketTransportImpl;

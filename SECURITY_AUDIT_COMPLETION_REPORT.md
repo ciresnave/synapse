@@ -1,10 +1,10 @@
 # Security Audit Completion Report
 
-> ⚠️ **CORRECTION — 2026-09-09. THE QUANTIFIER BELOW IS FALSE, AND `CRITICAL_SECURITY_FIXES.md` IN THIS SAME DIRECTORY SAYS SO.**
+> ⚠️ **CORRECTION — 2026-09-09, RE-MEASURED on the `design/transport-contract` branch after Task 1 (dead-code deletion, no behaviour change). THE QUANTIFIER BELOW IS FALSE, AND `CRITICAL_SECURITY_FIXES.md` IN THIS SAME DIRECTORY SAYS SO.**
 >
-> Measured at `f0f570c` (this commit): **31 occurrences of `"In a real implementation"` remain across 19 files** in `src/`. *(Controls: the same query shape for `"In a ZzUnreal implementation"` returns 0, so it discriminates; the count was 46 at `7b80ca4`, so 15 genuinely were replaced and the audit's work was real.)*
+> Measured at `f0f570c`: 31 occurrences across 19 files. Task 1 deleted the transport files that never compiled and the WASM files that were never declared as modules, which carried some of those placeholders along with them. Re-measured on this branch: **17 occurrences of `"In a real implementation"` remain across 10 files** in `src/`. *(Controls: the same query shape for `"In a ZzUnreal implementation"` returns 0, so it discriminates; the count was 46 at `7b80ca4` and 31 at `f0f570c`, so the reductions are genuine and the audit's work was real.)*
 >
-> **Survivors sit inside the subsystems this report declares complete:** `src/transport/nat_traversal.rs` and `nat_traversal_clean.rs` (§44–48 STUN/TURN/ICE), `src/transport/quic.rs` (§56–60 QUIC/TLS), `src/email.rs` ×2 (§68–72 SMTP/IMAP). Largest concentrations: `src/connectivity.rs` (6), `src/transport/production_http.rs` (5).
+> **Survivors sit inside the subsystems this report declares complete:** `src/transport/nat_traversal.rs` (§44–48 STUN/TURN/ICE), `src/email.rs` ×2 (§68–72 SMTP/IMAP). Largest concentrations: `src/connectivity.rs` (6), `src/email.rs` (2), `src/transport/websocket_unified.rs` (2), `src/router_enhanced.rs` (1).
 >
 > ⚠️ **AND THE PRECONDITION THIS REPORT'S OWN SIBLING SETS WAS NEVER MET.** `CRITICAL_SECURITY_FIXES.md` states *"Next Steps … 5. **Full security audit after all 'In a real' implementations completed**"*, and records **37 outstanding** — a figure that matches this commit exactly and no other commit in the history *(43 at the four earliest, 56 at three, 37 only here)*. **That document is accurate and current. This one asserts a milestone whose stated precondition is unmet.**
 >

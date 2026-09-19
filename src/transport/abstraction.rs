@@ -1162,15 +1162,3 @@ impl UnifiedTransportManager {
         Ok(())
     }
 }
-
-/// Convenience function to create all standard transport factories
-pub fn create_standard_factories() -> Vec<Box<dyn TransportFactory>> {
-    let factories: Vec<Box<dyn TransportFactory>> = vec![
-        Box::new(TcpTransportFactory),
-        Box::new(super::udp_unified::UdpTransportFactory),
-        Box::new(EmailTransportFactory),
-        Box::new(MdnsTransportFactory),
-        Box::new(HttpTransportFactory),
-    ];
-    factories
-}

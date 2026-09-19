@@ -8,7 +8,6 @@ use super::{TransportSelector, abstraction, abstraction::Transport};
 use crate::{config::Config, error::Result, types::SecureMessage};
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{info, warn};
 
 /// Transport provider trait for dependency injection
@@ -321,47 +320,5 @@ impl Transport for MockTransport {
 
     async fn metrics(&self) -> abstraction::TransportMetrics {
         abstraction::TransportMetrics::default()
-    }
-}
-
-// Implementation of the mod.rs Transport trait (used by tests)
-#[async_trait]
-impl super::Transport for MockTransport {
-    async fn send_message(&self, target: &str, _message: &SecureMessage) -> Result<String> {
-        // Simulate latency
-        tokio::time::sleep(self.latency).await;
-        Ok(format!("mock-{}-sent-to-{}", self.id, target))
-    }
-
-    async fn receive_messages(&self) -> Result<Vec<SecureMessage>> {
-        Ok(vec![]) // Simple mock - no messages
-    }
-
-    async fn test_connectivity(&self, _target: &str) -> Result<super::TransportMetrics> {
-        Ok(super::TransportMetrics {
-            latency: self.latency,
-            throughput_bps: 1_000_000,
-            packet_loss: 0.0,
-            jitter_ms: 10,
-            reliability_score: self.reliability,
-            last_updated: std::time::Instant::now(),
-        })
-    }
-
-    async fn can_reach(&self, target: &str) -> bool {
-        // Mock implementation: can reach if target is not empty and not failing
-        !target.is_empty() && self.reliability > 0.5
-    }
-
-    fn get_capabilities(&self) -> Vec<String> {
-        self.capabilities.clone()
-    }
-
-    fn estimated_latency(&self) -> Duration {
-        self.latency
-    }
-
-    fn reliability_score(&self) -> f32 {
-        self.reliability
     }
 }
