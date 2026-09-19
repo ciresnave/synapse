@@ -13,8 +13,8 @@ use auto_discovery::{DiscoveryConfig, ProtocolType, ServiceDiscovery, ServiceInf
 
 use crate::error::{Result, SynapseError};
 use crate::transport::abstraction::{
-    ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, MessageUrgency,
-    Transport, TransportCapabilities, TransportEstimate, TransportMetrics, TransportStatus,
+    ConnectivityResult, DeliveryReceipt, MessageUrgency, RawInbox, Transport,
+    TransportCapabilities, TransportEstimate, TransportMetrics, TransportReceive, TransportStatus,
     TransportTarget, TransportType,
 };
 use crate::types::SecureMessage;
@@ -101,7 +101,12 @@ impl DiscoveryTransport {
             #[cfg(feature = "mdns")]
             discovery: Arc::new(Mutex::new(None)),
             discovered_services: Arc::new(RwLock::new(HashMap::new())),
-            metrics: Arc::new(RwLock::new(TransportMetrics::default())),
+            // Discovery carries no messages, so it never reports a send reliability.
+            metrics: Arc::new(RwLock::new(TransportMetrics {
+                transport_type: TransportType::AutoDiscovery,
+                reliability_score: 0.0,
+                ..TransportMetrics::default()
+            })),
             last_discovery: Arc::new(RwLock::new(Instant::now())),
             running: Arc::new(RwLock::new(false)),
         };
@@ -130,7 +135,10 @@ impl DiscoveryTransport {
             self.config.port,
             Some(vec![
                 ("synapse", "true"),
-                ("version", env!("CARGO_PKG_VERSION")),
+                (
+                    "synapse_protocol",
+                    &crate::types::PROTOCOL_VERSION.to_string(),
+                ),
                 ("protocols", &self.config.protocols.join(",")),
             ]),
         )
@@ -156,7 +164,7 @@ impl DiscoveryTransport {
 
     #[cfg(not(feature = "mdns"))]
     async fn initialize_discovery(&self) -> Result<()> {
-        warn!("mDNS discovery not available - compiled without mdns feature");
+        tracing::warn!("mDNS discovery not available - compiled without mdns feature");
         Ok(())
     }
 
@@ -240,16 +248,18 @@ impl Transport for DiscoveryTransport {
     }
 
     fn capabilities(&self) -> TransportCapabilities {
+        // Discovery only: it finds services for other transports and carries no messages, so it
+        // advertises no message capability at all.
         TransportCapabilities {
-            reliable: true,
-            real_time: true,
-            broadcast: true,
-            bidirectional: true,
-            encrypted: true,
-            network_spanning: true,
-            max_message_size: 1024 * 1024, // 1MB
-            features: vec![],
-            supported_urgencies: vec![MessageUrgency::RealTime, MessageUrgency::Interactive],
+            reliable: false,
+            real_time: false,
+            broadcast: false,
+            bidirectional: false,
+            encrypted: false,
+            network_spanning: false,
+            max_message_size: 0,
+            features: vec!["discovery_only".to_string()],
+            supported_urgencies: Vec::<MessageUrgency>::new(),
         }
     }
 
@@ -278,52 +288,17 @@ impl Transport for DiscoveryTransport {
         false
     }
 
-    async fn estimate_metrics(&self, target: &TransportTarget) -> Result<TransportEstimate> {
-        let services = self.discovered_services.read().await;
-
-        // Find best matching service
-        let service = if services.contains_key(&target.identifier) {
-            services.get(&target.identifier)
-        } else {
-            services.values().find(|service| {
-                target.required_capabilities.iter().all(|cap| {
-                    service.txt_records.contains_key(cap)
-                        || service
-                            .txt_records
-                            .get("protocols")
-                            .is_some_and(|p| p.contains(cap))
-                })
-            })
-        };
-
-        if let Some(service) = service {
-            // Estimate based on service age and location
-            let age = service.last_seen.elapsed();
-            let reliability = if age < Duration::from_secs(30) {
-                0.95
-            } else {
-                0.8
-            };
-
-            // Local network services are typically fast
-            Ok(TransportEstimate {
-                latency: Duration::from_millis(10),
-                bandwidth: 10_000_000, // 10 MB/s for local network
-                reliability,
-                cost: 0.1,
-                available: true,
-                confidence: 0.9,
-            })
-        } else {
-            Ok(TransportEstimate {
-                latency: Duration::from_millis(1000),
-                bandwidth: 0,
-                reliability: 0.0,
-                cost: 1.0,
-                available: false,
-                confidence: 0.1,
-            })
-        }
+    async fn estimate_metrics(&self, _target: &TransportTarget) -> Result<TransportEstimate> {
+        // `send_message` refuses (discovery carries no messages), so no target is available
+        // through this transport, however recently its service was seen.
+        Ok(TransportEstimate {
+            latency: Duration::from_millis(1000),
+            bandwidth: 0,
+            reliability: 0.0,
+            cost: 1.0,
+            available: false,
+            confidence: 1.0,
+        })
     }
 
     async fn start(&self) -> Result<()> {
@@ -390,42 +365,16 @@ impl Transport for DiscoveryTransport {
     }
     async fn send_message(
         &self,
-        _target: &TransportTarget,
-        message: &SecureMessage,
+        target: &TransportTarget,
+        _message: &SecureMessage,
     ) -> Result<DeliveryReceipt> {
-        // Discovery transport doesn't send messages directly - it's used for finding other transports
-        // The abstraction layer will use discovered services to route via appropriate transports
-        let services = self.discovered_services.read().await;
-
-        if let Some(service) = services.values().next() {
-            // Create a delivery receipt indicating the service was found
-            Ok(DeliveryReceipt {
-                message_id: message.message_id.to_string(),
-                transport_used: TransportType::AutoDiscovery,
-                delivery_time: Duration::from_millis(1),
-                target_reached: format!("{}:{}", service.host, service.port),
-                confirmation: DeliveryConfirmation::Sent,
-                metadata: {
-                    let mut metadata = HashMap::new();
-                    metadata.insert(
-                        "discovered_services".to_string(),
-                        services.len().to_string(),
-                    );
-                    metadata.insert("service_name".to_string(), service.name.clone());
-                    metadata
-                },
-            })
-        } else {
-            Err(SynapseError::TransportError(
-                "No discovered services available for message delivery".to_string(),
-            ))
-        }
-    }
-
-    async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
-        // Discovery transport doesn't receive messages directly
-        // It provides service information for other transports to use
-        Ok(Vec::new())
+        // Discovery finds services for other transports; it carries no messages. This used to
+        // return `Sent` whenever any service had been discovered, with nothing written anywhere
+        // (spec §4), so it refuses instead.
+        Err(SynapseError::TransportError(format!(
+            "auto-discovery carries discovery only, not messages; cannot send to {}",
+            target.identifier
+        )))
     }
 
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
@@ -443,19 +392,20 @@ impl Transport for DiscoveryTransport {
             })
         };
 
+        // Discovery carries no messages, so it is never "connected" for sending. This used to
+        // report `connected` for any service seen in the last minute, with a fixed 10 ms round
+        // trip that nothing measured (spec §4). What it discovered stays in `details`.
+        let cannot_send = format!(
+            "auto-discovery carries discovery only, not messages; this transport cannot send to {}",
+            target.identifier
+        );
         if let Some(service) = service {
             let age = service.last_seen.elapsed();
-            let connected = age < Duration::from_secs(60); // Consider fresh if seen in last minute
-
             Ok(ConnectivityResult {
-                connected,
-                rtt: Some(Duration::from_millis(10)), // Local network RTT
-                quality: if connected { 1.0 } else { 0.0 },
-                error: if connected {
-                    None
-                } else {
-                    Some("Service not recently seen".to_string())
-                },
+                connected: false,
+                rtt: None,
+                quality: 0.0,
+                error: Some(cannot_send),
                 details: {
                     let mut details = HashMap::new();
                     details.insert("service_name".to_string(), service.name.clone());
@@ -470,7 +420,9 @@ impl Transport for DiscoveryTransport {
                 connected: false,
                 rtt: None,
                 quality: 0.0,
-                error: Some("No matching service discovered".to_string()),
+                error: Some(format!(
+                    "{cannot_send}; no matching service discovered either"
+                )),
                 details: HashMap::new(),
             })
         }
@@ -482,5 +434,68 @@ impl Transport for DiscoveryTransport {
 
     async fn metrics(&self) -> TransportMetrics {
         self.metrics.read().await.clone()
+    }
+}
+
+#[async_trait]
+impl TransportReceive for DiscoveryTransport {
+    async fn receive_raw(&self, _inbox: &mut RawInbox) -> Result<()> {
+        // Discovery transport doesn't receive messages directly
+        // It provides service information for other transports to use
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn send_refuses_even_when_a_service_has_been_discovered() {
+        // `new` binds nothing; only `start` touches the network.
+        let transport =
+            DiscoveryTransport::new(SynapseDiscoveryConfig::new("probe".to_string(), 0))
+                .await
+                .unwrap();
+        // Control: a discovered service is present, the condition under which the old code
+        // returned `Sent` without writing anything.
+        transport.discovered_services.write().await.insert(
+            "peer".to_string(),
+            DiscoveredService {
+                name: "peer".to_string(),
+                service_type: "_synapse._tcp".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 9,
+                addresses: vec![IpAddr::from([127, 0, 0, 1])],
+                txt_records: HashMap::new(),
+                last_seen: Instant::now(),
+            },
+        );
+        let target = TransportTarget::new("peer".to_string());
+        assert!(
+            transport.can_reach(&target).await,
+            "control: the service is discovered"
+        );
+        let message = SecureMessage::new(
+            "peer",
+            "probe",
+            b"hi".to_vec(),
+            crate::types::SecurityLevel::Public,
+        );
+        let err = transport.send_message(&target, &message).await.unwrap_err();
+        assert!(err.to_string().contains("discovery only"), "{err}");
+        let estimate = transport.estimate_metrics(&target).await.unwrap();
+        assert!(!estimate.available);
+        assert_eq!(estimate.reliability, 0.0);
+        // Nor does it claim a connection or a round trip it never measured.
+        let connectivity = transport.test_connectivity(&target).await.unwrap();
+        assert!(!connectivity.connected);
+        assert_eq!(connectivity.rtt, None);
+        let why = connectivity.error.expect("says why it is not connected");
+        assert!(why.contains("cannot send"), "{why}");
+        assert_eq!(
+            connectivity.details.get("service_name").map(String::as_str),
+            Some("peer")
+        );
     }
 }

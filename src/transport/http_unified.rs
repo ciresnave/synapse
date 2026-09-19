@@ -9,8 +9,8 @@ mod http_impl {
     use crate::error::{Result, SynapseError};
     use crate::transport::abstraction::{
         ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, MessageUrgency,
-        Transport, TransportCapabilities, TransportEstimate, TransportFactory, TransportMetrics,
-        TransportStatus, TransportTarget, TransportType,
+        RawInbox, Transport, TransportCapabilities, TransportEstimate, TransportFactory,
+        TransportMetrics, TransportReceive, TransportStatus, TransportTarget, TransportType,
     };
     use crate::types::SecureMessage;
     use async_trait::async_trait;
@@ -402,28 +402,6 @@ mod http_impl {
             result
         }
 
-        async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
-            let server_lock = self.server.lock().await;
-            if let Some(server) = server_lock.as_ref() {
-                let mut messages = server.received_messages.lock().await;
-                let received: Vec<IncomingMessage> = messages.drain(..).collect();
-
-                // Update metrics
-                {
-                    let mut metrics = self.metrics.write().unwrap();
-                    metrics.messages_received += received.len() as u64;
-                    metrics.last_updated_timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                }
-
-                Ok(received)
-            } else {
-                Ok(Vec::new())
-            }
-        }
-
         async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
             let url = self.parse_target_url(target)?;
             let start_time = Instant::now();
@@ -516,6 +494,30 @@ mod http_impl {
 
         async fn metrics(&self) -> TransportMetrics {
             self.metrics.read().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl TransportReceive for HttpTransportImpl {
+        async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
+            let server_lock = self.server.lock().await;
+            if let Some(server) = server_lock.as_ref() {
+                let mut messages = server.received_messages.lock().await;
+                let received: Vec<IncomingMessage> = messages.drain(..).collect();
+
+                // Update metrics
+                {
+                    let mut metrics = self.metrics.write().unwrap();
+                    metrics.messages_received += received.len() as u64;
+                    metrics.last_updated_timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                }
+
+                inbox.extend(received);
+            }
+            Ok(())
         }
     }
 

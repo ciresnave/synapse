@@ -456,7 +456,10 @@ impl EnhancedMdnsTransport {
 
     fn build_txt_records(&self) -> HashMap<String, String> {
         let mut txt_records = HashMap::new();
-        txt_records.insert("version".to_string(), "1.0".to_string());
+        txt_records.insert(
+            "synapse_protocol".to_string(),
+            crate::types::PROTOCOL_VERSION.to_string(),
+        );
         txt_records.insert("protocol".to_string(), "synapse".to_string());
         txt_records.insert("entity_id".to_string(), self.entity_id.clone());
         txt_records.insert(
@@ -531,16 +534,17 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
     }
 
     fn capabilities(&self) -> crate::transport::abstraction::TransportCapabilities {
+        // Discovery only: `send_message` refuses, so no message capability is advertised.
         crate::transport::abstraction::TransportCapabilities {
-            max_message_size: 1024 * 1024,
-            reliable: true,
+            max_message_size: 0,
+            reliable: false,
             real_time: false,
-            broadcast: true,
-            bidirectional: true,
+            broadcast: false,
+            bidirectional: false,
             encrypted: false,
-            network_spanning: true,
-            supported_urgencies: vec![crate::transport::abstraction::MessageUrgency::Interactive],
-            features: vec!["mdns_discovery".to_string()],
+            network_spanning: false,
+            supported_urgencies: Vec::new(),
+            features: vec!["mdns_discovery".to_string(), "discovery_only".to_string()],
         }
     }
 
@@ -553,13 +557,14 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
         &self,
         _target: &crate::transport::abstraction::TransportTarget,
     ) -> crate::error::Result<crate::transport::abstraction::TransportEstimate> {
+        // mDNS carries no messages (`send_message` refuses), so no target is available through it.
         Ok(crate::transport::abstraction::TransportEstimate {
             latency: std::time::Duration::from_millis(50),
-            reliability: 0.99,
-            bandwidth: 1_000_000,
+            reliability: 0.0,
+            bandwidth: 0,
             cost: 0.0,
-            available: true,
-            confidence: 0.9,
+            available: false,
+            confidence: 1.0,
         })
     }
 
@@ -568,36 +573,28 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
         target: &crate::transport::abstraction::TransportTarget,
         _message: &crate::types::SecureMessage,
     ) -> crate::error::Result<crate::transport::abstraction::DeliveryReceipt> {
-        // Use entity_id for sending
-        // Use entity_id for sending
-        let msg_id = target.identifier.clone();
-        // Simulate sending logic here, replace with actual send_to_peer if needed
-        Ok(crate::transport::abstraction::DeliveryReceipt {
-            message_id: msg_id,
-            transport_used: crate::transport::abstraction::TransportType::AutoDiscovery,
-            delivery_time: std::time::Duration::from_millis(50),
-            target_reached: target.identifier.clone(),
-            confirmation: crate::transport::abstraction::DeliveryConfirmation::Delivered,
-            metadata: std::collections::HashMap::new(),
-        })
-    }
-
-    async fn receive_messages(
-        &self,
-    ) -> crate::error::Result<Vec<crate::transport::abstraction::IncomingMessage>> {
-        Ok(vec![])
+        // mDNS finds peers; it does not carry messages. This used to return a simulated
+        // `Delivered` receipt for a send that never happened (spec §4), so it refuses instead.
+        Err(crate::error::SynapseError::TransportError(format!(
+            "mDNS carries discovery only, not messages; cannot send to {}",
+            target.identifier
+        )))
     }
 
     async fn test_connectivity(
         &self,
         target: &crate::transport::abstraction::TransportTarget,
     ) -> crate::error::Result<crate::transport::abstraction::ConnectivityResult> {
-        let reachable = self.can_reach(target).await;
+        // This used to report `connected` from `can_reach` alone and a fixed 50 ms round trip
+        // that nothing measured (spec §4). mDNS carries no messages, so it reports that.
         Ok(crate::transport::abstraction::ConnectivityResult {
-            connected: reachable,
-            rtt: Some(std::time::Duration::from_millis(50)),
-            error: None,
-            quality: if reachable { 1.0 } else { 0.0 },
+            connected: false,
+            rtt: None,
+            error: Some(format!(
+                "mDNS carries discovery only, not messages; this transport cannot send to {}",
+                target.identifier
+            )),
+            quality: 0.0,
             details: std::collections::HashMap::new(),
         })
     }
@@ -615,7 +612,22 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
     }
 
     async fn metrics(&self) -> crate::transport::abstraction::TransportMetrics {
-        crate::transport::abstraction::TransportMetrics::default()
+        // The default reports reliability 1.0; a transport whose every send refuses reports 0.0.
+        crate::transport::abstraction::TransportMetrics {
+            transport_type: crate::transport::abstraction::TransportType::AutoDiscovery,
+            reliability_score: 0.0,
+            ..Default::default()
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::transport::abstraction::TransportReceive for EnhancedMdnsTransport {
+    async fn receive_raw(
+        &self,
+        _inbox: &mut crate::transport::abstraction::RawInbox,
+    ) -> crate::error::Result<()> {
+        Ok(())
     }
 }
 
@@ -1468,7 +1480,10 @@ impl EnhancedMdnsTransport {
             port: self.local_port,
             txt_records: HashMap::from([
                 ("entity_id".to_string(), self.entity_id.clone()),
-                ("version".to_string(), "1.0".to_string()),
+                (
+                    "synapse_protocol".to_string(),
+                    crate::types::PROTOCOL_VERSION.to_string(),
+                ),
                 (
                     "capabilities".to_string(),
                     "routing,discovery,secure_messaging".to_string(),
@@ -1508,9 +1523,9 @@ impl EnhancedMdnsTransport {
 
                 let protocol_version = service
                     .txt_records
-                    .get("version")
+                    .get("synapse_protocol")
                     .cloned()
-                    .unwrap_or_else(|| "1.0".to_string());
+                    .unwrap_or_else(|| crate::types::PROTOCOL_VERSION.to_string());
 
                 let entity_id = service
                     .txt_records

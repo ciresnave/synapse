@@ -4,11 +4,12 @@
 //! This module provides trait-based dependency injection for transport implementations,
 //! making the system much more testable and flexible.
 
-use super::{TransportSelector, abstraction, abstraction::Transport};
+use super::{
+    TransportSelector, abstraction, abstraction::Transport, abstraction::TransportReceive,
+};
 use crate::{config::Config, error::Result, types::SecureMessage};
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{info, warn};
 
 /// Transport provider trait for dependency injection
@@ -285,13 +286,11 @@ impl Transport for MockTransport {
             transport_used: abstraction::TransportType::Tcp,
             delivery_time: self.latency,
             target_reached: target.identifier.clone(),
+            // protocol event: none -- this is a test double with no protocol and no peer; it
+            // claims `Delivered` only so tests can exercise that status.
             confirmation: abstraction::DeliveryConfirmation::Delivered,
             metadata: std::collections::HashMap::new(),
         })
-    }
-
-    async fn receive_messages(&self) -> Result<Vec<abstraction::IncomingMessage>> {
-        Ok(vec![]) // Simple mock - no messages
     }
 
     async fn test_connectivity(
@@ -324,44 +323,9 @@ impl Transport for MockTransport {
     }
 }
 
-// Implementation of the mod.rs Transport trait (used by tests)
 #[async_trait]
-impl super::Transport for MockTransport {
-    async fn send_message(&self, target: &str, _message: &SecureMessage) -> Result<String> {
-        // Simulate latency
-        tokio::time::sleep(self.latency).await;
-        Ok(format!("mock-{}-sent-to-{}", self.id, target))
-    }
-
-    async fn receive_messages(&self) -> Result<Vec<SecureMessage>> {
-        Ok(vec![]) // Simple mock - no messages
-    }
-
-    async fn test_connectivity(&self, _target: &str) -> Result<super::TransportMetrics> {
-        Ok(super::TransportMetrics {
-            latency: self.latency,
-            throughput_bps: 1_000_000,
-            packet_loss: 0.0,
-            jitter_ms: 10,
-            reliability_score: self.reliability,
-            last_updated: std::time::Instant::now(),
-        })
-    }
-
-    async fn can_reach(&self, target: &str) -> bool {
-        // Mock implementation: can reach if target is not empty and not failing
-        !target.is_empty() && self.reliability > 0.5
-    }
-
-    fn get_capabilities(&self) -> Vec<String> {
-        self.capabilities.clone()
-    }
-
-    fn estimated_latency(&self) -> Duration {
-        self.latency
-    }
-
-    fn reliability_score(&self) -> f32 {
-        self.reliability
+impl TransportReceive for MockTransport {
+    async fn receive_raw(&self, _inbox: &mut abstraction::RawInbox) -> Result<()> {
+        Ok(()) // Simple mock - no messages
     }
 }

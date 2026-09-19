@@ -304,12 +304,6 @@ impl Transport for UdpTransportImpl {
         self.send_to(&target_addr, message).await
     }
 
-    async fn receive_messages(&self) -> Result<Vec<IncomingMessage>> {
-        let mut messages = self.received_messages.lock().await;
-        let result = messages.drain(..).collect();
-        Ok(result)
-    }
-
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
         let target_addr = self.parse_target_address(target)?;
 
@@ -411,6 +405,16 @@ impl Transport for UdpTransportImpl {
 
     async fn metrics(&self) -> TransportMetrics {
         self.metrics.read().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl TransportReceive for UdpTransportImpl {
+    async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
+        let mut messages = self.received_messages.lock().await;
+        let result: Vec<IncomingMessage> = messages.drain(..).collect();
+        inbox.extend(result);
+        Ok(())
     }
 }
 

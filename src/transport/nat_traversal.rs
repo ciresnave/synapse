@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Real NAT traversal techniques for EMRP with functional STUN and network operations
 
-use super::abstraction::{self, Transport};
+use super::abstraction::{self, Transport, TransportReceive};
 use crate::{
     error::{Result, SynapseError},
     types::{DateTimeWrapper, SecureMessage, SecurityLevel, UuidWrapper},
@@ -596,6 +596,7 @@ impl NatTraversalTransport {
                     security_level: SecurityLevel::Public,
                     routing_path: Vec::new(),
                     metadata: metadata.clone(),
+                    protocol_version: crate::types::PROTOCOL_VERSION,
                 };
 
                 let mut incoming_metadata = HashMap::new();
@@ -634,6 +635,7 @@ impl NatTraversalTransport {
                     security_level: SecurityLevel::Public,
                     routing_path: Vec::new(),
                     metadata: metadata.clone(),
+                    protocol_version: crate::types::PROTOCOL_VERSION,
                 };
 
                 let mut incoming_metadata = HashMap::new();
@@ -806,72 +808,6 @@ impl Transport for NatTraversalTransport {
                 metadata
             },
         })
-    }
-
-    async fn receive_messages(&self) -> Result<Vec<abstraction::IncomingMessage>> {
-        // Create UDP socket for receiving if not already created
-        let socket = {
-            let mut socket_lock = self.socket.lock().await;
-            if socket_lock.is_none() {
-                let new_socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
-                    .await
-                    .map_err(|e| {
-                        SynapseError::TransportError(format!("Failed to bind socket: {}", e))
-                    })?;
-                info!("Bound NAT traversal socket to port {}", self.local_port);
-                *socket_lock = Some(new_socket);
-            }
-
-            // Create a new socket for receiving (since we can't clone)
-            UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
-                .await
-                .map_err(|e| {
-                    SynapseError::TransportError(format!("Failed to create receive socket: {}", e))
-                })?
-        };
-
-        let mut messages = Vec::new();
-        let mut buffer = vec![0; 8192]; // 8KB buffer
-
-        // Non-blocking receive with timeout
-        match timeout(Duration::from_millis(100), socket.recv_from(&mut buffer)).await {
-            Ok(Ok((bytes_received, sender_addr))) => {
-                debug!(
-                    "Received {} bytes from {} via NAT traversal",
-                    bytes_received, sender_addr
-                );
-
-                match self
-                    .parse_nat_message(&buffer[..bytes_received], sender_addr)
-                    .await
-                {
-                    Ok(Some(incoming_message)) => {
-                        messages.push(incoming_message);
-                    }
-                    Ok(None) => {
-                        debug!(
-                            "Received protocol message from {}, handled separately",
-                            sender_addr
-                        );
-                    }
-                    Err(e) => {
-                        warn!("Failed to parse message from {}: {}", sender_addr, e);
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                return Err(SynapseError::TransportError(format!(
-                    "UDP receive error: {}",
-                    e
-                )));
-            }
-            Err(_) => {
-                // Timeout - no messages available
-                debug!("No messages received within timeout");
-            }
-        }
-
-        Ok(messages)
     }
 
     async fn test_connectivity(
@@ -1060,6 +996,76 @@ impl Transport for NatTraversalTransport {
                 metrics
             },
         }
+    }
+}
+
+#[async_trait]
+impl TransportReceive for NatTraversalTransport {
+    async fn receive_raw(&self, inbox: &mut abstraction::RawInbox) -> Result<()> {
+        // Create UDP socket for receiving if not already created
+        let socket = {
+            let mut socket_lock = self.socket.lock().await;
+            if socket_lock.is_none() {
+                let new_socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
+                    .await
+                    .map_err(|e| {
+                        SynapseError::TransportError(format!("Failed to bind socket: {}", e))
+                    })?;
+                info!("Bound NAT traversal socket to port {}", self.local_port);
+                *socket_lock = Some(new_socket);
+            }
+
+            // Create a new socket for receiving (since we can't clone)
+            UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
+                .await
+                .map_err(|e| {
+                    SynapseError::TransportError(format!("Failed to create receive socket: {}", e))
+                })?
+        };
+
+        let mut messages = Vec::new();
+        let mut buffer = vec![0; 8192]; // 8KB buffer
+
+        // Non-blocking receive with timeout
+        match timeout(Duration::from_millis(100), socket.recv_from(&mut buffer)).await {
+            Ok(Ok((bytes_received, sender_addr))) => {
+                debug!(
+                    "Received {} bytes from {} via NAT traversal",
+                    bytes_received, sender_addr
+                );
+
+                match self
+                    .parse_nat_message(&buffer[..bytes_received], sender_addr)
+                    .await
+                {
+                    Ok(Some(incoming_message)) => {
+                        messages.push(incoming_message);
+                    }
+                    Ok(None) => {
+                        debug!(
+                            "Received protocol message from {}, handled separately",
+                            sender_addr
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse message from {}: {}", sender_addr, e);
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                return Err(SynapseError::TransportError(format!(
+                    "UDP receive error: {}",
+                    e
+                )));
+            }
+            Err(_) => {
+                // Timeout - no messages available
+                debug!("No messages received within timeout");
+            }
+        }
+
+        inbox.extend(messages);
+        Ok(())
     }
 }
 

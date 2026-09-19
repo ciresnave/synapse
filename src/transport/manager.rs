@@ -651,7 +651,11 @@ impl TransportManager {
 
     /// Receive messages from all active transports, each paired with a sender verdict.
     pub async fn receive_messages(&self) -> Result<Vec<ReceivedMessage>> {
-        let mut all_messages = Vec::new();
+        // One inbox per poll, shared (by `&mut`) across every transport this loop calls. Each
+        // transport can only push into it or forward it on to a transport it wraps; it cannot
+        // construct one of its own, and cannot read back what a previous transport already put
+        // in it. Only this crate drains it, after every transport has had its turn.
+        let mut inbox = RawInbox::new();
 
         let transports = self.transports.read().await;
         for (transport_type, transport) in transports.iter() {
@@ -660,20 +664,20 @@ impl TransportManager {
                 continue;
             }
 
-            match transport.receive_messages().await {
-                Ok(mut messages) => {
-                    debug!(
-                        "Received {} messages from {:?}",
-                        messages.len(),
-                        transport_type
-                    );
-                    all_messages.append(&mut messages);
+            let before = inbox.len();
+            match transport.receive_raw(&mut inbox).await {
+                Ok(()) => {
+                    let received = inbox.len() - before;
+                    if received > 0 {
+                        debug!("Received {} messages from {:?}", received, transport_type);
+                    }
                 }
                 Err(e) => {
                     debug!("Failed to receive from {:?}: {}", transport_type, e);
                 }
             }
         }
+        let all_messages = inbox.drain();
 
         let store = self.trust_store.read().await;
         let sealing_key = self.sealing_key.read().await;

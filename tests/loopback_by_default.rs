@@ -74,13 +74,11 @@ fn outbound_sockets_bind_loopback_for_loopback_peers() {
 /// Transport files that compile in no configuration: `src/transport/mod.rs` declares no module for
 /// them (CAPABILITY_INVENTORY.md §5.3). They are excluded BY NAME, and the guard checks that the
 /// exclusion is still true.
-const NOT_COMPILED: [&str; 5] = [
-    "src/transport/tcp.rs",
-    "src/transport/tcp_enhanced.rs",
-    "src/transport/udp.rs",
-    "src/transport/quic.rs",
-    "src/transport/nat_traversal_clean.rs",
-];
+///
+/// Task 1 of the transport contract deleted every file that was in this list (they never compiled,
+/// so their deletion changes no behaviour). The list is empty rather than removed so this test keeps
+/// meaning what it says if a future change reintroduces an uncompiled transport file.
+const NOT_COMPILED: [&str; 0] = [];
 
 /// The one file allowed to name a wildcard address.
 const HOME: &str = "src/network_scope.rs";

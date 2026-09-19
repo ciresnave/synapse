@@ -231,5 +231,6 @@ fn create_sample_message(id: &str, content: &str) -> SecureMessage {
             metadata.insert("demo_id".to_string(), id.to_string());
             metadata
         },
+        protocol_version: synapse::types::PROTOCOL_VERSION,
     }
 }

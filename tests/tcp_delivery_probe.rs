@@ -3,14 +3,25 @@
 //!
 //! Question (from the PM's brief, symptom only — no borrowed diagnosis): does a
 //! message that `send_message` receipts `Ok` with `DeliveryConfirmation::Sent`
-//! actually ARRIVE at the receiver's `receive_messages()`?
+//! actually ARRIVE at the receiver?
 //!
-//! This drives the REAL `Transport` trait (`TcpTransportImpl` → `start` /
-//! `send_message` / `receive_messages`) over a REAL `127.0.0.1` loopback socket —
-//! the same entry points a deployment uses, not a shortcut. It asserts actual
-//! DELIVERY (the payload comes back out of `receive_messages`), never merely that
-//! the send returned `Ok`. A green that only proved "send returned Ok" would prove
-//! nothing about the bug.
+//! Ported for the transport-contract task (2026-09-18): `Transport::receive_raw` (see
+//! `synapse::transport::abstraction::TransportReceive`) now takes a `&mut RawInbox` that outside
+//! code can push into but cannot construct or read back (see `RawInbox`'s docs) — so a caller
+//! outside the crate cannot get a `Vec<IncomingMessage>` out of a raw transport at all; only
+//! `TransportManager::receive_messages`, which drains the inbox after verifying every message
+//! against a `SenderVerdict`, is public. This probe now drives `TcpTransportImpl` through a real
+//! `TransportManager`
+//! (built with `TransportManagerBuilder` + `TcpTransportFactory`, exactly the pattern a
+//! deployment uses), over a REAL `127.0.0.1` loopback socket, and asserts actual DELIVERY (the
+//! payload comes back out of `TransportManager::receive_messages`), never merely that the send
+//! returned `Ok`. A green that only proved "send returned Ok" would prove nothing about the bug.
+//!
+//! The message is intentionally left unsigned: this probe is about whether the TCP transport
+//! delivers what was sent, not about sender authentication (that is covered by
+//! `sender_authentication.rs`). The receiver's gate is configured to accept unverified senders so
+//! delivery is observable, and the verdict is asserted to be the honest `Unverifiable` one rather
+//! than silently discarded.
 //!
 //! The PM's sharpened discriminator is demonstrated explicitly: the probe shows the
 //! port ACCEPTS a raw connect ("open") in the same run in which the message is not
@@ -27,10 +38,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use synapse::transport::TcpTransportImpl;
-use synapse::transport::abstraction::{
-    DeliveryConfirmation, Transport, TransportStatus, TransportTarget,
-};
+use synapse::replay::GateConfig;
+use synapse::sender_auth::SenderVerdict;
+use synapse::transport::abstraction::{DeliveryConfirmation, TransportStatus, TransportTarget};
+use synapse::transport::tcp_unified::TcpTransportFactory;
+use synapse::transport::{TransportManager, TransportManagerBuilder, TransportType};
 use synapse::types::{SecureMessage, SecurityLevel};
 
 /// A free loopback port: bind :0, read the port, drop the listener, reuse it.
@@ -47,21 +59,60 @@ fn cfg(listen_port: u16) -> HashMap<String, String> {
     m
 }
 
+/// A `TransportManager` with only TCP enabled, bound to `listen_port`, and configured to accept
+/// unverified senders (this probe is about delivery, not authentication).
+async fn tcp_manager(listen_port: u16) -> TransportManager {
+    let manager = TransportManagerBuilder::new()
+        .disable_transport(TransportType::Udp)
+        .disable_transport(TransportType::Http)
+        .disable_transport(TransportType::Email)
+        .disable_transport(TransportType::AutoDiscovery)
+        .transport_config(TransportType::Tcp, cfg(listen_port))
+        .gate_config(GateConfig {
+            accept_unverified: true,
+            ..GateConfig::default()
+        })
+        .build();
+    manager
+        .register_factory(Box::new(TcpTransportFactory))
+        .await
+        .expect("register TCP factory");
+    manager
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_receipted_tcp_message_actually_arrives() {
     let port = free_port();
 
-    // Receiver: binds `listen_port` in its constructor, then start() spins the server.
-    let receiver = TcpTransportImpl::new(&cfg(port))
+    // Receiver: a TransportManager with TCP bound to `port`.
+    let receiver = tcp_manager(port).await;
+    tokio::time::timeout(Duration::from_secs(5), receiver.start())
         .await
-        .expect("construct receiver");
-    receiver
-        .start()
-        .await
+        .expect("receiver.start() returns")
         .expect("receiver.start() should succeed");
-    assert!(
-        matches!(receiver.status().await, TransportStatus::Running),
+    // `TransportManager::start()` swallows a per-transport start error (it logs and continues, so
+    // that one bad transport doesn't stop the others), so the `expect` above cannot fail even if
+    // TCP itself never came up. But the two checks below are not vacuous for TCP specifically:
+    // `start_transport` (src/transport/manager.rs) only records `Running` and inserts into the
+    // `transports` map AFTER BOTH `factory.create_transport` and `transport.start()` return `Ok`;
+    // on an error from either it returns early and the status is left at `Starting`, never
+    // `Running`. So both checks below are real evidence that TCP's own `start()` returned `Ok`
+    // -- they just don't prove the socket accepts connections, which is FACT 1 below (a real
+    // connect), the one check that can actually fail for TCP.
+    assert_eq!(
+        receiver
+            .get_transport_status()
+            .await
+            .get(&TransportType::Tcp),
+        Some(&TransportStatus::Running),
         "receiver should report Running after start()"
+    );
+    assert!(
+        receiver
+            .list_available_transports()
+            .await
+            .contains(&TransportType::Tcp),
+        "receiver should have a TCP transport registered"
     );
 
     // Let the server's accept loop become ready.
@@ -77,10 +128,12 @@ async fn a_receipted_tcp_message_actually_arrives() {
     );
     drop(raw);
 
-    // Sender: client-only (no listener of its own).
-    let sender = TcpTransportImpl::new(&cfg(0))
+    // Sender: a TransportManager with TCP enabled but not listening on any fixed port of its own.
+    let sender = tcp_manager(0).await;
+    tokio::time::timeout(Duration::from_secs(5), sender.start())
         .await
-        .expect("construct sender");
+        .expect("sender.start() returns")
+        .expect("sender.start() should succeed");
 
     let payload = b"fuel1-probe-PAYLOAD-42".to_vec();
     let msg = SecureMessage::new(
@@ -109,7 +162,7 @@ async fn a_receipted_tcp_message_actually_arrives() {
     );
 
     // FACT 2 — the OBSERVABLE: is the port SERVED? Poll a SINGLE reader up to ~2s.
-    let mut delivered: Vec<synapse::transport::abstraction::IncomingMessage> = Vec::new();
+    let mut delivered: Vec<synapse::transport::ReceivedMessage> = Vec::new();
     for _ in 0..10 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let batch = receiver
@@ -131,7 +184,15 @@ async fn a_receipted_tcp_message_actually_arrives() {
         "raw connect succeeded above",
     );
     assert_eq!(
-        delivered[0].message.encrypted_content, payload,
+        delivered[0].incoming.message.encrypted_content, payload,
         "the delivered payload must match what was sent",
+    );
+    // The message was never signed, so the honest verdict is Unverifiable, not a silently
+    // upgraded Verified. Accepting unverified senders (this probe's gate config) is what makes
+    // the delivery observable at all; it does not make the verdict verified.
+    assert!(
+        matches!(delivered[0].sender, SenderVerdict::Unverifiable { .. }),
+        "an unsigned message must not be reported as verified: {:?}",
+        delivered[0].sender
     );
 }

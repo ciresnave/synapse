@@ -678,6 +678,7 @@ impl EnhancedSynapseRouter {
             sender_proof: crate::sender_auth::SenderProof::unsigned(),
             routing_path: Vec::new(),
             metadata: simple_msg.metadata.clone(),
+            protocol_version: crate::types::PROTOCOL_VERSION,
         })
     }
 
@@ -702,6 +703,7 @@ impl EnhancedSynapseRouter {
                 sender_proof: crate::sender_auth::SenderProof::unsigned(),
                 routing_path: Vec::new(),
                 metadata: std::collections::HashMap::new(),
+                protocol_version: crate::types::PROTOCOL_VERSION,
             };
 
             // Test different transport routes
