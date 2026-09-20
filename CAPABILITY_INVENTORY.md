@@ -706,7 +706,8 @@ message's.**
 
 **`from_global_id` is an unauthenticated string.** Across `src/transport/` it is only ever logged
 (`email_simple.rs:78`), embedded in a header (`email_unified.rs:189`), or copied
-(`nat_traversal.rs:570,608`). Nothing compares it to anything.
+(`nat_traversal.rs:585`, one site as of PR B Task 10, was two before it collapsed the hand-built
+envelope into a direct `SecureMessage` deserialization). Nothing compares it to anything.
 
 ⚠️ **Measured, not inferred.** Probe D (above) sent `"signature": []` and
 `"from_global_id": "python-agent@openai.example"` from a Python process with no credentials of any

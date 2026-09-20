@@ -623,25 +623,31 @@ address. Its send also corrupts ciphertext: `send_message` builds its JSON with
 sequence with U+FFFD, so sealed bytes do not survive. The repair must send the raw bytes (the
 serialized `SecureMessage`, as the other transports do), not a lossy string.
 
-- [ ] **Test:** `nat_traversal_carries_a_verified_message_end_to_end`, over loopback. (The traversal
+- [x] **Test:** `nat_traversal_carries_a_verified_message_end_to_end`, over loopback. (The traversal
   itself needs a real NAT to exercise; this test proves the transport sends and receives, which is the
   repair.) Control: record that it fails before the double-bind fix.
-- [ ] Commit: `fix(nat): register it, and stop binding twice`.
+- [x] Commit: `fix(nat): register it, and stop binding twice` (d9da9fe).
 
 ---
 
 ### Task 11: Verification and the PRs (run once after Task 6, once after Task 10)
 
-- [ ] **Mutation check.** Predict in writing, then run. For PR A: removing the version check in
-  `verify_at` fails only the `protocol_version` tests. For PR B: re-introducing the second bind in
-  `websocket_unified` fails only the WebSocket end-to-end test. Run `--lib` and each `--test` target as
-  **separate commands** — a `--lib name::` filter applies to every target and silently runs zero
-  integration tests.
-- [ ] **Full run in a FRESH target directory** with the UTC window recorded. **The failing set must be
-  empty.**
-- [ ] **Firewall event 2097 count** for that window: 0, with a positive control.
-- [ ] fmt; clippy on the lib and every test target.
-- [ ] **Docs:** update `CAPABILITY_INVENTORY.md`'s transport findings — the 26-functions entry, the
-  QUIC entry, the email entry, the double-bind entries — each marked fixed or deleted, with the ref.
-- [ ] **Open the PR** (A into `main`; B into `design/transport-contract`, retargeted when A merges),
-  with the breaking list, the verification numbers and their ref, and the mutation result.
+PR A's pass ran under PR #44 (merged). PR B's pass, below, ran after Task 10 (NAT); see the ledger
+entry "Task 11 (PR B, run after Task 10)" for the full detail behind each line.
+
+- [x] **Mutation check.** Predicted: re-introducing the second bind in `websocket_unified` fails only
+  the WebSocket cluster. First two attempts hung for hours -- diagnosed as a half-open TCP connection
+  nothing services, blocked on the OS's own keepalive rather than a test-level timeout, not a product
+  bug -- fixed by capping the test-execution step with a hard `timeout`. Under that cap: tcp/http/nat
+  all `ok`, every websocket test failed or was killed mid-hang by the cap. Reverted; confirmatory run
+  with the real fix: 36 passed, 0 failed.
+- [x] **Full run in a FRESH target directory** with the UTC window recorded: 2026-09-19T15:15:41Z-
+  15:19:47Z, every test binary 0 failed.
+- [x] **Firewall event 2097 count** for that window: 0 (control: 298 total, unfiltered).
+- [x] fmt; clippy on the lib and every test target: clean (only pre-existing, unrelated warnings
+  elsewhere).
+- [x] **Docs:** `CAPABILITY_INVENTORY.md`'s stale `nat_traversal.rs:570,608` citation corrected to
+  `:585`. The 26-functions/QUIC/email/double-bind entries were already marked fixed under PR A/Task
+  7/8/9's own Status annotations; nothing NAT-specific needed a new one beyond the citation.
+- [ ] **Open the PR** (A into `main`, merged as #44; B into `main`, PR A already merged), with the
+  breaking list, the verification numbers and their ref, and the mutation result.
