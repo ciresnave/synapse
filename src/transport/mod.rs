@@ -34,10 +34,6 @@ pub use discovery::DiscoveryTransport;
 // Discovery system
 // pub mod discovery; // Commented out to avoid duplicate
 
-// Simple, working transport implementation (template)
-#[cfg(not(target_arch = "wasm32"))]
-pub mod tcp_simple;
-
 // Platform-specific transport modules (not available in WASM)
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http_unified;
@@ -588,18 +584,11 @@ impl TransportSelector {
 pub use abstraction::*;
 pub use manager::*;
 
-// Unified transport implementations (temporarily disabled)
-// #[cfg(not(target_arch = "wasm32"))]
-// pub use tcp_unified::{TcpTransportImpl, TcpTransportFactory};
 #[cfg(not(target_arch = "wasm32"))]
 // Removed unexpected cfg feature condition
 pub use http_unified::{HttpTransportFactory, HttpTransportImpl};
 #[cfg(not(target_arch = "wasm32"))]
 pub use udp_unified::{UdpTransportFactory, UdpTransportImpl};
-
-// Simple transport implementations
-#[cfg(not(target_arch = "wasm32"))]
-pub use tcp_simple::{SimpleTcpTransport, SimpleTcpTransportFactory};
 
 // Platform-specific re-exports (only on non-WASM platforms)
 #[cfg(not(target_arch = "wasm32"))]
@@ -615,7 +604,9 @@ pub use mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig};
 pub use nat_traversal::{IceCandidate, NatTraversalTransport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use router::MultiTransportRouter;
+// The TCP transport that listens and receives. Named explicitly: `abstraction` once defined a
+// second `TcpTransportFactory` that the glob re-export above made public in its place.
 #[cfg(not(target_arch = "wasm32"))]
-pub use tcp_unified::TcpTransportImpl;
+pub use tcp_unified::{TcpTransportFactory, TcpTransportImpl};
 #[cfg(not(target_arch = "wasm32"))]
 pub use websocket_unified::WebSocketTransportImpl;

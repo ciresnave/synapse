@@ -457,10 +457,15 @@ impl TransportManager {
 
         let selected_transports = self.select_transports(target).await?;
 
+        // Why each transport did not send, so the caller learns more than "all failed".
+        let mut reasons = Vec::new();
         for transport_type in selected_transports {
             // Check if transport is failed and in recovery
             if self.is_transport_in_recovery(transport_type).await {
                 debug!("Transport {:?} is in recovery, skipping", transport_type);
+                reasons.push(format!(
+                    "{transport_type:?}: in recovery after earlier failures"
+                ));
                 continue;
             }
 
@@ -475,8 +480,16 @@ impl TransportManager {
                     self.track_if_ack_requested(message).await;
                     return Ok(receipt);
                 }
+                // The transport refused this message (too large, say) without touching the
+                // network. That says nothing about the transport's health, so it is not
+                // recorded against it; another transport may still take the message.
+                Err(e @ SynapseError::MessageRefused(_)) => {
+                    debug!("{:?} refused the message: {}", transport_type, e);
+                    reasons.push(format!("{transport_type:?}: {e}"));
+                }
                 Err(e) => {
                     warn!("Failed to send via {:?}: {}", transport_type, e);
+                    reasons.push(format!("{transport_type:?}: {e}"));
                     self.record_failure(transport_type).await;
                     self.update_transport_metrics(transport_type, false, Duration::from_secs(0))
                         .await;
@@ -489,9 +502,14 @@ impl TransportManager {
             }
         }
 
-        Err(crate::error::SynapseError::TransportError(
-            "All transports failed".to_string(),
-        ))
+        Err(crate::error::SynapseError::TransportError(format!(
+            "All transports failed: {}",
+            if reasons.is_empty() {
+                "none was selected".to_string()
+            } else {
+                reasons.join("; ")
+            }
+        )))
     }
 
     /// Acknowledge a message the application has processed (P2 slice b, spec §5). Refuses, sending
@@ -1059,6 +1077,8 @@ impl TransportManager {
                         breaker.record_outcome(RequestOutcome::Success).await;
                         Ok(receipt)
                     }
+                    // A refusal of the message is not a failure of the transport.
+                    Err(e @ SynapseError::MessageRefused(_)) => Err(e),
                     Err(e) => {
                         breaker
                             .record_outcome(RequestOutcome::Failure(e.to_string()))

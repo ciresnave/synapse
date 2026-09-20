@@ -185,6 +185,7 @@ pub enum TransportType {
     Email,
     AutoDiscovery, // Replaces Mdns with more comprehensive discovery
     Quic,
+    NatTraversal,
     Custom(u32), // For extensibility
 }
 
@@ -198,6 +199,7 @@ impl std::fmt::Display for TransportType {
             TransportType::Email => write!(f, "Email"),
             TransportType::AutoDiscovery => write!(f, "Auto-Discovery"),
             TransportType::Quic => write!(f, "QUIC"),
+            TransportType::NatTraversal => write!(f, "NAT-Traversal"),
             TransportType::Custom(id) => write!(f, "Custom({id})"),
         }
     }
@@ -689,43 +691,6 @@ pub trait TransportFactory: Send + Sync {
 
 // Factory implementations for unified transports
 
-/// TCP Transport Factory
-pub struct TcpTransportFactory;
-
-#[async_trait]
-impl TransportFactory for TcpTransportFactory {
-    async fn create_transport(
-        &self,
-        _config: &HashMap<String, String>,
-    ) -> Result<Box<dyn Transport>> {
-        let transport = crate::transport::tcp_simple::SimpleTcpTransport::new();
-        Ok(Box::new(transport))
-    }
-
-    fn transport_type(&self) -> TransportType {
-        TransportType::Tcp
-    }
-
-    fn default_config(&self) -> HashMap<String, String> {
-        let mut config = HashMap::new();
-        config.insert("listen_port".to_string(), "0".to_string());
-        config.insert("connection_timeout_ms".to_string(), "30000".to_string());
-        config.insert("max_message_size".to_string(), "1048576".to_string()); // 1MB
-        config
-    }
-
-    fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(port_str) = config.get("listen_port")
-            && port_str.parse::<u16>().is_err()
-        {
-            return Err(crate::error::SynapseError::Config(
-                "Invalid port number".to_string(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// UDP Transport Factory (temporarily disabled)
 pub struct UdpTransportFactory;
 
@@ -840,7 +805,9 @@ impl TransportFactory for MdnsTransportFactory {
     }
 }
 
-// WebSocket Transport Factory (RE-ENABLED)
+/// Factory for the WebSocket transport (`websocket_unified`). The config keys, their defaults, and
+/// what the limits bound are in that module's documentation; `create_transport` and
+/// `validate_config` refuse the same invalid values.
 pub struct WebSocketTransportFactory;
 
 #[async_trait]
@@ -859,22 +826,34 @@ impl TransportFactory for WebSocketTransportFactory {
     }
 
     fn default_config(&self) -> HashMap<String, String> {
-        let mut config = HashMap::new();
-        config.insert("local_port".to_string(), "0".to_string());
-        config.insert("connection_timeout_ms".to_string(), "30000".to_string());
-        config.insert("max_message_size".to_string(), "16777216".to_string()); // 16MB
-        config
+        use crate::transport::websocket_unified as ws;
+        [
+            (ws::LOCAL_PORT_KEY, 0),
+            (
+                ws::CONNECTION_TIMEOUT_MS_KEY,
+                ws::DEFAULT_CONNECTION_TIMEOUT_MS,
+            ),
+            // In bytes of serialized JSON, the unit sender and receiver both enforce.
+            (ws::MAX_MESSAGE_SIZE_KEY, ws::DEFAULT_MAX_MESSAGE_SIZE),
+            (
+                ws::MAX_CONCURRENT_CONNECTIONS_KEY,
+                ws::DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+            ),
+            (ws::MAX_QUEUED_BYTES_KEY, ws::DEFAULT_MAX_QUEUED_BYTES),
+            (
+                ws::HANDSHAKE_TIMEOUT_MS_KEY,
+                ws::DEFAULT_HANDSHAKE_TIMEOUT_MS,
+            ),
+            (ws::IDLE_TIMEOUT_MS_KEY, ws::DEFAULT_IDLE_TIMEOUT_MS),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
     }
 
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        if let Some(port_str) = config.get("local_port")
-            && port_str.parse::<u16>().is_err()
-        {
-            return Err(crate::error::SynapseError::Config(
-                "Invalid port number".to_string(),
-            ));
-        }
-        Ok(())
+        // The same check `new` applies, so validating and constructing cannot disagree.
+        crate::transport::websocket_unified::validate_config(config)
     }
 }
 
@@ -922,67 +901,53 @@ impl TransportFactory for QuicTransportFactory {
     }
 }
 
-/// HTTP Transport Factory
-// Removed unexpected cfg condition
-pub struct HttpTransportFactory;
+/// Factory for the NAT traversal transport (`nat_traversal`). `local_port` (default 0, meaning
+/// let the OS choose) is the only config key it reads, plus the shared bind-scope key.
+pub struct NatTraversalTransportFactory;
 
-// Removed unexpected cfg condition
 #[async_trait]
-impl TransportFactory for HttpTransportFactory {
+impl TransportFactory for NatTraversalTransportFactory {
     async fn create_transport(
         &self,
         config: &HashMap<String, String>,
     ) -> Result<Box<dyn Transport>> {
-        let transport = crate::transport::http_unified::HttpTransportImpl::new(config).await?;
+        self.validate_config(config)?;
+        let local_port = config
+            .get("local_port")
+            .map(|p| p.parse::<u16>())
+            .transpose()
+            .map_err(|_| crate::error::SynapseError::Config("Invalid port number".to_string()))?
+            .unwrap_or(0);
+        let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
+        let transport = crate::transport::nat_traversal::NatTraversalTransport::new_with_scope(
+            local_port, bind_scope,
+        )
+        .await?;
         Ok(Box::new(transport))
     }
 
     fn transport_type(&self) -> TransportType {
-        TransportType::Http
+        TransportType::NatTraversal
     }
 
     fn default_config(&self) -> HashMap<String, String> {
-        let mut config = HashMap::new();
-        config.insert("use_https".to_string(), "true".to_string());
-        config.insert("server_port".to_string(), "0".to_string()); // Disabled by default
-        config.insert("server_address".to_string(), "127.0.0.1".to_string());
-        config.insert("timeout_ms".to_string(), "30000".to_string());
-        config.insert("max_message_size".to_string(), "10485760".to_string()); // 10MB
-        config.insert(
-            "user_agent".to_string(),
-            "Synapse-HTTP-Transport/1.0".to_string(),
-        );
-        config
+        let mut cfg = HashMap::new();
+        cfg.insert("local_port".to_string(), "0".to_string());
+        cfg
     }
 
     fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
-        // Validate server port
-        if let Some(port_str) = config.get("server_port")
+        if let Some(port_str) = config.get("local_port")
             && port_str.parse::<u16>().is_err()
         {
             return Err(crate::error::SynapseError::Config(
-                "Invalid server port number".to_string(),
+                "Invalid port number".to_string(),
             ));
         }
-
-        // Validate timeout
-        if let Some(timeout_str) = config.get("timeout_ms")
-            && timeout_str.parse::<u64>().is_err()
-        {
-            return Err(crate::error::SynapseError::Config(
-                "Invalid timeout value".to_string(),
-            ));
-        }
-
-        // Validate max message size
-        if let Some(size_str) = config.get("max_message_size")
-            && size_str.parse::<usize>().is_err()
-        {
-            return Err(crate::error::SynapseError::Config(
-                "Invalid max message size".to_string(),
-            ));
-        }
-
         Ok(())
     }
 }
+
+// The HTTP transport's factory is `http_unified::HttpTransportFactory`, beside the transport it
+// builds. A second `HttpTransportFactory` here, with its own and weaker config check, was removed
+// (PR B, Task 9), as `abstraction`'s shadowing `TcpTransportFactory` was in Task 7.

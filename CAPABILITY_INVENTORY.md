@@ -33,23 +33,223 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 |---|---|
 | **UDP round trip** | ✅ **DELIVERS** — payload intact, ~1 ms, via the factory path with `bind_port` set |
 | **TCP round trip** | 🔴 **SILENTLY DROPS** — `send_message` returns `Ok(confirmation: Sent)`; nothing ever arrives |
-| **WebSocket** | 🔴 same defect as TCP, read not run |
+| **WebSocket** | ✅ **DELIVERS** over loopback — a sealed, signed message arrives `Verified` and opens intact; the receipt claims `Sent` (transport contract PR B, Task 8) |
+| **HTTP** | ✅ **DELIVERS** over loopback — a sealed, signed message arrives `Verified` and opens intact; the receipt claims `Delivered`, because the receiver answers `2xx` only once the message is in its queue (transport contract PR B, Task 9) |
 | **QUIC** | 🔴 **simulation** — binds nothing, fabricates connections with a hardcoded RTT |
 
-> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** QUIC — **deleted**: `quic_unified.rs` is gone and
-> `QuicTransportFactory` refuses to construct until the QUIC slice (`5fb180f`). WebSocket — the double
-> bind is **still open**; it is fixed in PR B (plan Task 8), not PR A. PR A makes WebSocket's
-> `send_message` refuse instead of claiming a delivery (`8087c3e`). The TCP and UDP rows are unchanged
-> by PR A.
+> **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** QUIC — **deleted**: `quic_unified.rs` is gone and
+> `QuicTransportFactory` refuses to construct until the QUIC slice. PR A made WebSocket's
+> `send_message` refuse instead of claiming a delivery; PR B, Task 8 repaired it (below). The TCP
+> and UDP rows are unchanged by PR A.
+
+> **Status, 2026-09-18, PR B of the transport contract, Task 7 (branch `feat/transport-contract-b`, not
+> yet on `main`):** TCP — the public `synapse::transport::TcpTransportFactory` built `tcp_simple`, which
+> had no listener, not `tcp_unified`: `abstraction.rs` defined a second `TcpTransportFactory` and the
+> glob re-export made it the public one. That factory and `tcp_simple.rs` are deleted, and
+> `tcp_unified::TcpTransportFactory` is re-exported by name (transport contract PR B, Task 7); against the old factory the
+> end-to-end test fails at send (`All transports failed`: nothing listens on the receiver's port).
+> A review of that commit then found two ways `tcp_unified`'s receiver still lost messages behind a
+> `Sent` receipt: it did one `read` of at most 8192 bytes, so any message whose JSON was larger was
+> dropped (a 2,000 B body is about 9.2 KB of JSON), and it queued with `try_lock`, dropping the message
+> whenever the queue was busy. The fix-round commits on the same branch read each connection to EOF
+> (the sender now shuts down its write half) and wait for the queue lock. Everything the receiver
+> holds, it holds before any signature is checked. Writing `C` = `max_concurrent_connections`
+> (default 64), `M` = `max_message_size` (default 1 MiB), `B` = `max_queued_bytes` (default 4 MiB,
+> counted in bytes of serialized JSON; construction refuses `B` < `M` and `B` > `u32::MAX`) and `f`
+> for the parse factor (heap per byte of JSON while parsing and after), the worst case is read
+> buffers `C × (M + 1 + 8 KiB)` (each handler's buffer plus its 8 KiB read chunk) plus parsed
+> messages `B × f`: a handler takes budget for its message's JSON length before parsing, and the
+> queued message keeps it until drained, so everything being parsed or queued holds at most `B`
+> bytes of budget. The sender chooses the JSON, so `f` is adversarial. Measured with a counting
+> allocator on about 1 MiB of JSON `SecureMessage`: a `routing_path` of empty strings peaks at 18.0×
+> and retains 12.0× (`Vec` capacity doubling is never shrunk); one of one-character strings peaks at
+> 9.1× and retains 6.3×, about 14× with per-allocation heap overhead; short-key `metadata` peaks at
+> 9.5× and retains 6.6×. So `f` ≈ 18 while parsing and ≈ 12 retained — the largest measured, not
+> proven maxima. With the defaults that is 64 × (1 MiB + 1 B + 8 KiB) + 4 MiB × 18 = 143,130,688
+> bytes, about 136.5 MiB at peak (112.5 MiB with everything retained at `f` = 12); the old 16 MiB
+> default would have allowed about 352.5 MiB. The bound ends where a message is drained:
+> `receive_raw` releases its budget before the manager verifies and opens it, so while the manager
+> processes a batch, up to `B × f` of drained messages sit outside the bound while the queue refills
+> another `B`, and whatever the application keeps afterwards is outside it too. At `C` the accept loop waits, so later connections queue in
+> the kernel's backlog; with the budget spent, a handler waits for budget holding its connection, so
+> an application that never polls stops the listener (backpressure) rather than losing messages. A connection is closed if it sends nothing
+> for `first_byte_timeout_ms` (default 5 s), goes silent for `idle_timeout_ms` (default 5 s), or has
+> not ended after 30 s, so a round of `C` silent peers holds every connection for at most 5 s and a
+> round of peers trickling bytes for at most 30 s; a legitimate connection still waits behind every
+> connection queued ahead of it in the backlog. `max_message_size` counts serialized JSON bytes,
+> not body bytes (`encrypted_content` serializes as a number array, a few characters per body byte);
+> the sender refuses (`SynapseError::MessageRefused`), rather than claiming `Sent`, any message over
+> its own limit, and `capabilities()` reports the configured limit. The manager does not count a
+> refusal against the transport: before, one oversize send marked TCP failed for 300 s, receive
+> included. When every transport fails, the manager's error now carries each transport's own
+> reason. A limit or timeout that does not parse, or is 0, fails construction instead of silently
+> becoming the default. What `tests/transport_repairs.rs` shows, over loopback in one process only:
+> a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`, pinned to the
+> sender's certificate, and opens intact; 400 signed sends, 32 in flight at a time, all arrive once, each pinned
+> to the sender and carrying its own body; a message over a 4096-byte limit is refused at send
+> while one under it arrives; after such a refusal TCP stays `Running` and the next message
+> arrives; with a cap of 2 and two connections held open, a third is read only after one closes;
+> with two silent connections and a 500 ms first-byte timeout, a message behind them arrives after
+> that timeout, not after 30 s; with a queue budget that holds two of its messages but not three and
+> no polling, four messages sent leave only two queued at the first poll, and all four arrive once
+> polling continues; a `max_queued_bytes` below `max_message_size`, above `u32::MAX`, zero or
+> unparseable fails construction; `stop()` closes the queue budget, so handlers waiting for it
+> return and release their connection permits instead of leaking. Each receipt still claims only
+> `Sent`. Nothing here was run across machines.
+>
+> **Known gaps, not fixed in Task 7 (follow-ups):**
+> - `stop()` leaves TCP's accept loop running: it still accepts and reads connections, then drops
+>   each message at the closed budget.
+> - The manager does not drain a transport in recovery, so after one real send failure marks TCP
+>   failed, inbound TCP stalls for the 300 s recovery window.
+> - UDP (`udp_unified.rs:157`) still returns `TransportError` for an oversize message, which counts
+>   against the transport; UDP needs its own fix. (WebSocket's refusal is `MessageRefused` since
+>   PR B, Task 8, and HTTP's since PR B, Task 9.)
+> - Cap `routing_path` and `metadata` lengths during deserialization, to bound `f` itself.
+
+> **Status, 2026-09-19, PR B of the transport contract, Task 8 (branch `feat/transport-contract-b`, not
+> yet on `main`):** WebSocket — `start()` bound a listener, stored it, then bound the same port again
+> inside the spawned accept task and swallowed that failure, so the accept loop never ran; the
+> client skipped the handshake (a bare TCP connect); `send_via_existing_connection` never wrote its
+> data; and `receive_raw` put back everything it drained, so every poll returned every message
+> again. Now `start()` binds once on the `BindScope` address (loopback by default) and the accept
+> loop serves that same listener; the server runs `tokio_tungstenite::accept_async` and the client
+> `connect_async`, a real HTTP-upgrade handshake; each message is one binary frame on its own
+> connection (as for TCP: no connection is kept per peer), and the receipt claims `Sent` once the
+> frame is written and flushed — never `Delivered`, since the receiver sends no application-level
+> acknowledgement; `receive_raw` drains. Limits are TCP's, with the same keys and defaults where
+> they overlap: `max_message_size` (1 MiB of serialized JSON, also tungstenite's message and frame
+> limit), `max_concurrent_connections` (64), `max_queued_bytes` (4 MiB, taken before parsing and
+> held until drained, closed by `stop()`), `handshake_timeout_ms` and `idle_timeout_ms` (5 s each),
+> and `connection_timeout_ms` (30 s, the sender's connect-and-handshake and write limit); an
+> unparseable or zero value, a bad `local_port`, or a `max_queued_bytes` below `max_message_size` or
+> above `u32::MAX` fails construction. The worst case an unauthenticated peer can make the receiver
+> hold is about `C × (2.625M + 75 KiB) + B × f`, about 245 MiB at peak with the defaults and `f` =
+> 18. The `2.625M` per connection (2.63 MiB at `M` = 1 MiB, a fragmented message's transient peak;
+> 2.06 MiB held for one whole frame) and the 11 KiB each connection holds after its handshake were
+> measured with a counting allocator, release build, Windows, 16 connections at once; the 64 KiB
+> write-buffer cap, and the scaling to other `M`, are derived. `2.625M` is the largest of the four
+> frame shapes measured, not a proven maximum: a shape not tried could grow tungstenite's buffers
+> further. (As first built, `22e68c5` stated
+> `C × (4M + 80 KiB)`, about 333 MiB, an estimate from reading tungstenite 0.30 that the
+> measurement showed was high.) Fix round 1 also closed a hole the formula did not cover: the
+> receiver answered pings, with an unbounded write buffer, so one peer that pinged and never read
+> grew the receiver's heap by 4 GiB in 8.4 s (measured by the reviewer at `22e68c5`); the receiver
+> now closes a connection on any Ping, Pong or other control frame but Close, and caps its write
+> buffer at 64 KiB (the same flood, re-measured: 0.1 MiB of growth, the connection closed after
+> 0.2 MiB had been sent). `idle_timeout_ms` is a gap between reads, as TCP's is, not a deadline for
+> a whole message, and a target with any scheme but `ws://`, an empty host, or a missing, zero or
+> invalid port is refused (`22e68c5` accepted `http://host:80` and dialled `ws://http://host:80/`).
+> A target is checked by the parser that dials it (`http::Uri`, through tungstenite's
+> `IntoClientRequest`), so what is accepted is exactly what is dialled; `c604d57` checked with the
+> `url` crate, which accepted `ws://a\b:9000`, `ws://%61:80`, `ws://bücher.test:80` and a path
+> with a space, all then refused at send, read `ws://0x7f.1:80` as 127.0.0.1 where the dialler
+> resolves the name, and dropped a fragment. The scheme matches in any case (`WS://h:80`).
+> The sender refuses an oversize message with `SynapseError::MessageRefused` before connecting.
+> `test_connectivity` reports connected, with the handshake's measured round trip, only after a
+> real handshake; `estimate_metrics` probes the same way and reports observed values (a failed probe
+> reports unavailable, the connection timeout as latency, and confidence 0.3); `metrics()`
+> counts real sends, receives and failures. `tokio-tungstenite` moved from 0.27.0 to 0.30.0, the
+> latest published; the direct `tungstenite` dependency, which nothing used, was removed. What `tests/transport_repairs.rs` shows, over loopback in one
+> process only: a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`
+> and opens intact; five messages each arrive once however often Bob polls; 200 signed sends, 32 in
+> flight at a time, all arrive once; a peer that sends a Ping or a Pong is closed within 2 s and,
+> under a cap of 1, its permit goes to the next message; a frame trickled in 100 ms apart over about
+> 0.9 s arrives under a 300 ms idle timeout, while one with a 900 ms gap is cut off; an oversize
+> message is `MessageRefused` even to a port where nothing
+> listens, and ten refusals through the manager leave WebSocket `Running` with the next message
+> arriving; two peers that never handshake, under a cap of 2 and a 500 ms handshake timeout, delay a
+> message behind them by that timeout, not 30 s; connectivity is reported against a live node and
+> not against a closed port. That a listener that accepts TCP but never upgrades is reported not
+> connected is shown by the unit test `a_bare_tcp_listener_is_not_a_websocket_connection` in
+> `src/transport/websocket_unified.rs`, not by `tests/transport_repairs.rs`. Nothing here was run
+> across machines.
+>
+> **Known gaps, not fixed in Task 8 (follow-ups):** as for TCP, `stop()` leaves the accept loop (and
+> so the listener) running; each send to a peer costs two handshakes through the manager, because
+> adaptive selection calls `estimate_metrics`, which probes; `wss://` is refused, since
+> `tokio-tungstenite` is built without TLS; `TransportCapabilities::websocket()` in `abstraction.rs`
+> still advertises 16 MB and WSS (the transport reports its own capabilities and does not use it).
+
+> **Status, 2026-09-19, PR B of the transport contract, Task 9 (branch `feat/transport-contract-b`, not
+> yet on `main`):** HTTP — `start_server` bound nothing: it built an `HttpServer` record, logged
+> "HTTP server started", and returned, so nothing listened and nothing ever filled the queue
+> `receive_raw` drained; `abstraction.rs` held a second `HttpTransportFactory` with a weaker config
+> check. Now `start()` binds once on the `BindScope` address (loopback by default) at `server_port`,
+> keeps the listener, and serves it with `axum` on hyper's HTTP/1.1 server: one route,
+> `POST /synapse/message`, whose handler reads the JSON body, takes queue budget for it, parses it,
+> queues it, and only then answers `202`. So the sender's receipt is `Delivered`, resting on that
+> `2xx`; any other status is an error, never `Sent`. The server answers `413` for a `Content-Length`
+> over `max_message_size` and `411` for a body without one (chunked), both before reading any of
+> the body; `400` for a body that is empty, short or does not parse; `408` when the body goes
+> silent; `503` while the transport is stopping or when no queue budget frees before the request's
+> deadline. Keep-alive is off: one request per connection, so a connection permit bounds one
+> message, as for TCP and WebSocket, and a pipelined second request is never read. Limits are TCP's,
+> with the same keys and defaults where they overlap (`max_message_size` 1 MiB of serialized JSON,
+> `max_concurrent_connections` 64, `max_queued_bytes` 4 MiB), plus `header_read_timeout_ms` (5 s,
+> hyper's header timeout, which also closes a connection that sends nothing), `idle_timeout_ms` (5 s,
+> a gap between body reads) and `request_timeout_ms` (20 s, the whole connection including the wait
+> for queue budget, under the sender's 30 s `timeout_ms`); an unparseable or zero value, a bad
+> `server_port` or `use_https`, a `max_queued_bytes` below `max_message_size` or above `u32::MAX`,
+> or the retired keys `server_address` and `max_connections`, fails construction and
+> `validate_config` alike. A full queue makes requests wait, holding their connection permits, until
+> the application polls or the deadline passes. The worst case an unauthenticated peer can make the
+> receiver hold is about `C × (M + 140 KiB) + B × f`, about 145 MiB at peak with the defaults and `f`
+> = 18. The handler allocates exactly the declared body length, once, so a body costs at most `M`;
+> the rest of a connection was measured at 137 to 138 KiB at `M` = 256 KiB, 1 MiB and 4 MiB, with
+> up to four write patterns, 16 connections at once (a counting allocator that counts a
+> reallocation's transient, release build, Windows); the 140 KiB rounds that up and is not a proven
+> maximum, and that it holds for 64 connections is derived. A target is an `http://` or `https://`
+> URL or `host:port`, with a host and a port; it is checked as the `reqwest::Url` that is then
+> dialled, and refused if the parser would dial a different host or port than the address names
+> (`127.1`, `0x7f.1`, a percent-encoded or non-ASCII host), or if it has userinfo or a fragment; the
+> client follows no redirect and uses no proxy. `https://` is accepted because `reqwest` is built
+> with TLS (rustls); a unit test shows an `https://` send opens with a TLS handshake. The sender
+> refuses an oversize message with `SynapseError::MessageRefused` before connecting.
+> `test_connectivity` and `estimate_metrics` report connected and available only after a real HTTP
+> exchange (any response; this server answers the `HEAD` probe `405`), a failed probe reporting
+> unavailable, the request timeout as latency and confidence 0.3; bandwidth is measured from sends,
+> or 1 until there is one. `stop()` closes the queue budget, ends the accept loop and releases the
+> listener. `reqwest` moved from 0.12.22 to 0.13.5; `axum` 0.8.9, `hyper` 1.11.1, `hyper-util`
+> 0.1.20, `tower` 0.5.3, `tower-http` 0.7.1 and `http-body-util` 0.1.5 were added at their latest
+> versions, under the `http` feature. What `tests/transport_repairs.rs` shows, over loopback in one
+> process only: a sealed, signed message with an 8-byte and with a 16 KiB body arrives `Verified`
+> and opens intact, receipted `Delivered` with status `202`; five messages each arrive once, all of
+> them at the first poll after their receipts; 200 signed sends, 32 in flight at a time, all arrive
+> once; an oversize message is `MessageRefused` even to a port where nothing listens, and ten
+> refusals through the manager leave HTTP `Running` with the next message delivered; a 1 GB
+> `Content-Length` trickled a byte every 100 ms is answered `413` within 2 s, after at most 5 bytes,
+> and a chunked body `411`; with a queue budget for two of four messages sent at once and no polling,
+> exactly two sends are answered and two wait until Bob polls, then all four arrive once; with a 1 s
+> `request_timeout_ms` and a full budget, a send is answered `503` at the deadline and its message
+> never arrives; under a cap of 2 with two silent connections, a third request is not read until one
+> closes; under a cap of 2 and a 500 ms header timeout, a silent peer and one trickling its head are
+> closed and a message behind them is delivered after that timeout, not before; a body trickled
+> 100 ms apart over about 1 s is accepted under a 300 ms idle timeout, while one that stalls is
+> answered `408`; two pipelined requests get one answer and one queued message; bodies that do not
+> parse, or are empty, are answered `400`; invalid configs and targets are refused; connectivity is
+> reported against a live node and not against a closed port. That `receive_raw` hands each message
+> out once, that `stop()` answers a waiting request `503`, that every non-2xx answer (`500`, `404`,
+> `302`) is an error, and that `https://` uses TLS are shown by unit tests in
+> `src/transport/http_unified.rs`. Nothing here was run across machines.
+>
+> **Known gaps, not fixed in Task 9 (follow-ups):** each send to a peer costs two HTTP exchanges
+> through the manager, because adaptive selection calls `estimate_metrics`, which probes; the
+> server speaks plain HTTP only (no TLS server), so `capabilities()` reports `encrypted: false`;
+> `TransportCapabilities::http()` in `abstraction.rs` still advertises 10 MB (the transport reports
+> its own capabilities and does not use it); a `503` from a busy peer is a `TransportError`, which
+> the manager counts against HTTP; if the `2xx` is lost after the message is queued, the sender sees
+> an error for a delivered message (a resend is then dropped by the replay record); and TCP's
+> `estimate_metrics` still reports an invented 1,000,000 bytes/s of bandwidth.
 
 ⚠️ **So Synapse can carry a message today, over UDP, and the two transports have opposite and
 undocumented construction requirements.** That single fact matters more for planning than everything
 else in this document.
 
-🔴 **Added 2026-09-17: on `main`, "encrypted" messages can be read by anyone who has the bytes.**
-`encrypt_message` stores the AES key inside its own output. This is not in any published release
-(§2.2, "ENCRYPTION ON `main` IS NOT CONFIDENTIAL"). **Fixed on branch `feat/sealing`** (held, not yet on
-`main`).
+✅ **Added 2026-09-17, fixed 2026-09-18: until PR #41, "encrypted" messages on `main` could be read by
+anyone who had the bytes.** `encrypt_message` stored the AES key inside its own output. This was never
+in a published release (§2.2). **Fixed by PR #41, on `main` as `63d4945`:** `encrypt_message`,
+`encrypt_with_aes` and `decrypt_message` are gone from `src/` at `origin/main` 4df9e36.
 
 ---
 
@@ -175,12 +375,12 @@ not an infrastructure problem; it is the test doing its job. It took 8.08s, whic
 timeout path is involved. **Deliberately not fixed** — it is a behaviour question, and the code that
 owns it may not survive the merge.
 
-> **Status, 2026-09-18: fixed in PR A of the transport contract (branch `design/transport-contract`, not yet on `main`) (`a258703`, `2a4dd9f`).** `email_simple.rs` had three
+> **Status, 2026-09-18: fixed in PR A of the transport contract (PR #44, on `main` as `b6a1904`).** `email_simple.rs` had three
 > disagreeing address checks; `test_connectivity` required only an `@`, so `invalid@` passed as
 > `connected: true`. One validator (`valid_address`) now serves all three, and the transport, which
 > touches no network, refuses to send, receive or report a connection for a well-formed address
 > ("not implemented yet; it arrives in the email slice") instead of faking one.
-> `transport_error_handling_test` passes; the full run at `593f1c9` shows 0 failures.
+> `transport_error_handling_test` passes; the full run at `593f1c9`, a commit of PR #44 before its squash, shows 0 failures.
 
 ### 2.2 ⚠️ END-TO-END ROUND TRIP: MEASURED, AND IT FAILS WHILE REPORTING SUCCESS
 
@@ -324,14 +524,13 @@ Two further observations, recorded because they mislead:
 **Limits: single process, loopback, one message, one direction.** UDP is also inherently lossy and
 capped at 65507 bytes (`max_message_size` default). **This is a working link, not a reliable one.**
 
-#### ⚠️ EVERY DELIVERY CONFIRMATION SYNAPSE PRODUCES IS SENDER-SIDE
+#### ✅ UNTIL PR #38, EVERY DELIVERY CONFIRMATION SYNAPSE PRODUCED WAS SENDER-SIDE
 
-> **Added 2026-09-17: a receiver-derived acknowledgement is built, on branch `feat/receiver-ack`
-> (stacked on `feat/sender-authentication`, and held with it), not on `main`.** The receiving
-> application sends a signed ack after processing. The sender reaches `Acknowledged` only on a
+> **Fixed by PR #38 (P2 slice b), on `main` as `71388eb`: a receiver-derived acknowledgement.** The
+> receiving application sends a signed ack after processing. The sender reaches `Acknowledged` only on a
 > verified, matching ack, and the unused `Received` variant is removed. Design:
-> `docs/superpowers/specs/2026-09-17-receiver-acknowledgement-design.md`. **Until that branch
-> merges, this heading remains true of `main`.**
+> `docs/superpowers/specs/2026-09-17-receiver-acknowledgement-design.md`. What follows describes
+> `main` before #38.
 
 Checked because the FAM lane, whose fabric is being rewritten into Synapse, handed over a measured
 requirement — *"the ack must belong to the receiver"* — after their own system marked a message
@@ -374,12 +573,12 @@ networking at all.** `quic_unified.rs:415` constructs `Delivered` — a stronger
 `Sent` — with the comment *"QUIC provides delivery confirmation"*, in a module that binds nothing and
 fabricates its connections (§2.2). **The simulation out-claims every real transport.**
 
-> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** `quic_unified.rs` is **deleted** and QUIC refuses to
-> construct (`5fb180f`). The other `Delivered` claims named in the control above are gone too:
-> `mdns_enhanced.rs`'s send refuses (`9d4b543`), and `providers.rs`'s is the test mock, marked as a
+> **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** `quic_unified.rs` is **deleted** and QUIC refuses to
+> construct. The other `Delivered` claims named in the control above are gone too:
+> `mdns_enhanced.rs`'s send refuses, and `providers.rs`'s is the test mock, marked as a
 > test double. `tests/delivery_claims.rs` now scans `src/transport/` so every `Delivered`
 > construction names its protocol event and only the manager constructs `Acknowledged` or `Expired`
-> (`9d4b543`, `8087c3e`, `593f1c9`).
+> (all in PR #44).
 
 **Not fixed here.** A receiver-derived acknowledgement is a protocol addition, not a repair, and it
 is precisely the kind of decision the pending merge should make deliberately. **Recorded because it
@@ -406,9 +605,10 @@ thing.** My claim was true of the one I had read and unverifiable as stated.
 |---|---|
 | **DRAINS** (destructive — a second caller gets nothing) | `tcp_unified`, `udp_unified`, `http_unified` |
 | **clones** (non-destructive) | `production_http`, `quic_unified` |
-| **always returns empty** | `tcp_simple`, `discovery` |
+| **always returns empty** | `discovery`; also `tcp_simple` until transport contract PR B, Task 7 deleted it (branch `feat/transport-contract-b`) |
 
-⚠️ **`tcp_simple::receive_messages` returns `Ok(vec![])` unconditionally, and says so:**
+⚠️ **`tcp_simple::receive_messages` returned `Ok(vec![])` unconditionally, and said so** (quoted as
+of this audit; the file is deleted in transport contract PR B, Task 7):
 
 ```rust
 // For this simple implementation, we don't maintain persistent listeners
@@ -416,57 +616,64 @@ thing.** My claim was true of the one I had read and unverifiable as stated.
 Ok(vec![])
 ```
 
-**That transport can never receive anything.** It is not broken by a bug — it has no receive path at
-all. ⚠️ **And it is the transport `unified_transport_demo` actually starts** ("TCP Simple transport
-started" is the last line before that demo hangs, §2.2).
+**That transport could never receive anything.** It was not broken by a bug — it had no receive path
+at all. ⚠️ **And it was the transport `unified_transport_demo` actually started** ("TCP Simple
+transport started" was the last line before that demo hung, §2.2), because the public
+`TcpTransportFactory` built it. Both the file and that factory are deleted in transport contract PR B, Task 7.
 
 `discovery` also returns empty unconditionally, but legitimately: it is a service-discovery
 transport, not a message transport, and its comment says so. **Same code shape, opposite
 significance — which is the point.**
 
 **Why this matters to a caller:** two implementations of one trait method, both typed
-`Result<Vec<IncomingMessage>>`, where one is destructive and one is not, and a third can never
-return anything. **A caller who reads `receive_messages` once and assumes it forever will be right
-about one transport and wrong about the others**, and the type signature is identical in every case.
+`Result<Vec<IncomingMessage>>`, where one is destructive and one is not, and a third could never
+return anything (`tcp_simple`, until transport contract PR B, Task 7 deleted it). **A caller who reads `receive_messages`
+once and assumes it forever will be right about one transport and wrong about the others**, and the type signature is identical in every case.
 
 ⚠️ **METHOD CAVEAT, AND IT IS A CORRECTION AGAINST MY OWN CLASSIFIER.** I generated the table above
 by reading the 12 lines following each definition and pattern-matching for `drain(` / `.clone()` /
 `Ok(vec![])`. **It produced a false positive: it classified `websocket_unified` as "always returns
 empty" because the first `Ok(Vec::new())` in its body is a circuit-breaker early return.** Reading
-the whole function shows it does call `receive_websocket_messages()` and has a real path.
+the whole function showed it did call `receive_websocket_messages()` and had a real path -- one
+that put back everything it drained, so each message repeated on every poll, until transport
+contract PR B, Task 8 made it drain.
 `websocket_unified` is **excluded** from the table above rather than reclassified, because I have not
 read every remaining implementation in full. **The rows shown are the ones I read; the others are
 unmeasured, not "other".** A window is not a function, and a heuristic over a window will confidently
 mis-read an early return as the whole body.
 
-> **Status, 2026-09-18: fixed for transports in PR A of the transport contract (branch `design/transport-contract`, not yet on `main`).** The old `Transport` trait and
-> the files that never compiled are deleted (`a83c4d5`), and a transport's receive is now one
+> **Status, 2026-09-18: fixed for transports in PR A of the transport contract (PR #44, on `main` as `b6a1904`).** The old `Transport` trait and
+> the files that never compiled are deleted, and a transport's receive is now one
 > signature, `TransportReceive::receive_raw(&self, &mut RawInbox)`, which only the manager can call
-> (`fad7277`, `11cfddf`). `git grep -nE 'fn receive_messages\b' -- '*.rs'` finds 25 definitions in
-> 23 files at `origin/main` `624c62d` and 3 at `593f1c9`: `TransportManager::receive_messages`
+> (all in PR #44). `git grep -nE 'fn receive_messages\b' -- '*.rs'` finds 25 definitions in
+> 23 files at `origin/main` `624c62d` and 3 at `593f1c9` (a commit of PR #44 before its squash): `TransportManager::receive_messages`
 > (`manager.rs:653`), and the unrelated `email.rs:162` and `router.rs:109`, which are not transports.
 > Of the semantics above, the two cloning implementations (`production_http`, `quic_unified`) are
-> deleted; `tcp_simple` and `discovery` still add nothing, and `email_simple` now refuses.
+> deleted; `discovery` still adds nothing, `email_simple` now refuses, and `tcp_simple` added nothing
+> until transport contract PR B, Task 7 deleted it (below).
 
-#### ⚠️ NO MESSAGE'S SENDER IS EVER AUTHENTICATED, AND THE TYPE SAYS OTHERWISE
+> **Status, 2026-09-18, PR B Task 7 (branch `feat/transport-contract-b`, not yet on `main`):**
+> `tcp_simple.rs` is deleted, with the shadowing `TcpTransportFactory` that built it; the public
+> factory is now `tcp_unified`'s, whose receive drains a real listener's queue.
 
-> **Added 2026-09-17: a fix is built, on branch `feat/sender-authentication`, not on `main`.**
-> The branch has a mandatory `sender_proof`, a pinned `TrustStore`, and receiver-computed
-> verdicts from `TransportManager::receive_messages`. The design is
-> `docs/superpowers/specs/2026-09-17-sender-authentication-design.md`. Its PR is held until
-> CireSnave answers #33 §11 Q1. **Until that PR merges, this heading remains true of `main`.**
+#### ✅ UNTIL PR #37, NO MESSAGE'S SENDER WAS AUTHENTICATED, AND THE TYPE SAID OTHERWISE
 
-> **Added 2026-09-17: replay suppression and bounded inbound state are built, on branch
-> `feat/replay-suppression` (held, not on `main`).** `main` has neither. On that branch, unverified
-> senders are denied by default at the transport, with an opt-in setting to accept them and a
-> bounded record of who was refused. This is not sender authentication and does not change the
-> finding above: it decides whether to admit a message from a sender the transport could not
-> verify, not whether the sender is who it claims to be. Stated plainly, not as a caveat to bury:
-> the router's email path (`SynapseRouter`) remains unauthenticated both before and after this
-> branch, because it holds no trust store.
+> **Fixed by PR #37 (P2 slice a), on `main` as `ee1bf8c`.** It added a mandatory `sender_proof`,
+> a pinned `TrustStore`, and receiver-computed verdicts from `TransportManager::receive_messages`.
+> The design is `docs/superpowers/specs/2026-09-17-sender-authentication-design.md`. The
+> measurements below describe `main` before #37.
 
-> **Added 2026-09-17: account keys and agent certificates are built, on branch
-> `feat/agent-certificates` (P2 slice f1, held, not on `main`).** An account holder's key signs
+> **Replay suppression and bounded inbound state merged as PR #42 (P2 slice e), on `main` as
+> `5ddcb07`.** Unverified senders are denied by default at the transport, with an opt-in setting to
+> accept them and a bounded record of who was refused. This is not sender authentication: it
+> decides whether to admit a message from a sender the transport could not verify, not whether the
+> sender is who it claims to be. Stated plainly, not as a caveat to bury: the router's email path
+> (`SynapseRouter`) remains unauthenticated, because it holds no trust store (`TrustStore` has no
+> hit in `src/router.rs` at `origin/main` `4df9e36`; the same query finds 9 in
+> `src/transport/manager.rs`).
+
+> **Account keys and agent certificates merged as PR #43 (P2 slice f1), on `main` as
+> `bbd4bf0`.** An account holder's key signs
 > certificates for the agents it runs, so a receiver pins **one** account key instead of every
 > agent's own key. `TrustStore::verify_at` accepts a certificate chain rooted in a pinned account
 > key as an alternative to pinning the agent directly, checks the chain's validity window,
@@ -476,9 +683,8 @@ mis-read an early return as the whole body.
 > accepted into the trust store only when signed by a pinned account key -- a relay can deliver a
 > revocation but never forge one. **Direct per-agent pinning still works unchanged and is removed
 > in slice f2**, which is scoped to that removal plus the delegation and identity work this slice
-> deferred. This does not change the finding above: the router's email path remains
-> unauthenticated, because `SynapseRouter` holds no trust store either before or after this
-> branch.
+> deferred. The router's email path remains unauthenticated, because `SynapseRouter` holds no
+> trust store.
 
 Checked because the OverMind lane — which drives non-Claude models through MCP tools behind a
 refusal gate — asked directly whether Synapse carries a sender identity a recipient can verify
@@ -500,7 +706,8 @@ message's.**
 
 **`from_global_id` is an unauthenticated string.** Across `src/transport/` it is only ever logged
 (`email_simple.rs:78`), embedded in a header (`email_unified.rs:189`), or copied
-(`nat_traversal.rs:570,608`). Nothing compares it to anything.
+(`nat_traversal.rs:585`, one site as of PR B Task 10, was two before it collapsed the hand-built
+envelope into a direct `SecureMessage` deserialization). Nothing compares it to anything.
 
 ⚠️ **Measured, not inferred.** Probe D (above) sent `"signature": []` and
 `"from_global_id": "python-agent@openai.example"` from a Python process with no credentials of any
@@ -569,14 +776,15 @@ an optional identity field would be the cheap change and the wrong one.**
 FAM (being rewritten into Synapse) already has a voucher-chain design for it. Recorded so the merge
 inherits the measurement rather than the type's implication.
 
-#### 🔴 ENCRYPTION ON `main` IS NOT CONFIDENTIAL — the key travels inside the ciphertext
+#### ✅ UNTIL PR #41, ENCRYPTION ON `main` WAS NOT CONFIDENTIAL — the key travelled inside the ciphertext
 
-*Added 2026-09-17. Measured at `8edce9c1`.*
+*Added 2026-09-17. Measured at `8edce9c1`. Fixed by PR #41, on `main` as `63d4945`; everything in
+this section up to "Status" describes `main` before #41.*
 
-`CryptoManager::encrypt_message` (`crypto.rs:121`) never uses the recipient's key; it only checks
-that one is on file. `encrypt_with_aes` generates a random AES-256-GCM key and returns
-`key(32) ‖ nonce(12) ‖ ciphertext`. `decrypt_message` (`crypto.rs:161`) reads the key back out of
-those bytes and never touches a private key.
+`CryptoManager::encrypt_message` (`crypto.rs:121`) never used the recipient's key; it only checked
+that one was on file. `encrypt_with_aes` generated a random AES-256-GCM key and returned
+`key(32) ‖ nonce(12) ‖ ciphertext`. `decrypt_message` (`crypto.rs:161`) read the key back out of
+those bytes and never touched a private key.
 
 **Measured by running it.** A throwaway test (not committed) did three things:
 - created a sender and a recipient;
@@ -586,34 +794,32 @@ those bytes and never touches a private key.
 It returned `Ok("the secret")`. **Control:** the ciphertext does not contain the plaintext bytes, so
 the result is not a plaintext passthrough.
 
-⚠️ **So `SecurityLevel::Secure` gives no confidentiality.** Anyone who can read the bytes (a relay, a
-mail server, a packet capture) can read the message. The router encrypts this way on its send
-path (`router.rs:79`) and in `convert_to_secure_message` (`router.rs:223`).
+⚠️ **So, before #41, `SecurityLevel::Secure` gave no confidentiality.** Anyone who could read the
+bytes (a relay, a mail server, a packet capture) could read the message. The router encrypted this
+way on its send path (`router.rs:79`) and in `convert_to_secure_message` (`router.rs:223`).
 
 **When it arrived:** `git log -S` finds the key-in-output line was introduced by `f0f570c` (the
 2026-06-12 checkpoint). That commit replaced RSA with Ed25519, which can only sign and cannot
-encrypt. **The published 1.1.0 crate does not have this flaw:** its `crypto.rs`, read from the
+encrypt. **The published 1.1.0 crate never had this flaw:** its `crypto.rs`, read from the
 registry copy and from `7b80ca4`, encrypts to the recipient's RSA public key with PKCS#1 v1.5.
 That older scheme carries its own advisory, RUSTSEC-2023-0071 (already in the audit list). **No
 crates.io consumer has ever received the self-decrypting version.**
 
-**Status, 2026-09-17: fixed on branch `feat/sealing` (P2 slice d, held), still present on `main`.**
-That branch removes `encrypt_message`, `encrypt_with_aes` and `decrypt_message`. In their place it
+**Status: fixed by PR #41 (P2 slice d), on `main` as `63d4945`.** It removes `encrypt_message`, `encrypt_with_aes` and `decrypt_message`. In their place it
 seals the body to the recipient's pinned X25519 key with HPKE (RFC 9180 base mode). The sealing key
 is generated on its own and is **never** derived from an Ed25519 key; that derivation produces
 ciphertext the recipient cannot open (OverMind MEASUREMENTS §20). An independent Python RFC 9180
 implementation opened a Rust-sealed message. Design:
-`docs/superpowers/specs/2026-09-17-sealing-design.md`. **Publishing 2.0.0 stays blocked until that
-branch reaches `main`** (the PM recorded the block on CireSnave's board, 2026-09-17).
+`docs/superpowers/specs/2026-09-17-sealing-design.md`. The sealing block on publishing 2.0.0 (recorded 2026-09-17) ended when #41 merged; publishing still
+waits on the rest of the 2.0 set and on CireSnave's approval.
 
 #### What this means for a non-Rust agent runtime
 
-> **Added 2026-09-17: an MCP stdio surface is built, on branch `feat/mcp-surface` (stacked on
-> `feat/receiver-ack` and `feat/sender-authentication`, and held with them), not on `main`.**
+> **An MCP stdio surface: PR #39 (P2 slice c), on `main` as `a9dd1d1`.**
 > It is the `synapse-mcp` binary. Any MCP client, in any language, can `send`, `poll`, `list` and
 > `ack` through synapse, and gets sender verdicts and receiver acknowledgement. Keys and peers can
 > only be changed in the config file. Design: `docs/superpowers/specs/2026-09-17-mcp-surface-design.md`.
-> **`main` has no agent-facing surface until that branch merges.**
+> Before #39, `main` had no agent-facing surface.
 
 | direction | status |
 |---|---|
@@ -705,19 +911,23 @@ its de facto schema. **The blocking defect is the receive path, not the protocol
 
 ⚠️ **I originally wrote that `udp_unified`, `quic_unified` and `websocket_unified` "follow the same
 `bind-then-spawn-and-bind-again` shape." I had not checked. One of the three does; the other two do
-not, and one of them does something worse.** Corrected by reading each `start_server`:
+not, and one of them does something worse.** Corrected by reading each `start_server`. The rows
+were read at different times, so each says when: **2026-09-09** is the original reading, at #10
+(`9f63707`); later rows or updates name their own date and ref.
 
-| transport | server side | verdict |
-|---|---|---|
-| `tcp_unified` | binds, then re-binds inside `tokio::spawn` | 🔴 **defect MEASURED end-to-end** (above) |
-| `websocket_unified` | **same shape** — binds at :904, stores it, then re-binds the same port at :931 inside the spawn | 🔴 **same defect, READ not run** |
-| `udp_unified` | binds once at :72, stores `Arc<UdpSocket>`, receive path uses `self.socket` | ✅ **structurally sound** — my speculation was wrong |
-| `quic_unified` | **does not bind anything** | 🔴 **simulation — see below** |
-| `tcp_simple`, `http_unified` | no bind call in the file | no server side |
+| transport | as of | server side | verdict |
+|---|---|---|---|
+| `tcp_unified` | 2026-09-09 at `9f63707`; fixed by #11 (`6e8d058`, 2026-09-09, on `main`) | bound, then re-bound inside `tokio::spawn`, until #11 made it serve the constructor's listener | 🔴 **defect MEASURED end-to-end** (above) at the time; fixed by #11 |
+| `websocket_unified` | current: 2026-09-19, branch `feat/transport-contract-b` (PR B, Task 8), not yet on `main` | bound, stored it, then re-bound the same port inside the spawn, until PR B, Task 8 made `start()` bind once and serve that listener | ✅ **fixed; delivers end-to-end over loopback** (PR B, Task 8) |
+| `udp_unified` | 2026-09-09 at `9f63707` (the bind is at :77 on 2026-09-19) | binds once at :72, stores `Arc<UdpSocket>`, receive path uses `self.socket` | ✅ **structurally sound** — my speculation was wrong |
+| `quic_unified` | 2026-09-09 at `9f63707`; deleted 2026-09-18 by PR A (#44, `b6a1904`) | **did not bind anything** | 🔴 **was a simulation — see below** |
+| `http_unified` | current: 2026-09-19, branch `feat/transport-contract-b` (PR B, Task 9), not yet on `main` | had no bind call until PR B, Task 9 made `start()` bind once and serve that listener with `axum` | ✅ **fixed; delivers end-to-end over loopback** (PR B, Task 9) |
+| `tcp_simple` | 2026-09-19: deleted in PR B, Task 7 | had no bind call | had no server side |
 
-⚠️ **`websocket_unified` is the same bug and is more silent than the TCP one.** It stores the real
-listener, then in the spawned task binds a second one on the same port and swallows the failure with
-`.ok()` — so unlike `tcp_unified` there is **no error log at all**, and the code comments admit it:
+⚠️ **`websocket_unified` had the same bug, more silently than the TCP one, until transport contract
+PR B, Task 8 fixed it.** It stored the real listener, then in the spawned task bound a second one on
+the same port and swallowed the failure with `.ok()` — so unlike `tcp_unified` there was **no error
+log at all**, and the code comments admitted it:
 
 ```rust
 tokio::spawn(async move {
@@ -747,12 +957,12 @@ nothing, while `quinn` is present in `Cargo.lock`. Its own comments say so:
 orphaned `src/transport/quic.rs` (740 lines, §5.3) *does* contain a real `endpoint.accept()` loop —
 **the working-looking implementation is the one excluded from the build.**
 
-> **Status, 2026-09-18, PR A of the transport contract (branch `design/transport-contract`, not yet on `main`):** `quic_unified` — **deleted**, and QUIC refuses to
-> construct (`5fb180f`). `websocket_unified`'s double bind — **still open**, fixed in PR B (plan Task
-> 8), not PR A; PR A only makes its send refuse (`8087c3e`). The orphaned `quic.rs` is deleted too
-> (`a83c4d5`).
+> **Status, 2026-09-18, PR A of the transport contract (PR #44, on `main` as `b6a1904`):** `quic_unified` — **deleted**, and QUIC refuses to
+> construct. `websocket_unified`'s double bind — **fixed in PR B, Task 8**, which also added the real
+> handshake, send and draining receive; PR A only made its send refuse. The orphaned `quic.rs` is deleted too.
 
-**Still unmeasured end-to-end:** UDP, WebSocket, QUIC, HTTP, email. The table above is a reading of
+**Still unmeasured end-to-end:** UDP, QUIC, email. (WebSocket and HTTP are measured over loopback by
+`tests/transport_repairs.rs` since transport contract PR B, Tasks 8 and 9.) The table above is a reading of
 `start_server` in each, not a round trip. **`udp_unified` being structurally sound is not a claim that
 it delivers.**
 
@@ -778,7 +988,7 @@ a prompt is **raised**; event 2099 (by `dllhost`) is written when someone answer
 - **The fix:** `src/network_scope.rs` makes `BindScope::Loopback` the default, and listening on all
   interfaces must be configured (see README, "Network exposure").
   `tests/loopback_by_default.rs` guards the source.
-- **Acceptance:** a full `cargo test --no-fail-fast` in a fresh target directory (0 prompts raised between 09:13:34Z and 09:34:37Z at 002f762e; the same query finds 128 prompt events (64 prompts) in the pre-fix window).
+- **Acceptance:** a full `cargo test --no-fail-fast` in a fresh target directory (0 prompts raised between 09:13:34Z and 09:34:37Z at 002f762e, a commit of PR #40, on `main` as squash `05eee3c`; the same query finds 128 prompt events (64 prompts) in the pre-fix window).
 
 ### 2.3 What "verified" does and does not mean here
 
@@ -863,7 +1073,7 @@ signal.**
 
 #### Update after the formatting fix: the pipeline advanced one step, and stopped again
 
-Run `34371759050`, head `54c2596`, after `src/wasm.rs` was removed and `cargo fmt` applied:
+Run `34371759050`, head `54c2596` (a commit of PR #10, on `main` as squash `9f63707`), after `src/wasm.rs` was removed and `cargo fmt` applied:
 
 ```
  8  Check formatting          SUCCESS   <- first time in this repository's history
@@ -880,7 +1090,7 @@ CI runs `cargo clippy -- -D warnings`, so **31 ordinary style and dead-code lint
 errors** — 6 × "this `if` statement can be collapsed", 3 × "this operation has no effect", 2 ×
 "`map_or` can be simplified", plus unused imports, unused variables and never-read fields.
 
-**They are not introduced by this pass.** Clippy at `7579b56` (before the `cargo fmt` commit) and at
+**They are not introduced by this pass.** Clippy at `7579b56` (PR #10's first commit, before the `cargo fmt` commit) and at
 `HEAD` both report *"could not compile `synapse` (lib) due to 31 previous errors"*, and a diff of the
 two lint-kind sets is **empty**. `cargo fmt` introduced zero lints.
 
@@ -1116,8 +1326,7 @@ project's name.**
 - It only goes one way: `discovery.rs` never reads TXT records back (`txt_records: HashMap::new()`).
   Not fixed here. The merge decides what the key should mean.
 
-> **Status, 2026-09-18: fixed in PR A of the transport contract (branch `design/transport-contract`,
-> not yet on `main`) (`06f33a6`).** No `version` key is advertised any more: `discovery.rs` and both
+> **Status, 2026-09-18: fixed in PR A of the transport contract (PR #44, on `main` as `b6a1904`).** No `version` key is advertised any more: `discovery.rs` and both
 > `mdns_enhanced` advertisements carry `synapse_protocol=1` (the signed wire `protocol_version`), and
 > `mdns_enhanced`'s reader reads that key. The crate version is no longer advertised.
 

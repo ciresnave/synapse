@@ -252,7 +252,7 @@ The `poll` description keeps its slice c text verbatim, with one sentence append
 freshness says whether its signed timestamp could be checked; only `fresh` means the message is
 known not to be a replay."*
 
-**The router's email path is not gated, and cannot be in this slice.** Measured at `f87941d`:
+**The router's email path is not gated, and cannot be in this slice.** Measured on the sealing branch before it was squash-merged as #41 (`63d4945`, whose `src/router.rs` is identical):
 `SynapseRouter` (`src/router.rs:22`) holds a `CryptoManager`, an `IdentityRegistry` and an
 `EmailTransport` — it has no `TransportManager` and no `TrustStore`, so it has nothing to verify a
 sender against. `SynapseRouter::receive_messages` already carries a doc comment saying its senders

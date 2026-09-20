@@ -83,9 +83,15 @@ clap = { version = "4.5.41", features = ["derive"], optional = true }
 config = { version = "0.15.13", optional = true }
 
 # Networking - optional
-reqwest = { version = "0.12.22", features = ["json"], optional = true }
-tokio-tungstenite = { version = "0.27.0", optional = true }
-tungstenite = { version = "0.27.0", optional = true }
+reqwest = { version = "0.13.5", features = ["json"], optional = true }
+# The HTTP transport's server (src/transport/http_unified.rs), under the `http` feature.
+axum = { version = "0.8.9", default-features = false, optional = true }
+hyper = { version = "1.11.1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1.20", features = ["tokio"], optional = true }
+tower = { version = "0.5.3", features = ["util"], optional = true }
+tower-http = { version = "0.7.1", features = ["limit"], optional = true }
+http-body-util = { version = "0.1.5", optional = true }
+tokio-tungstenite = { version = "0.30.0", optional = true }
 futures-util = { version = "0.3", optional = true }
 
 # NAT traversal dependencies for real implementation
@@ -357,7 +363,16 @@ crypto = [
     "dep:blake3",
     "dep:base64",
 ]
-http = ["dep:reqwest", "dep:tokio-tungstenite", "dep:tungstenite"]
+http = [
+    "dep:reqwest",
+    "dep:tokio-tungstenite",
+    "dep:axum",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:http-body-util",
+]
 mdns = ["dep:auto-discovery", "dep:socket2"] # Using auto-discovery crate now
 auto_discovery = ["dep:auto-discovery", "mdns"]
 cache = ["dep:redis"]

@@ -12,7 +12,7 @@ deletions, honesty, the sealed receive, `protocol_version`, and the email valida
 green. **PR B (Tasks 7–10)** is the four repairs, each proven by an end-to-end test over a real loopback
 socket. Task 11 verifies and opens each PR.
 
-**Tech Stack:** Rust, `tokio`, `tokio-tungstenite` 0.27 (already a dependency), `reqwest` (already),
+**Tech Stack:** Rust, `tokio`, `tokio-tungstenite` (already a dependency; moved from 0.27 to the latest, 0.30, in Task 8), `reqwest` (already),
 and **one new dependency, `axum`**, for a real HTTP server — `Cargo.toml` has none today. Per
 CireSnave's standing rule it is added at its latest published version, under the existing `http`
 feature.
@@ -386,6 +386,22 @@ keyed differently for TCP. Where they differ, follow the code and say so in the 
   must fail against the unfixed code. Run it against `main` first and record that it fails.
 - [ ] Commit: `fix(tcp): the public factory builds the TCP transport that can receive`.
 
+#### Breaking changes (unreleased 2.0.0), from Task 7
+
+Quote this list in PR B's body.
+
+- `SynapseError::MessageRefused` is a new variant, and `SynapseError` is not `#[non_exhaustive]`,
+  so an exhaustive `match` on it no longer compiles.
+- TCP's error for an oversize message changed from `SynapseError::TransportError` to
+  `SynapseError::MessageRefused`, and the manager no longer counts it against TCP.
+- The text of the manager's "All transports failed" error now carries each transport's reason.
+- TCP has new config keys and new defaults: `max_message_size` 1 MiB of serialized JSON,
+  `max_concurrent_connections` 64, `max_queued_bytes` 4 MiB, `first_byte_timeout_ms` and
+  `idle_timeout_ms` 5 s. An unparseable or zero value, or a `max_queued_bytes` below
+  `max_message_size` or above `u32::MAX`, is refused at construction instead of becoming the default.
+- `tcp_simple` and the `TcpTransportFactory` in `abstraction.rs` that shadowed `tcp_unified`'s
+  were removed; `synapse::transport::TcpTransportFactory` is now `tcp_unified`'s.
+
 ### Task 8: WebSocket
 
 **Files:** `src/transport/websocket_unified.rs`, `src/transport/abstraction.rs` (register the factory
@@ -401,9 +417,80 @@ the `#[allow(dead_code)]` markers Task 6 put on the now-unreachable send helpers
 repair must actually write the frame to the connection's stream, which means keeping the stream, not
 just a `WebSocketConnection` record, per connection.
 
-- [ ] **Test:** `websocket_carries_a_verified_message_end_to_end`. Control: record that it fails
-  before the double-bind fix, because the accept loop never starts.
+- [ ] **Test:** `websocket_carries_a_verified_message_end_to_end`. Control, as run: at `800d294` the
+  test fails on PR A's refusal (`send_message` refused before connecting), so it never reaches the
+  accept loop and cannot show the double bind; that control was isolated separately (control B).
 - [ ] Commit: `fix(websocket): bind once, perform the real handshake, and receive`.
+
+**As built:** one message per connection, as for TCP, rather than a connection kept open per peer: a
+kept-open connection needs a stored write half per peer, reconnects and idle expiry, and a write into
+a connection whose peer has silently died still "succeeds" into the local buffer, which would weaken
+`Sent`. The receipt is `Sent` once the frame is written and flushed; there is no application-level
+ack, so never `Delivered`. The limits and keys are TCP's (the module doc of
+`websocket_unified.rs` states them), with a handshake timeout in place of TCP's first-byte timeout.
+Fix round 1 (review of `22e68c5`): the
+receiver closes a connection that sends a Ping, a Pong or any control frame but Close, and caps its
+write buffer at 64 KiB (a peer that pinged and never read grew the heap by 4 GiB in 8.4 s, measured);
+the sender's write buffer is capped at one frame of the largest message, header included;
+`idle_timeout_ms` is a gap between reads, enforced by a reader around the socket, not a deadline on
+a whole message; targets with any scheme but `ws`, an empty host, or a missing, zero or invalid port
+are refused; a failed `estimate_metrics` probe reports the connection timeout as latency, with
+confidence 0.3. The memory bound's first term is now taken from a measurement, not TCP's formula:
+about `C × (2.625M + 75 KiB) + B × f`, about 245 MiB at peak with the defaults and `f` = 18.
+The `2.625M` (a fragmented message's transient peak; 2.06 MiB held for one whole frame at `M` =
+1 MiB) and 11 KiB per connection after the handshake are measured (counting allocator, release
+build, Windows); the 64 KiB write-buffer cap and the scaling to other `M` are derived. `2.625M` is
+the largest of the four frame shapes measured, not a proven maximum. As first built it stated
+`C × (4M + 80 KiB)`, about 333 MiB, read from tungstenite's code, which was high.
+Polish (review of `c604d57`): a target is validated by the parser that dials it (`http::Uri`,
+through `IntoClientRequest`), whose host and port must be the ones checked, so what is accepted is
+exactly what is dialled; `\`, `%` and non-ASCII characters in the host, a fragment, and a numeric
+host that is not a dotted quad (`0x7f.1`, which the `url` crate read as 127.0.0.1) are refused;
+the scheme matches in any case; a missing port is reported before a colon in the host. TCP gained
+a deterministic unit test for its queue lock, which fails on every run against the old `try_lock`
+code, where the concurrency test in `transport_repairs.rs` passed about 1 run in 11.
+
+#### Breaking changes (unreleased 2.0.0), from Task 8
+
+Quote this list in PR B's body, with Task 7's.
+
+- WebSocket's `send_message` sends instead of refusing. Its receipt claims `Sent`, never `Delivered`.
+- The wire format is one JSON `SecureMessage` in one binary frame per connection, after a real
+  HTTP-upgrade handshake; the receiver drops a text message, and a second message on one connection.
+- WebSocket's error for an oversize message changed from `SynapseError::TransportError` to
+  `SynapseError::MessageRefused`, returned before connecting, and the manager no longer counts it
+  against WebSocket.
+- `max_message_size`'s default fell from 16 MiB to 1 MiB of serialized JSON, and it now also sets
+  tungstenite's `max_message_size` and `max_frame_size`. New keys: `max_concurrent_connections` 64,
+  `max_queued_bytes` 4 MiB, `handshake_timeout_ms` and `idle_timeout_ms` 5 s.
+  `connection_timeout_ms` (still 30 s) now bounds the connect and handshake, and then the write.
+- An unparseable or zero limit or timeout, a `local_port` that is not a port number, or a
+  `max_queued_bytes` below `max_message_size` or above `u32::MAX`, is refused at construction, and by
+  `WebSocketTransportFactory::validate_config`, instead of silently becoming the default.
+  `validate_config` used to check `local_port` only. `default_config` returns every key.
+- A target must carry an address that is a `ws://` URL or `host:port`, and either must name a
+  non-empty host and a port from 1 to 65535. An identifier-only target, a missing port (the default
+  was 8080; a `ws://` URL without a port is refused too), port 0 or a port over 65535, an empty
+  host, an unbracketed IPv6 host, and any scheme but `ws://` -- `http://`, `https://`, `ftp://`, and
+  `wss://` -- are refused; `can_reach` says so without touching the network. `wss://` needs TLS, and
+  this build has none. (As first built, `22e68c5` accepted `http://` and `https://` addresses and
+  dialled `ws://http://...`; fix round 1 refuses them.)
+- The receiver closes a connection, logging at `warn`, as soon as it reads a Ping, a Pong or any
+  control frame but Close; it used to answer pings. The wire format never sends them.
+- `idle_timeout_ms` is the longest gap between two reads on an inbound connection after its
+  handshake, not a deadline for each whole frame: a message whose bytes keep arriving is read up to
+  the 30 s connection lifetime. A message cut off by any timeout is logged at `warn`.
+- `estimate_metrics` on a failed probe reports the connection timeout as `latency` and a
+  `confidence` of 0.3; it reported the time the failure took, with confidence 1.0.
+- `start()` sets the status to `Failed` when its bind fails (it used to stay `Starting`), and a second
+  `start()` on the same instance is an error.
+- `test_connectivity` and `estimate_metrics` perform a real handshake with the target. They report
+  connected, available and a round-trip time only when it completes. `metrics()` reports real
+  counts, and a `reliability_score` of successful sends over attempts (0 before any attempt).
+- `capabilities()` reports the configured `max_message_size`, `encrypted: false`, and the features
+  `http_upgrade`, `binary_frames` and `one_message_per_connection`.
+- `tokio-tungstenite` moved from 0.27.0 to 0.30.0. No public API names its types. The direct
+  `tungstenite` dependency is removed: nothing used it but through `tokio_tungstenite::tungstenite`.
 
 ### Task 9: HTTP
 
@@ -415,9 +502,114 @@ just a `WebSocketConnection` record, per connection.
 The client's `Sent` stays gated on a 2xx; a 2xx is also the protocol event that permits `Delivered`,
 since the peer's HTTP stack confirmed receipt — say so in the comment.
 
-- [ ] **Test:** `http_carries_a_verified_message_end_to_end`. Control: record that it fails before the
-  server is bound, because the queue is never filled.
-- [ ] Commit: `fix(http): bind a real server, so HTTP can receive`.
+- [ ] **Test:** `http_carries_a_verified_message_end_to_end`. Control, as run: at `9f559ed`, in a
+  fresh target directory, the test fails in `node` before any message is sent: "Http reports Running but nothing holds 127.0.0.1:57267; the transport is not listening" (`start_server` bound nothing). The `protocol event` comment is enforced: with it removed, `tests/delivery_claims.rs` fails, flagging `http_unified.rs:1041`.
+- [ ] Commit: `fix(http)!: bind a real bounded server, so HTTP can receive`.
+
+**As built:** the ruling on the delivery claim overrides the wording above. The server answers `202`
+only after the message is read, has queue budget, is parsed and is in the queue, so the receipt is
+`Delivered`, with a `// protocol event:` comment naming that `2xx`; any other status is an `Err`,
+not `Sent` (the bytes were written, but the peer refused them). The server is `axum` on hyper's
+HTTP/1.1 connection builder, driven by an accept loop that is TCP's: a connection permit before
+each `accept`, the listener bound once in `start()` (`server_port`, the key `port_key` maps HTTP
+to, at the `BindScope` address) and kept, the status `Failed` if the bind fails. Keep-alive is off,
+so one connection carries one request, as TCP and WebSocket carry one message: a kept-alive
+connection could carry any number of requests under one permit, and pipelined requests after the
+first are never read. The limits and keys are TCP's, plus `header_read_timeout_ms` (hyper's, which
+also closes a connection that sends nothing), `idle_timeout_ms` (a gap between body reads, `408`)
+and `request_timeout_ms` (20 s, the whole connection, including the wait for queue budget; under
+the sender's 30 s so a waiting sender sees the `503`). Backpressure: requests wait for queue budget,
+holding their permits, until the application polls, and are answered `503` at the deadline or when
+`stop()` closes the budget. A body must carry a `Content-Length`: over `max_message_size` it is
+`413` (tower-http's `RequestBodyLimitLayer`, and the handler again) and without one `411`, both
+before any of it is read; the handler then allocates exactly that length, once, so no reallocation
+holds two copies. First built with a buffer that doubled, and accepting chunked bodies; the
+measurement below counted the reallocation transient and the design changed before commit. The
+memory bound, in TCP's style: about `C × (M + 140 KiB) + B × f`, about 145 MiB at peak with the
+defaults and `f` = 18. **Measured** (counting allocator that counts a reallocation's old and new
+blocks at once, release build, Windows, 16 connections, each with a whole body read and waiting for
+budget): 20.6 KiB per connection once its head is read, and `M` + 137 to 138 KiB at the peak, the
+same at `M` = 256 KiB, 1 MiB and 4 MiB and for one write, 64 KiB, 1 KiB and (at 256 KiB) 7-byte
+writes. **Derived:** the 140 KiB (a round-up of the largest measured, not a proven maximum), and
+that 64 connections hold what 16 did. A target is checked as the `reqwest::Url` that is dialled; its
+host and port must be the ones the address names, so `127.1`, `0x7f.1`, `%61` and non-ASCII hosts
+are refused, with userinfo, fragments, a missing port and any scheme but `http` and `https`; the
+client follows no redirect, uses no proxy and speaks HTTP/1.1 only. `https://` is accepted because
+`reqwest`'s default features, kept, include rustls, which a unit test checks (an `https://` send
+opens with a TLS handshake record). `abstraction.rs`'s second `HttpTransportFactory`, whose
+`validate_config` checked three keys, is deleted, as Task 7 deleted the shadowing TCP factory.
+`stop()` also ends the accept loop and releases the listener, which TCP and WebSocket do not yet.
+Mutation controls, each in the mutation tree's own target directory, each caught by the named
+tests: answering `202` before queuing (the backpressure, 503-deadline, pipelining, `receive_raw`
+and `stop` tests); keep-alive on (`http_answers_one_request_per_connection_...`); no header
+timeout (`http_closes_connections_that_do_not_finish_their_head`); no body idle timeout
+(`http_idle_timeout_is_a_gap_...`); no `413` in the layer or the handler
+(`http_server_refuses_an_oversize_body_...`); `receive_raw` handing out copies
+(`receive_raw_hands_each_message_out_once`, the backpressure test); `stop` not closing the budget
+(`stop_answers_a_waiting_request_with_503`); the cap raised by 100 (the cap and header tests); the
+sender not refusing oversize (`http_refuses_an_oversize_message_before_connecting_...`); redirects
+followed (`a_non_2xx_answer_is_an_error`); a rewritten host accepted (`target_addresses`,
+`http_refuses_targets_it_would_not_dial_as_named`). The unmutated tree passed both runs.
+
+#### Breaking changes (unreleased 2.0.0), from Task 9
+
+Quote this list in PR B's body, with Tasks 7 and 8's.
+
+- HTTP now receives: `start()` binds `server_port` (at the `bind_scope` address, loopback by
+  default) and serves `POST /synapse/message`. `start()` sets the status to `Failed` when its bind
+  fails, and a second `start()` on the same instance is an error. `stop()` ends the accept loop,
+  releases the listener and closes the receive queue.
+- HTTP's receipt claims `Delivered` instead of `Sent`, resting on the peer's `2xx`, which this
+  server sends only after the message is queued.
+- The wire contract: one JSON `SecureMessage` per `POST`, with a `Content-Length` (a chunked body is
+  answered `411`), one request per connection (keep-alive off; the server answers with
+  `Connection: close`, and a pipelined request is never read), HTTP/1.1 only. The server answers
+  `202`, `400`, `408`, `411`, `413` or `503` (module documentation of `http_unified.rs`).
+- HTTP's error for an oversize message changed from `SynapseError::TransportError` to
+  `SynapseError::MessageRefused`, returned before connecting, and the manager no longer counts it
+  against HTTP.
+- `max_message_size`'s default fell from 10 MiB to 1 MiB of serialized JSON. New keys:
+  `max_concurrent_connections` 64, `max_queued_bytes` 4 MiB, `header_read_timeout_ms` and
+  `idle_timeout_ms` 5 s, `request_timeout_ms` 20 s.
+- `use_https`'s default changed from `true` to `false`, since this transport's server speaks plain
+  HTTP; it now affects only `host:port` targets.
+- An unparseable or zero limit or timeout, a `server_port` that is not a port number, a `use_https`
+  other than `true` or `false`, a `user_agent` that is not a valid header value, or a
+  `max_queued_bytes` below `max_message_size` or above `u32::MAX`, is refused at construction and by
+  `HttpTransportFactory::validate_config`, instead of silently becoming the default (a bad
+  `server_port` used to disable the server, and a bad `use_https` meant `true`). `validate_config`
+  used to check three keys. `default_config` returns every key.
+- The keys `server_address` (use `bind_scope`) and `max_connections` (use
+  `max_concurrent_connections`) are refused rather than ignored.
+- A target must carry an address that is an `http://` or `https://` URL or `host:port`, naming a
+  host and a port. Refused, where they used to be turned into some URL: an identifier-only target
+  (it became `http(s)://localhost:8080/synapse/message/<identifier>`), a missing port (80, 443, 8080
+  or 8443 was guessed), any other scheme, userinfo, a fragment, and a host the URL parser would
+  rewrite (`127.1`, `0x7f.1`, a percent-encoded or non-ASCII name). `can_reach` says so without
+  touching the network. A URL whose path is empty or `/` is sent to `/synapse/message`.
+- The sender follows no redirect (a `3xx` is an error) and ignores `HTTP_PROXY` and the other proxy
+  settings of the environment.
+- `test_connectivity` sends a `HEAD` to the target URL (it sent one to `/synapse/health`, which
+  nothing served) and reports connected on any HTTP response. `estimate_metrics`, which reported
+  fixed figures without touching the network (100 or 200 ms, reliability 0.95, 1,000,000 bytes/s,
+  available, confidence 0.8), now probes: measured latency and confidence 1 on a response; on a
+  failure, unavailable, `timeout_ms` as the latency and confidence 0.3. Bandwidth is measured from
+  sends, or 1 until one has been.
+- `metrics()`: `reliability_score` is successes over attempts, 0 before any (it was a moving average
+  starting at 1.0); `average_latency_ms` is a running mean (it was the last send's);
+  `active_connections` counts inbound connections being served.
+- `capabilities()` reports the configured `max_message_size`, `encrypted: false`, and the features
+  `request_response`, `one_request_per_connection` and `firewall_friendly`.
+- The default `User-Agent` is `Synapse-HTTP-Transport/2.0` (was `/1.0`).
+- Removed from the public API: `HttpTransportConfig`; `HttpServer`, with its public
+  `received_messages` queue; and `synapse::transport::abstraction::HttpTransportFactory`, a second
+  factory (`synapse::transport::HttpTransportFactory` is `http_unified`'s, as before). Added:
+  `http_unified::validate_config`, `HttpTransportImpl::local_addr`, and the key and default
+  constants.
+- `reqwest` moved from 0.12.22 to 0.13.5. `axum` 0.8.9, `hyper` 1.11.1, `hyper-util` 0.1.20,
+  `tower` 0.5.3, `tower-http` 0.7.1 and `http-body-util` 0.1.5 are new dependencies of the `http`
+  feature. No public API names their types; `llm_discovery` and the telemetry error reporter, the
+  other users of `reqwest`, compile unchanged against 0.13.
 
 ### Task 10: NAT traversal
 
@@ -431,25 +623,31 @@ address. Its send also corrupts ciphertext: `send_message` builds its JSON with
 sequence with U+FFFD, so sealed bytes do not survive. The repair must send the raw bytes (the
 serialized `SecureMessage`, as the other transports do), not a lossy string.
 
-- [ ] **Test:** `nat_traversal_carries_a_verified_message_end_to_end`, over loopback. (The traversal
+- [x] **Test:** `nat_traversal_carries_a_verified_message_end_to_end`, over loopback. (The traversal
   itself needs a real NAT to exercise; this test proves the transport sends and receives, which is the
   repair.) Control: record that it fails before the double-bind fix.
-- [ ] Commit: `fix(nat): register it, and stop binding twice`.
+- [x] Commit: `fix(nat): register it, and stop binding twice` (d9da9fe).
 
 ---
 
 ### Task 11: Verification and the PRs (run once after Task 6, once after Task 10)
 
-- [ ] **Mutation check.** Predict in writing, then run. For PR A: removing the version check in
-  `verify_at` fails only the `protocol_version` tests. For PR B: re-introducing the second bind in
-  `websocket_unified` fails only the WebSocket end-to-end test. Run `--lib` and each `--test` target as
-  **separate commands** — a `--lib name::` filter applies to every target and silently runs zero
-  integration tests.
-- [ ] **Full run in a FRESH target directory** with the UTC window recorded. **The failing set must be
-  empty.**
-- [ ] **Firewall event 2097 count** for that window: 0, with a positive control.
-- [ ] fmt; clippy on the lib and every test target.
-- [ ] **Docs:** update `CAPABILITY_INVENTORY.md`'s transport findings — the 26-functions entry, the
-  QUIC entry, the email entry, the double-bind entries — each marked fixed or deleted, with the ref.
-- [ ] **Open the PR** (A into `main`; B into `design/transport-contract`, retargeted when A merges),
-  with the breaking list, the verification numbers and their ref, and the mutation result.
+PR A's pass ran under PR #44 (merged). PR B's pass, below, ran after Task 10 (NAT); see the ledger
+entry "Task 11 (PR B, run after Task 10)" for the full detail behind each line.
+
+- [x] **Mutation check.** Predicted: re-introducing the second bind in `websocket_unified` fails only
+  the WebSocket cluster. First two attempts hung for hours -- diagnosed as a half-open TCP connection
+  nothing services, blocked on the OS's own keepalive rather than a test-level timeout, not a product
+  bug -- fixed by capping the test-execution step with a hard `timeout`. Under that cap: tcp/http/nat
+  all `ok`, every websocket test failed or was killed mid-hang by the cap. Reverted; confirmatory run
+  with the real fix: 36 passed, 0 failed.
+- [x] **Full run in a FRESH target directory** with the UTC window recorded: 2026-09-19T15:15:41Z-
+  15:19:47Z, every test binary 0 failed.
+- [x] **Firewall event 2097 count** for that window: 0 (control: 298 total, unfiltered).
+- [x] fmt; clippy on the lib and every test target: clean (only pre-existing, unrelated warnings
+  elsewhere).
+- [x] **Docs:** `CAPABILITY_INVENTORY.md`'s stale `nat_traversal.rs:570,608` citation corrected to
+  `:585`. The 26-functions/QUIC/email/double-bind entries were already marked fixed under PR A/Task
+  7/8/9's own Status annotations; nothing NAT-specific needed a new one beyond the citation.
+- [ ] **Open the PR** (A into `main`, merged as #44; B into `main`, PR A already merged), with the
+  breaking list, the verification numbers and their ref, and the mutation result.

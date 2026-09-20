@@ -33,11 +33,13 @@ async fn main() -> Result<()> {
         .operation_timeout(Duration::from_secs(30))
         .transport_config(TransportType::Http, {
             let mut config = HashMap::new();
-            config.insert("use_https".to_string(), "true".to_string());
+            // Plain HTTP: the transport has no TLS server. The bind address comes from the
+            // bind scope (loopback by default), not from a config key.
+            config.insert("use_https".to_string(), "false".to_string());
             config.insert("server_port".to_string(), "8443".to_string()); // Enable server
-            config.insert("server_address".to_string(), "127.0.0.1".to_string());
             config.insert("timeout_ms".to_string(), "15000".to_string());
-            config.insert("max_message_size".to_string(), "5242880".to_string()); // 5MB
+            // 1 MiB of JSON, the default; a larger limit also needs `max_queued_bytes` raised.
+            config.insert("max_message_size".to_string(), "1048576".to_string());
             config.insert("user_agent".to_string(), "Synapse-Demo/1.0".to_string());
             config
         })

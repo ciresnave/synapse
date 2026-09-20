@@ -4,10 +4,9 @@
 use super::abstraction::{self, Transport, TransportReceive};
 use crate::{
     error::{Result, SynapseError},
-    types::{DateTimeWrapper, SecureMessage, SecurityLevel, UuidWrapper},
+    types::SecureMessage,
 };
 use async_trait::async_trait;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -21,7 +20,6 @@ use tokio::{
     time::timeout,
 };
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
 /// TURN server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +39,10 @@ pub struct NatTraversalTransport {
     upnp_enabled: bool,
     ice_candidates: HashMap<String, IceCandidate>,
     external_address: Option<SocketAddr>,
-    socket: Arc<Mutex<Option<UdpSocket>>>,
+    /// The one socket this transport binds. Shared (not re-bound) between sending and
+    /// `receive_raw`: a second bind on the same address is refused by the OS and was the bug
+    /// that made `receive_raw` never receive anything (PR B, Task 10).
+    socket: Arc<Mutex<Option<Arc<UdpSocket>>>>,
     upnp_mappings: Arc<RwLock<Vec<UpnpMapping>>>,
     active_connections: Arc<RwLock<HashMap<String, Arc<UdpSocket>>>>,
     is_running: Arc<Mutex<bool>>,
@@ -534,6 +535,27 @@ impl NatTraversalTransport {
         Ok(interfaces)
     }
 
+    /// Return the transport's one socket, binding it if this is the first use. Send and receive
+    /// share this handle (tokio's `UdpSocket` allows concurrent `send_to`/`recv_from` through a
+    /// shared reference) rather than each binding their own: a second bind on the same address
+    /// the first already holds is refused by the OS.
+    async fn bound_socket(&self) -> Result<Arc<UdpSocket>> {
+        let mut socket_lock = self.socket.lock().await;
+        if socket_lock.is_none() {
+            let new_socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
+                .await
+                .map_err(|e| {
+                    SynapseError::TransportError(format!("Failed to bind socket: {}", e))
+                })?;
+            info!(
+                "NAT traversal transport bound to {}",
+                new_socket.local_addr().unwrap()
+            );
+            *socket_lock = Some(Arc::new(new_socket));
+        }
+        Ok(socket_lock.as_ref().unwrap().clone())
+    }
+
     /// Parse received NAT traversal message
     async fn parse_nat_message(
         &self,
@@ -553,107 +575,32 @@ impl NatTraversalTransport {
             }
         }
 
-        // Try to deserialize as JSON message
-        match serde_json::from_slice::<serde_json::Value>(data) {
-            Ok(json_value) => {
-                let message_id = json_value
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                    .unwrap_or_else(Uuid::new_v4);
-
-                let content = json_value
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .as_bytes()
-                    .to_vec();
-
-                let sender_id = json_value
-                    .get("sender")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&sender.to_string())
-                    .to_string();
-
-                let recipient_id = json_value
-                    .get("recipient")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                let mut metadata = HashMap::new();
-                metadata.insert("transport".to_string(), "nat_traversal".to_string());
-                metadata.insert("protocol".to_string(), "udp".to_string());
-                metadata.insert("method".to_string(), "direct".to_string());
-
-                let secure_message = SecureMessage {
-                    message_id: UuidWrapper::new(message_id),
-                    to_global_id: recipient_id,
-                    from_global_id: sender_id.clone(),
-                    encrypted_content: content,
-                    sender_proof: crate::sender_auth::SenderProof::unsigned(),
-                    timestamp: DateTimeWrapper::new(Utc::now()),
-                    security_level: SecurityLevel::Public,
-                    routing_path: Vec::new(),
-                    metadata: metadata.clone(),
-                    protocol_version: crate::types::PROTOCOL_VERSION,
-                };
-
-                let mut incoming_metadata = HashMap::new();
-                incoming_metadata.insert("sender_address".to_string(), sender.to_string());
-                incoming_metadata.insert("transport".to_string(), "nat_traversal".to_string());
-                incoming_metadata.insert("protocol".to_string(), "udp".to_string());
-
-                Ok(Some(abstraction::IncomingMessage {
-                    message: secure_message,
-                    transport_type: self.transport_type(),
-                    source: sender_id,
-                    received_timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    metadata: incoming_metadata,
-                }))
+        // The sender now serializes the whole `SecureMessage` (send_message), so the receiver
+        // deserializes the same way the other transports do -- this is what carries
+        // `sender_proof`, `security_level` and `metadata` intact, which a hand-picked subset of
+        // fields (the old format) dropped, making every received message unverifiable regardless
+        // of the lossy-string bug in send_message.
+        match serde_json::from_slice::<SecureMessage>(data) {
+            Ok(message) => {
+                let source = message.from_global_id.clone();
+                let mut incoming =
+                    abstraction::IncomingMessage::new(message, self.transport_type(), source);
+                incoming
+                    .metadata
+                    .insert("sender_address".to_string(), sender.to_string());
+                incoming
+                    .metadata
+                    .insert("protocol".to_string(), "udp".to_string());
+                Ok(Some(incoming))
             }
-            Err(_) => {
-                // Handle as binary message
-                let message_id = Uuid::new_v4();
-                let sender_id = sender.to_string();
-
-                let mut metadata = HashMap::new();
-                metadata.insert("transport".to_string(), "nat_traversal".to_string());
-                metadata.insert("protocol".to_string(), "udp".to_string());
-                metadata.insert("format".to_string(), "binary".to_string());
-
-                let secure_message = SecureMessage {
-                    message_id: UuidWrapper::new(message_id),
-                    to_global_id: "unknown".to_string(),
-                    from_global_id: sender_id.clone(),
-                    encrypted_content: data.to_vec(),
-                    sender_proof: crate::sender_auth::SenderProof::unsigned(),
-                    timestamp: DateTimeWrapper::new(Utc::now()),
-                    security_level: SecurityLevel::Public,
-                    routing_path: Vec::new(),
-                    metadata: metadata.clone(),
-                    protocol_version: crate::types::PROTOCOL_VERSION,
-                };
-
-                let mut incoming_metadata = HashMap::new();
-                incoming_metadata.insert("sender_address".to_string(), sender.to_string());
-                incoming_metadata.insert("transport".to_string(), "nat_traversal".to_string());
-                incoming_metadata.insert("protocol".to_string(), "udp".to_string());
-                incoming_metadata.insert("format".to_string(), "binary".to_string());
-
-                Ok(Some(abstraction::IncomingMessage {
-                    message: secure_message,
-                    transport_type: self.transport_type(),
-                    source: sender_id,
-                    received_timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    metadata: incoming_metadata,
-                }))
+            Err(e) => {
+                warn!(
+                    "Dropped NAT traversal message from {}: {} bytes did not parse as a SecureMessage: {}",
+                    sender,
+                    data.len(),
+                    e
+                );
+                Ok(None)
             }
         }
     }
@@ -662,7 +609,7 @@ impl NatTraversalTransport {
 #[async_trait]
 impl Transport for NatTraversalTransport {
     fn transport_type(&self) -> abstraction::TransportType {
-        abstraction::TransportType::Custom(1) // NAT traversal transport
+        abstraction::TransportType::NatTraversal
     }
 
     fn capabilities(&self) -> abstraction::TransportCapabilities {
@@ -753,37 +700,15 @@ impl Transport for NatTraversalTransport {
             ));
         };
 
-        // Create or get UDP socket
-        let socket = {
-            let mut socket_lock = self.socket.lock().await;
-            if socket_lock.is_none() {
-                let new_socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
-                    .await
-                    .map_err(|e| {
-                        SynapseError::TransportError(format!("Failed to bind socket: {}", e))
-                    })?;
-                *socket_lock = Some(new_socket);
-            }
+        // Reuse the one bound socket (binding a second one on the same address is refused).
+        let socket = self.bound_socket().await?;
 
-            // We can't clone the socket, so we'll create a new one for sending
-            UdpSocket::bind(crate::network_scope::outbound_udp_local_addr(&target_addr))
-                .await
-                .map_err(|e| {
-                    SynapseError::TransportError(format!("Failed to create send socket: {}", e))
-                })?
-        };
-
-        // Serialize message to JSON
-        let message_json = serde_json::json!({
-            "id": message.message_id.0.to_string(),
-            "sender": message.from_global_id,
-            "recipient": message.to_global_id,
-            "content": String::from_utf8_lossy(&message.encrypted_content),
-            "timestamp": message.timestamp.0.timestamp(),
-            "transport": "nat_traversal"
-        });
-
-        let message_data = serde_json::to_vec(&message_json).map_err(|e| {
+        // Serialize the whole message, as the other transports do: hand-picking fields into a
+        // JSON string (as this used to) replaces invalid-UTF-8 bytes in `encrypted_content` with
+        // U+FFFD, corrupting sealed ciphertext. Serializing `SecureMessage` itself keeps
+        // `encrypted_content` as a JSON byte array, and carries the signature and metadata the
+        // receiver needs to verify it.
+        let message_data = serde_json::to_vec(message).map_err(|e| {
             SynapseError::TransportError(format!("Failed to serialize message: {}", e))
         })?;
 
@@ -863,22 +788,8 @@ impl Transport for NatTraversalTransport {
             self.local_port
         );
 
-        // Initialize socket
-        {
-            let mut socket_lock = self.socket.lock().await;
-            if socket_lock.is_none() {
-                let socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
-                    .await
-                    .map_err(|e| {
-                        SynapseError::TransportError(format!("Failed to bind socket: {}", e))
-                    })?;
-                info!(
-                    "NAT traversal transport bound to {}",
-                    socket.local_addr().unwrap()
-                );
-                *socket_lock = Some(socket);
-            }
-        }
+        // Initialize the one socket send and receive share.
+        self.bound_socket().await?;
 
         // Start NAT traversal discovery. It contacts STUN servers and UPnP gateways off this
         // machine, so it only runs when every interface is in scope.
@@ -1002,26 +913,10 @@ impl Transport for NatTraversalTransport {
 #[async_trait]
 impl TransportReceive for NatTraversalTransport {
     async fn receive_raw(&self, inbox: &mut abstraction::RawInbox) -> Result<()> {
-        // Create UDP socket for receiving if not already created
-        let socket = {
-            let mut socket_lock = self.socket.lock().await;
-            if socket_lock.is_none() {
-                let new_socket = UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
-                    .await
-                    .map_err(|e| {
-                        SynapseError::TransportError(format!("Failed to bind socket: {}", e))
-                    })?;
-                info!("Bound NAT traversal socket to port {}", self.local_port);
-                *socket_lock = Some(new_socket);
-            }
-
-            // Create a new socket for receiving (since we can't clone)
-            UdpSocket::bind(self.bind_scope.listen_addr(self.local_port))
-                .await
-                .map_err(|e| {
-                    SynapseError::TransportError(format!("Failed to create receive socket: {}", e))
-                })?
-        };
+        // The same socket `send_message` uses: binding a second one on the same address is
+        // refused by the OS, which used to make this call fail every time something else (e.g.
+        // `start`) had already bound the port.
+        let socket = self.bound_socket().await?;
 
         let mut messages = Vec::new();
         let mut buffer = vec![0; 8192]; // 8KB buffer
