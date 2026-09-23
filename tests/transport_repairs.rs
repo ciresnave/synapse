@@ -3012,4 +3012,93 @@ async fn quic_refuses_an_invalid_config() {
         "max_queued_bytes",
     );
     quic_refuses(one_key("idle_timeout_ms", "0"), "idle_timeout_ms");
+    quic_refuses(one_key("first_byte_timeout_ms", "0"), "first_byte_timeout_ms");
+    quic_refuses(one_key("stream_idle_timeout_ms", "0"), "stream_idle_timeout_ms");
+}
+
+/// A stream that stalls mid-message must not be able to hold resources indefinitely (spec §6):
+/// bounded only by the connection's own idle timeout, a peer could evade that by sending
+/// keepalives on the connection while never finishing this particular stream. (A stream that
+/// never sends *anything* is not separately observable here: QUIC never puts a STREAM frame on
+/// the wire until the sender actually writes, so the peer never learns such a stream exists at
+/// all, and there is nothing server-side for a timeout to act on -- `first_byte_timeout_ms`'s
+/// share of `stream_read_timeout` covers exactly this in-flight-but-silent-so-far case once a
+/// byte does arrive.) With `first_byte_timeout_ms` + `stream_idle_timeout_ms` configured small,
+/// Bob must actively give up on a stream that goes silent after a partial write, well within a
+/// few seconds, not hang forever -- observed here from the client side: dropping a
+/// `quinn::RecvStream` before it has read to completion sends the peer's `SendStream` a
+/// `STOP_SENDING`, which resolves `send.stopped()`. A raw `quinn` client is used (not
+/// `QuicTransportImpl::send_message`, which always writes and finishes) so the stream can be left
+/// half-written and silent on purpose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_times_out_a_stream_that_stalls_mid_message() {
+    let config = HashMap::from([
+        ("first_byte_timeout_ms".to_string(), "100".to_string()),
+        ("stream_idle_timeout_ms".to_string(), "100".to_string()),
+    ]);
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let bob_addr: SocketAddr = pair
+        .bob_target()
+        .address
+        .as_ref()
+        .expect("bob_target has an address")
+        .parse()
+        .expect("bob_target's address parses");
+
+    // A bare `quinn` client with the same TLS setup `QuicTransportImpl::new` uses, so it can
+    // complete a real handshake against Bob without going through the production sender at all.
+    let client_tls = synapse::transport::quic_tls::client_config().expect("client tls config");
+    let client_quic_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_tls)
+            .expect("quic client crypto config"),
+    ));
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap())
+        .expect("bind a client-only QUIC endpoint");
+    endpoint.set_default_client_config(client_quic_config);
+
+    let connection = endpoint
+        .connect(bob_addr, "synapse-quic")
+        .expect("connect setup")
+        .await
+        .expect("handshake with Bob");
+    let (mut send, _recv) = connection.open_bi().await.expect("open a bidirectional stream");
+    // Write a few bytes -- enough to put a STREAM frame on the wire so Bob's `accept_bi` actually
+    // sees this stream -- then deliberately never write more, and never `finish()`: this is the
+    // stall-mid-message case under test.
+    send.write_all(b"{\"incomplete\"").await.expect("partial write");
+
+    let stopped = tokio::time::timeout(Duration::from_secs(5), send.stopped())
+        .await
+        .expect(
+            "Bob must time out and drop the silent stream well within 5s, not hold it forever",
+        );
+    assert!(
+        matches!(stopped, Ok(Some(_))),
+        "Bob must STOP_SENDING the silent stream once first_byte_timeout_ms + \
+         stream_idle_timeout_ms elapses, got {stopped:?}"
+    );
+
+    // And a normal message, on its own connection, still gets through -- the silent stream did
+    // not wedge the accept loop or the transport as a whole.
+    let message = pair.signed(b"still works after a silent peer");
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &message)
+        .await
+        .expect("a normal send must still succeed");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    let received = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(
+        received.len(),
+        1,
+        "a normal message must still arrive after a silent peer"
+    );
 }

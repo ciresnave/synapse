@@ -38,6 +38,8 @@
 //! | [`IDLE_TIMEOUT_MS_KEY`] (`idle_timeout_ms`) | [`DEFAULT_IDLE_TIMEOUT_MS`] (300000) | how long a pooled connection may go unused before the idle sweep evicts it |
 //! | [`MAX_MESSAGE_SIZE_KEY`] (`max_message_size`) | [`DEFAULT_MAX_MESSAGE_SIZE`] (1 MiB) | the largest message, in bytes of serialized JSON, a stream will carry either way |
 //! | [`MAX_QUEUED_BYTES_KEY`] (`max_queued_bytes`) | [`DEFAULT_MAX_QUEUED_BYTES`] (4 MiB) | how many bytes of received messages, counted as serialized JSON, may wait for the application to poll; at least `max_message_size` and at most `u32::MAX` |
+//! | [`FIRST_BYTE_TIMEOUT_MS_KEY`] (`first_byte_timeout_ms`) | [`DEFAULT_FIRST_BYTE_TIMEOUT_MS`] (5000) | see "Per-stream read timeout" below |
+//! | [`STREAM_IDLE_TIMEOUT_MS_KEY`] (`stream_idle_timeout_ms`) | [`DEFAULT_STREAM_IDLE_TIMEOUT_MS`] (5000) | see "Per-stream read timeout" below -- a different, per-*stream* concept from [`IDLE_TIMEOUT_MS_KEY`], which is per pooled *connection* |
 //!
 //! # Size limits and backpressure (Task 3)
 //!
@@ -49,6 +51,26 @@
 //! `tokio::sync::Semaphore` sized by `max_queued_bytes`, via `acquire_many_owned`) before parsing
 //! it; the permit is held by the queued `IncomingMessage` until `receive_raw` drains it, exactly
 //! following `tcp_unified.rs`'s `queue_budget` pattern.
+//!
+//! # Per-stream read timeout (Task 3, spec §6)
+//!
+//! A stream that opens but never sends, or stalls mid-message, must not hold resources
+//! indefinitely -- bounded only by the connection-level `max_idle_timeout` would let a peer evade
+//! this by sending keepalives on the connection while never writing to this particular stream.
+//! Each stream's whole `read_to_end` call is wrapped in one
+//! `tokio::time::timeout(first_byte_timeout_ms + stream_idle_timeout_ms, ...)`.
+//!
+//! This is a **deliberate simplification**, not a byte-for-byte "gap between reads" timeout like
+//! `websocket_unified.rs`'s `IdleTimeoutStream` adapter: `quinn::RecvStream::read_to_end` reads
+//! everything in one call with no exposed per-chunk progress, so a true version of that would need
+//! the receive path rewritten to manual chunked reads -- disproportionate to what this gap needs.
+//! Bounding total read time this way satisfies the actual security property the spec requirement
+//! exists for (a peer cannot hold a stream open indefinitely) without giving the finer-grained
+//! diagnostic distinction its wording technically implies ("no first byte yet" vs. "stalled after
+//! some bytes arrived"). A future task could replace this with true chunked reads if that
+//! distinction is ever needed. On timeout, the stream is dropped like any other receive-side
+//! failure in this file (logged, not propagated) -- dropping `quinn::RecvStream` before it has
+//! read to completion sends the peer a `STOP_SENDING`.
 
 use super::abstraction::{
     self, ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, RawInbox,
@@ -87,6 +109,22 @@ pub const MAX_QUEUED_BYTES_KEY: &str = "max_queued_bytes";
 
 /// The default for [`MAX_QUEUED_BYTES_KEY`]: 4 MiB of serialized JSON.
 pub const DEFAULT_MAX_QUEUED_BYTES: usize = 4 * 1024 * 1024;
+
+/// The config key for how long, in milliseconds, a stream may go without its first byte arriving.
+/// Added together with [`STREAM_IDLE_TIMEOUT_MS_KEY`] to bound one stream's whole `read_to_end`
+/// call. See "Per-stream read timeout" in the module documentation.
+pub const FIRST_BYTE_TIMEOUT_MS_KEY: &str = "first_byte_timeout_ms";
+
+/// The default for [`FIRST_BYTE_TIMEOUT_MS_KEY`].
+pub const DEFAULT_FIRST_BYTE_TIMEOUT_MS: usize = 5_000;
+
+/// The config key for how long, in milliseconds, a stream may take to finish once its first byte
+/// has arrived. A different, per-*stream* concept from [`IDLE_TIMEOUT_MS_KEY`], which is
+/// per pooled *connection* -- see "Per-stream read timeout" in the module documentation.
+pub const STREAM_IDLE_TIMEOUT_MS_KEY: &str = "stream_idle_timeout_ms";
+
+/// The default for [`STREAM_IDLE_TIMEOUT_MS_KEY`].
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_MS: usize = 5_000;
 
 /// `config[key]` as a positive integer, or `default` when the key is absent. A value that does not
 /// parse, or is zero, is an error: silently falling back to the default would hide a typo. Mirrors
@@ -154,6 +192,9 @@ pub struct QuicTransportImpl {
     /// its message's length before it parses and keeps it with the queued message; `receive_raw`
     /// releases it by draining the message. See `tcp_unified.rs`'s `queue_budget`.
     queue_budget: Arc<Semaphore>,
+    /// `first_byte_timeout_ms` + `stream_idle_timeout_ms`, bounding one stream's whole
+    /// `read_to_end` call. See "Per-stream read timeout" in the module documentation.
+    stream_read_timeout: Duration,
 }
 
 impl QuicTransportImpl {
@@ -196,6 +237,12 @@ impl QuicTransportImpl {
             parse_positive(config, MAX_MESSAGE_SIZE_KEY, DEFAULT_MAX_MESSAGE_SIZE)?;
         let max_queued_bytes =
             parse_positive(config, MAX_QUEUED_BYTES_KEY, DEFAULT_MAX_QUEUED_BYTES)?;
+        let first_byte_timeout_ms =
+            parse_positive(config, FIRST_BYTE_TIMEOUT_MS_KEY, DEFAULT_FIRST_BYTE_TIMEOUT_MS)?;
+        let stream_idle_timeout_ms =
+            parse_positive(config, STREAM_IDLE_TIMEOUT_MS_KEY, DEFAULT_STREAM_IDLE_TIMEOUT_MS)?;
+        let stream_read_timeout =
+            Duration::from_millis((first_byte_timeout_ms + stream_idle_timeout_ms) as u64);
 
         Ok(Self {
             endpoint,
@@ -207,6 +254,7 @@ impl QuicTransportImpl {
             idle_timeout,
             max_message_size,
             queue_budget: Arc::new(Semaphore::new(max_queued_bytes)),
+            stream_read_timeout,
         })
     }
 
@@ -299,6 +347,8 @@ pub fn validate_config(config: &HashMap<String, String>) -> Result<()> {
             u32::MAX
         )));
     }
+    parse_positive(config, FIRST_BYTE_TIMEOUT_MS_KEY, DEFAULT_FIRST_BYTE_TIMEOUT_MS)?;
+    parse_positive(config, STREAM_IDLE_TIMEOUT_MS_KEY, DEFAULT_STREAM_IDLE_TIMEOUT_MS)?;
     Ok(())
 }
 
@@ -444,6 +494,7 @@ impl Transport for QuicTransportImpl {
         let received = Arc::clone(&self.received);
         let max_message_size = self.max_message_size;
         let queue_budget = Arc::clone(&self.queue_budget);
+        let stream_read_timeout = self.stream_read_timeout;
         tokio::spawn(async move {
             while let Some(incoming) = endpoint.accept().await {
                 let received = Arc::clone(&received);
@@ -479,10 +530,32 @@ impl Transport for QuicTransportImpl {
                             // Bounded by the configured `max_message_size` (Task 3), not a
                             // hardcoded figure. `capabilities()` still reports a fixed figure
                             // until Task 4 makes it honest.
-                            let data = match recv.read_to_end(max_message_size).await {
-                                Ok(d) => d,
-                                Err(e) => {
+                            //
+                            // The whole call is also bounded by `stream_read_timeout`
+                            // (`first_byte_timeout_ms` + `stream_idle_timeout_ms`), so a stream
+                            // that opens but never sends, or stalls mid-message, cannot hold this
+                            // task (and its buffer) open indefinitely -- see "Per-stream read
+                            // timeout" in the module documentation for why this bounds total read
+                            // time rather than distinguishing "no first byte" from "stalled
+                            // mid-message", and why that is enough. On timeout, `recv` is dropped
+                            // (below, via `return`) before it has read to completion, which sends
+                            // the peer a `STOP_SENDING`.
+                            let data = match tokio::time::timeout(
+                                stream_read_timeout,
+                                recv.read_to_end(max_message_size),
+                            )
+                            .await
+                            {
+                                Ok(Ok(d)) => d,
+                                Ok(Err(e)) => {
                                     tracing::warn!("QUIC stream read failed from {source}: {e}");
+                                    return;
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "Dropped QUIC stream from {source}: no complete message within {stream_read_timeout:?} \
+                                         (first_byte_timeout_ms + stream_idle_timeout_ms)"
+                                    );
                                     return;
                                 }
                             };
@@ -640,6 +713,14 @@ impl TransportFactory for QuicTransportFactory {
         cfg.insert(
             MAX_QUEUED_BYTES_KEY.to_string(),
             DEFAULT_MAX_QUEUED_BYTES.to_string(),
+        );
+        cfg.insert(
+            FIRST_BYTE_TIMEOUT_MS_KEY.to_string(),
+            DEFAULT_FIRST_BYTE_TIMEOUT_MS.to_string(),
+        );
+        cfg.insert(
+            STREAM_IDLE_TIMEOUT_MS_KEY.to_string(),
+            DEFAULT_STREAM_IDLE_TIMEOUT_MS.to_string(),
         );
         cfg
     }
