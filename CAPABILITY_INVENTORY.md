@@ -52,6 +52,15 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > replacing the old aspirational preset. Staged as 5 reviewed tasks; see
 > `docs/superpowers/specs/2026-09-22-quic-transport-design.md` and
 > `docs/superpowers/plans/2026-09-22-quic-transport.md`.
+>
+> **One known gap, not fixed here:** a misdirected pooled connection (NAT rebinding, address reuse)
+> is supposed to self-heal by evicting on the next application-layer verification failure (spec §3
+> condition 3) — the eviction method exists and is directly tested, but nothing calls it yet,
+> because `TransportManager` has no way to reach a concrete `QuicTransportImpl` to invoke it.
+> Not a confidentiality or spoofing hole (sealing/signing already rule those out) — the cost is
+> silent, indefinitely-repeating misdelivery to a stale address, a robustness defect. Tracked as
+> [issue #49](https://github.com/ciresnave/synapse/issues/49); needs a `Transport`/
+> `TransportReceive` contract change touching every transport, deliberately its own slice.
 
 > **Status, 2026-09-18, PR B of the transport contract, Task 7 (branch `feat/transport-contract-b`, not
 > yet on `main`):** TCP — the public `synapse::transport::TcpTransportFactory` built `tcp_simple`, which

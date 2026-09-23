@@ -75,8 +75,16 @@ pub fn client_config() -> Result<Arc<rustls::ClientConfig>> {
 /// Anywhere else in this codebase that TLS identity actually matters, this type is the wrong
 /// answer; it is deliberately not named `Verifier` or anything a search for "how do we verify
 /// TLS certs here" would surface as a general-purpose default.
+///
+/// **Private, not `pub(crate)` or `pub`, on purpose.** Its only caller is `client_config` in this
+/// same file. A `pub` type here would be reachable as `synapse::transport::quic_tls::
+/// DangerAcceptAnyServerCert` by every downstream consumer of this crate and would appear in
+/// synapse's published docs.rs -- an "accept any certificate" verifier is an attractive nuisance
+/// as public API, and this crate is queued for a 2.0.0 publish that cannot be un-published, only
+/// yanked. If something legitimately outside this file ever needs it, that is a decision to make
+/// deliberately, not a visibility level to widen back without discussion.
 #[derive(Debug)]
-pub struct DangerAcceptAnyServerCert;
+struct DangerAcceptAnyServerCert;
 
 impl rustls::client::danger::ServerCertVerifier for DangerAcceptAnyServerCert {
     fn verify_server_cert(
