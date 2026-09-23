@@ -36,6 +36,19 @@
 //! | [`LOCAL_PORT_KEY`] (`local_port`) | `0` | the port `start` listens on; `0` lets the OS choose |
 //! | `bind_scope` | `loopback` | which interfaces the endpoint binds ([`crate::network_scope::BindScope`]) |
 //! | [`IDLE_TIMEOUT_MS_KEY`] (`idle_timeout_ms`) | [`DEFAULT_IDLE_TIMEOUT_MS`] (300000) | how long a pooled connection may go unused before the idle sweep evicts it |
+//! | [`MAX_MESSAGE_SIZE_KEY`] (`max_message_size`) | [`DEFAULT_MAX_MESSAGE_SIZE`] (1 MiB) | the largest message, in bytes of serialized JSON, a stream will carry either way |
+//! | [`MAX_QUEUED_BYTES_KEY`] (`max_queued_bytes`) | [`DEFAULT_MAX_QUEUED_BYTES`] (4 MiB) | how many bytes of received messages, counted as serialized JSON, may wait for the application to poll; at least `max_message_size` and at most `u32::MAX` |
+//!
+//! # Size limits and backpressure (Task 3)
+//!
+//! `send_message` refuses (`SynapseError::MessageRefused`), before touching the connection pool,
+//! any message whose serialized JSON is over `max_message_size` -- following `tcp_unified.rs`'s
+//! rule that a local refusal must never touch connection setup or the circuit breaker. On the
+//! receive side, each stream's `read_to_end` is bounded by `max_message_size` instead of a
+//! hardcoded figure, and a handler takes queue budget for a message's byte length (a
+//! `tokio::sync::Semaphore` sized by `max_queued_bytes`, via `acquire_many_owned`) before parsing
+//! it; the permit is held by the queued `IncomingMessage` until `receive_raw` drains it, exactly
+//! following `tcp_unified.rs`'s `queue_budget` pattern.
 
 use super::abstraction::{
     self, ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, RawInbox,
@@ -49,7 +62,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 pub const LOCAL_PORT_KEY: &str = "local_port";
 
@@ -59,6 +72,39 @@ pub const IDLE_TIMEOUT_MS_KEY: &str = "idle_timeout_ms";
 
 /// The default for [`IDLE_TIMEOUT_MS_KEY`]: 5 minutes.
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
+
+/// The config key for the largest message, in bytes of serialized JSON, a stream will carry
+/// either way. See the module documentation.
+pub const MAX_MESSAGE_SIZE_KEY: &str = "max_message_size";
+
+/// The default for [`MAX_MESSAGE_SIZE_KEY`]: 1 MiB of serialized JSON.
+pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
+/// The config key for how many bytes of received messages, counted as serialized JSON, may wait
+/// for the application to poll. It must be at least [`MAX_MESSAGE_SIZE_KEY`] and at most
+/// `u32::MAX`. See the module documentation.
+pub const MAX_QUEUED_BYTES_KEY: &str = "max_queued_bytes";
+
+/// The default for [`MAX_QUEUED_BYTES_KEY`]: 4 MiB of serialized JSON.
+pub const DEFAULT_MAX_QUEUED_BYTES: usize = 4 * 1024 * 1024;
+
+/// `config[key]` as a positive integer, or `default` when the key is absent. A value that does not
+/// parse, or is zero, is an error: silently falling back to the default would hide a typo. Mirrors
+/// `tcp_unified.rs`'s `positive_limit`.
+fn parse_positive(config: &HashMap<String, String>, key: &str, default: usize) -> Result<usize> {
+    match config.get(key) {
+        None => Ok(default),
+        Some(value) => match value.trim().parse::<usize>() {
+            Ok(0) => Err(SynapseError::Config(format!(
+                "{key} must be a positive integer, got 0"
+            ))),
+            Ok(limit) => Ok(limit),
+            Err(e) => Err(SynapseError::Config(format!(
+                "{key} must be a positive integer, got {value:?}: {e}"
+            ))),
+        },
+    }
+}
 
 /// Parse `idle_timeout_ms` the way `websocket_unified.rs`'s `Limits::from_config` parses its own
 /// millisecond keys: a positive integer, or the default when absent; anything else is refused
@@ -82,18 +128,32 @@ fn parse_idle_timeout_ms(config: &HashMap<String, String>) -> Result<u64> {
 /// `Instant` is refreshed on every hit or insert and read by the idle sweep spawned in `start`.
 type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, (Arc<quinn::Connection>, Instant)>>>;
 
+/// A received message waiting for the application, holding queue budget for its serialized JSON
+/// length until it is drained. Mirrors `tcp_unified.rs`'s `Queued`.
+struct Queued {
+    message: IncomingMessage,
+    _budget: OwnedSemaphorePermit,
+}
+
 pub struct QuicTransportImpl {
     endpoint: quinn::Endpoint,
     #[allow(dead_code)] // Retained for a future capabilities/metrics pass (Task 4).
     local_port: u16,
     #[allow(dead_code)] // Retained for a future capabilities/metrics pass (Task 4).
     bind_scope: crate::network_scope::BindScope,
-    received: Arc<Mutex<Vec<IncomingMessage>>>,
+    received: Arc<Mutex<Vec<Queued>>>,
     is_running: Arc<Mutex<bool>>,
     /// One connection per peer, reused across sends; see the module documentation.
     pool: ConnectionPool,
     /// How long a pooled connection may go unused before the idle sweep evicts it.
     idle_timeout: Duration,
+    /// The largest message, in bytes of serialized JSON, `send_message` will send and a stream's
+    /// `read_to_end` will accept.
+    max_message_size: usize,
+    /// Free bytes of queue budget, one permit per byte of serialized JSON. A stream handler takes
+    /// its message's length before it parses and keeps it with the queued message; `receive_raw`
+    /// releases it by draining the message. See `tcp_unified.rs`'s `queue_budget`.
+    queue_budget: Arc<Semaphore>,
 }
 
 impl QuicTransportImpl {
@@ -132,6 +192,10 @@ impl QuicTransportImpl {
         endpoint.set_default_client_config(client_quic_config);
 
         let idle_timeout = Duration::from_millis(parse_idle_timeout_ms(config)?);
+        let max_message_size =
+            parse_positive(config, MAX_MESSAGE_SIZE_KEY, DEFAULT_MAX_MESSAGE_SIZE)?;
+        let max_queued_bytes =
+            parse_positive(config, MAX_QUEUED_BYTES_KEY, DEFAULT_MAX_QUEUED_BYTES)?;
 
         Ok(Self {
             endpoint,
@@ -141,6 +205,8 @@ impl QuicTransportImpl {
             is_running: Arc::new(Mutex::new(false)),
             pool: Arc::new(Mutex::new(HashMap::new())),
             idle_timeout,
+            max_message_size,
+            queue_budget: Arc::new(Semaphore::new(max_queued_bytes)),
         })
     }
 
@@ -213,6 +279,26 @@ pub fn validate_config(config: &HashMap<String, String>) -> Result<()> {
         return Err(SynapseError::Config("Invalid port number".to_string()));
     }
     parse_idle_timeout_ms(config)?;
+    let max_message_size = parse_positive(config, MAX_MESSAGE_SIZE_KEY, DEFAULT_MAX_MESSAGE_SIZE)?;
+    let max_queued_bytes = parse_positive(config, MAX_QUEUED_BYTES_KEY, DEFAULT_MAX_QUEUED_BYTES)?;
+    // A message the size check accepts must fit the queue budget, or its handler would wait
+    // forever for room that never comes (mirrors `tcp_unified.rs`'s `Limits::from_config`).
+    if max_queued_bytes < max_message_size {
+        return Err(SynapseError::Config(format!(
+            "{MAX_QUEUED_BYTES_KEY} ({max_queued_bytes}) must be at least \
+             {MAX_MESSAGE_SIZE_KEY} ({max_message_size}), or a message of that size could \
+             never be queued"
+        )));
+    }
+    // A handler takes budget for a whole message in one `acquire_many_owned`, which counts in
+    // `u32`. A message is at most the budget, so a budget that fits `u32` makes every acquire fit
+    // too.
+    if u32::try_from(max_queued_bytes).is_err() {
+        return Err(SynapseError::Config(format!(
+            "{MAX_QUEUED_BYTES_KEY} ({max_queued_bytes}) must be at most {}",
+            u32::MAX
+        )));
+    }
     Ok(())
 }
 
@@ -262,6 +348,20 @@ impl Transport for QuicTransportImpl {
         let start = std::time::Instant::now();
         let addr = parse_target(target)?;
 
+        // Serialize and check the size before touching the connection pool: a local refusal must
+        // never open a connection or reach the circuit breaker (Task 7's rule; see
+        // `tcp_unified.rs`'s `connect_and_send`, which refuses the same way before connecting).
+        let data = serde_json::to_vec(message).map_err(|e| {
+            SynapseError::TransportError(format!("Failed to serialize message: {e}"))
+        })?;
+        if data.len() > self.max_message_size {
+            return Err(SynapseError::MessageRefused(format!(
+                "message is {} bytes, over the max_message_size limit of {} bytes",
+                data.len(),
+                self.max_message_size
+            )));
+        }
+
         let connection = self.pooled_connection(addr).await?;
 
         let (mut send, _recv) = connection
@@ -269,9 +369,6 @@ impl Transport for QuicTransportImpl {
             .await
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream open failed: {e}")))?;
 
-        let data = serde_json::to_vec(message).map_err(|e| {
-            SynapseError::TransportError(format!("Failed to serialize message: {e}"))
-        })?;
         send.write_all(&data)
             .await
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream write failed: {e}")))?;
@@ -345,9 +442,12 @@ impl Transport for QuicTransportImpl {
 
         let endpoint = self.endpoint.clone();
         let received = Arc::clone(&self.received);
+        let max_message_size = self.max_message_size;
+        let queue_budget = Arc::clone(&self.queue_budget);
         tokio::spawn(async move {
             while let Some(incoming) = endpoint.accept().await {
                 let received = Arc::clone(&received);
+                let queue_budget = Arc::clone(&queue_budget);
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(c) => c,
@@ -373,19 +473,41 @@ impl Transport for QuicTransportImpl {
                             }
                         };
                         let received = Arc::clone(&received);
+                        let queue_budget = Arc::clone(&queue_budget);
                         let source = source.clone();
                         tokio::spawn(async move {
-                            // 8 MiB is a placeholder, not a considered limit -- Task 3 replaces
-                            // this with the real size-limit design (see `stop()`'s accept-loop
-                            // shutdown gap above for the same "known Task 1 gap, noted for later"
-                            // treatment).
-                            let data = match recv.read_to_end(8 * 1024 * 1024).await {
+                            // Bounded by the configured `max_message_size` (Task 3), not a
+                            // hardcoded figure. `capabilities()` still reports a fixed figure
+                            // until Task 4 makes it honest.
+                            let data = match recv.read_to_end(max_message_size).await {
                                 Ok(d) => d,
                                 Err(e) => {
                                     tracing::warn!("QUIC stream read failed from {source}: {e}");
                                     return;
                                 }
                             };
+
+                            // Wait for queue budget before parsing, so a waiting handler holds
+                            // only its raw bytes, not the several times larger parsed message.
+                            // `validate_config` guarantees
+                            // `data.len() <= max_message_size <= max_queued_bytes <= u32::MAX`,
+                            // so the conversion cannot fail and the acquire never asks for more
+                            // than the budget holds. The acquire fails only once `stop` has
+                            // closed the budget (mirrors `tcp_unified.rs`'s `handle_connection`).
+                            let Ok(wanted) = u32::try_from(data.len()) else {
+                                tracing::error!(
+                                    "Dropped QUIC message from {source}: {} bytes is over the queue budget's u32 limit",
+                                    data.len()
+                                );
+                                return;
+                            };
+                            let Ok(budget) = queue_budget.acquire_many_owned(wanted).await else {
+                                tracing::error!(
+                                    "Dropped QUIC message from {source}: the receive queue was closed"
+                                );
+                                return;
+                            };
+
                             let message: SecureMessage = match serde_json::from_slice(&data) {
                                 Ok(m) => m,
                                 Err(e) => {
@@ -398,7 +520,10 @@ impl Transport for QuicTransportImpl {
                             };
                             let incoming_message =
                                 IncomingMessage::new(message, TransportType::Quic, source);
-                            received.lock().await.push(incoming_message);
+                            received.lock().await.push(Queued {
+                                message: incoming_message,
+                                _budget: budget,
+                            });
                         });
                     }
                 });
@@ -441,6 +566,10 @@ impl Transport for QuicTransportImpl {
     async fn stop(&self) -> Result<()> {
         let mut running = self.is_running.lock().await;
         self.endpoint.close(0u32.into(), b"stopping");
+        // Close the queue budget, so any stream handler waiting for it gets an error, drops its
+        // message and returns, instead of waiting forever for a poll that will never come.
+        // Mirrors `tcp_unified.rs`'s `stop`.
+        self.queue_budget.close();
         *running = false;
         Ok(())
     }
@@ -464,8 +593,10 @@ impl Transport for QuicTransportImpl {
 #[async_trait]
 impl abstraction::TransportReceive for QuicTransportImpl {
     async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
+        // Draining a message drops the queue budget it held, so a handler waiting for budget can
+        // queue its message as soon as this lock is released.
         let mut received = self.received.lock().await;
-        inbox.extend(received.drain(..));
+        inbox.extend(received.drain(..).map(|queued| queued.message));
         Ok(())
     }
 }
@@ -501,6 +632,14 @@ impl TransportFactory for QuicTransportFactory {
         cfg.insert(
             IDLE_TIMEOUT_MS_KEY.to_string(),
             DEFAULT_IDLE_TIMEOUT_MS.to_string(),
+        );
+        cfg.insert(
+            MAX_MESSAGE_SIZE_KEY.to_string(),
+            DEFAULT_MAX_MESSAGE_SIZE.to_string(),
+        );
+        cfg.insert(
+            MAX_QUEUED_BYTES_KEY.to_string(),
+            DEFAULT_MAX_QUEUED_BYTES.to_string(),
         );
         cfg
     }

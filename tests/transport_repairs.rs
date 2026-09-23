@@ -2908,3 +2908,108 @@ async fn quic_refuses_an_unparseable_or_zero_idle_timeout() {
         .validate_config(&good)
         .expect("a valid idle_timeout_ms must be accepted");
 }
+
+// ---------------------------------------------------------------------------------------------
+// QUIC (plan Task 3): size limits, backpressure, and config validation.
+// ---------------------------------------------------------------------------------------------
+
+/// The sender refuses a message whose serialized form is over its `max_message_size`, before ever
+/// touching the connection pool, instead of sending it and claiming `Sent` for a message a
+/// receiver with the same limit drops. Follows `tcp_refuses_at_send_a_message_over_its_limit`'s
+/// exact pattern: asserts on the refusal's `.to_string()`, not on the error variant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_refuses_at_send_a_message_over_its_limit() {
+    const QUIC_LIMIT: usize = 1024;
+    let config = one_key("max_message_size", &QUIC_LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let (over, over_size) = measured(&pair, QUIC_LIMIT, false);
+
+    let alice_transport = synapse::transport::QuicTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("a client-only transport with the same limit");
+    let refusal = match alice_transport
+        .send_message(&pair.bob_target(), &over)
+        .await
+    {
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {QUIC_LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        refusal.contains("max_message_size")
+            && refusal.contains(&over_size.to_string())
+            && refusal.contains(&QUIC_LIMIT.to_string()),
+        "the refusal must name the limit and both sizes: {refusal}"
+    );
+    // And through the manager, the send fails rather than claiming a delivery.
+    assert!(
+        pair.alice_node
+            .send_message(&pair.bob_target(), &over)
+            .await
+            .is_err(),
+        "the manager must not report the over-limit message as sent"
+    );
+}
+
+/// A message that fits `max_message_size` still crosses end to end with the limit configured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_delivers_a_message_at_or_under_its_limit() {
+    const QUIC_LIMIT: usize = 4096;
+    let config = one_key("max_message_size", &QUIC_LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let (fits, fits_size) = measured(&pair, QUIC_LIMIT, true);
+
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &fits)
+        .await
+        .unwrap_or_else(|e| panic!("a message of {fits_size} bytes fits the limit: {e}"));
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+
+    let received = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(received.len(), 1, "the message under the limit must arrive");
+    assert_eq!(
+        received[0].incoming.message.message_id.0,
+        fits.message_id.0
+    );
+}
+
+/// Bad `max_message_size`, `max_queued_bytes`, and `idle_timeout_ms` values are each refused by
+/// `validate_config`, naming the offending key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_refuses_an_invalid_config() {
+    fn quic_refuses(config: HashMap<String, String>, key: &str) {
+        let err = synapse::transport::QuicTransportFactory
+            .validate_config(&config)
+            .expect_err(&format!("{key} must be refused"));
+        assert!(format!("{err}").contains(key), "{err}");
+    }
+    quic_refuses(one_key("max_message_size", "0"), "max_message_size");
+    quic_refuses(
+        HashMap::from([
+            ("max_queued_bytes".to_string(), "10".to_string()),
+            ("max_message_size".to_string(), "1024".to_string()),
+        ]),
+        "max_queued_bytes",
+    );
+    quic_refuses(one_key("idle_timeout_ms", "0"), "idle_timeout_ms");
+}
