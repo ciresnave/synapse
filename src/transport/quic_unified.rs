@@ -177,6 +177,17 @@ impl Transport for QuicTransportImpl {
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream write failed: {e}")))?;
         send.finish()
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream finish failed: {e}")))?;
+        // Wait for the peer to acknowledge receipt of the whole stream before dropping
+        // `connection`: dropping the last handle to a `quinn::Connection` that isn't already
+        // closing sends an abrupt CONNECTION_CLOSE (see `quinn`'s `ConnectionRef::drop` ->
+        // `implicit_close`), which can race the still-in-flight STREAM/FIN frame and reset the
+        // stream before the receiver finishes reading it -- an intermittent, silent message loss
+        // that "the transport sends" would otherwise never reveal.
+        send.stopped().await.map_err(|e| {
+            SynapseError::TransportError(format!(
+                "QUIC stream was not acknowledged by the peer: {e}"
+            ))
+        })?;
 
         Ok(DeliveryReceipt {
             message_id: message.message_id.0.to_string(),
