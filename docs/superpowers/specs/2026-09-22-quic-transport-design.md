@@ -1,0 +1,82 @@
+# The QUIC transport slice
+
+**Status: design, awaiting review** (brainstormed with CireSnave 2026-09-21/22; not yet reviewed by the PM or approved for implementation).
+**Branch:** none yet — this document is written in a worktree detached at `b7c4219` (the last commit of the now-deleted, fully-merged `feat/transport-contract-b`) only because that is where this session's worktree happens to be; the implementation plan should branch fresh from `main` (`ca08bf0`, after PR B).
+**Follows:** the transport contract (PR A #44 + PR B #47, merged), which established the shape every transport here follows: `TransportReceive::receive_raw` into a sealed `RawInbox`, honest delivery claims, `SynapseError::MessageRefused` for oversize sends kept out of the circuit breaker, a byte-budget queue, and measured (not aspirational) `capabilities()`/`estimate_metrics()`.
+**Precedes:** email (authenticated by construction), then f2 (agent-certificate tooling, the `(sender, message_id)`-keyed side of `delivery_ack.rs`, auth-framework 0.3.0 → 0.4.3), then the 2.0.0 publish — **with CireSnave's approval only.**
+
+## 1. What exists today
+
+- `TransportType::Quic` and a `QuicTransportFactory` stub exist in `src/transport/abstraction.rs`. The factory's `create_transport` unconditionally returns `Err(SynapseError::TransportError("QUIC is not implemented yet; it arrives in the QUIC slice"))` (PR A, Task 3) — QUIC refuses cleanly rather than fabricating deliveries, which is the honest state to build from.
+- `TransportCapabilities::quic()` (`abstraction.rs`) is a preset from before the transport contract's discipline: `max_message_size: 1024 * 1024 * 1024` (a "1GB theoretical" figure, never measured), `encrypted: true`, and a feature list (`zero_rtt`, `connection_migration`, `modern_crypto`) that describes what QUIC *can* do in general, not what this transport actually provides. This slice replaces it with measured figures (§7), the same repair TCP/WebSocket/HTTP/NAT already got.
+- `src/transport/quic.rs` (checked in git history at `b6a1904~1`, before PR A deleted it) was a real attempt at a `quinn`-backed implementation, but it implements the old, now-deleted `Transport` trait, uses an outdated `quinn` API, calls renamed circuit-breaker methods, and does not compile. It is **reference-only**: its certificate strategy (`rustls_native_certs`, real system CA certs) and its default (`enable_0rtt: true`) are both explicitly *not* what this design uses (§3, §5) — it predates every decision below and cannot be resurrected as-is.
+- No `quinn` dependency exists in `Cargo.toml` yet. `tokio-rustls = "0.26"` is already a dependency (used by the `http`/`email` features), so `quinn`'s default `rustls`-backed TLS stack matches what the crate already uses elsewhere — no second TLS implementation enters the tree.
+- `src/delivery_ack.rs` (P2 slice b, already on `main`) is a complete, transport-agnostic application-level acknowledgement: a receiver signs and sends back an ordinary `SecureMessage`, addressed via the sender's signed `synapse.reply_to` field, naming the original message's id (`synapse.ack.for`) and a digest of its canonical input (`synapse.ack.digest`). This works over *any* transport that can send/receive ordinary messages — QUIC needs no transport-specific ack mechanism to get it (§4).
+
+## 2. Scope
+
+One slice, staged into tasks the way the transport contract's PR B was (Tasks 7–10), each with its own test, and Task 5 mirroring Task 11's verification pass:
+
+1. **Skeleton:** `QuicTransportImpl` + a real `QuicTransportFactory` (replacing the stub). Self-signed certificate generation, `start()`/`stop()`, one connection, one stream, one message sent and received over loopback. No pooling yet — proves the plumbing.
+2. **Connection pooling:** reuse one connection per peer across multiple sends, multiplexed streams (concurrent messages to the same peer don't block each other), idle-timeout eviction with transparent reopening on the next send.
+3. **Size limits & backpressure:** `max_message_size`, a byte-budget queue, `MessageRefused` for oversize sends (refused before opening a stream), first-byte/idle timeouts per stream — the same config-key/validation pattern Tasks 7–9 established.
+4. **Honest capabilities:** replace `TransportCapabilities::quic()`'s aspirational figures with measured ones; `estimate_metrics()` reports unavailable/timeout-as-latency/low-confidence on a failed probe, matching HTTP's Task 9 repair.
+5. **Verification:** mutation check, full run in a fresh (or fresh-relative-to-current-source, per the lesson in §8) target directory with the UTC window recorded, firewall event check, fmt/clippy, docs.
+
+**Out of scope for this slice:** 0-RTT (§5), real X.509/PKI (§3), any change to `delivery_ack.rs` or f2's `(sender, message_id)` keying (§4), WASM (its own slice after 2.0, per the roadmap), and the introduction app.
+
+## 3. Connections, streams, and identity
+
+**Library:** `quinn`, rustls-backed (matching `tokio-rustls`, already a dependency).
+
+**Connection pool.** `QuicTransportImpl` holds `Arc<Mutex<HashMap<SocketAddr, Arc<quinn::Connection>>>>`. `send_message` looks up (or opens, on a miss) the peer's connection, then opens a fresh bidirectional stream on it for this one message, writes the serialized `SecureMessage`, and calls `finish()` on the send side so the receiver reads to a clean stream FIN — the same "read to EOF/frame-bounded with a cap" shape as a message-scoped TCP connection, just without paying a new handshake per message. A connection with no open streams for longer than an idle-timeout window is closed and removed from the pool; the next send to that peer transparently reopens it (full handshake — see 0-RTT below).
+
+**Identity at the TLS layer.** Each transport instance generates one ephemeral, self-signed X.509 certificate and key pair at `start()` (via `rcgen`, a small, single-purpose crate — not a new dependency *family*, since it pulls in nothing beyond what a self-signed-cert generator needs). The server side presents this certificate. The client side installs a permissive `rustls::client::danger::ServerCertVerifier` that accepts any certificate without inspection. **TLS here is wire encryption and connection setup only — never identity.** Real sender identity is, as for every other transport, the sealed and signed `SecureMessage` envelope carried inside the stream; `TransportManager` verifies it exactly the same way regardless of which transport carried the bytes. No certificate is stored, rotated, or compared across connections; a fresh one is generated every process start and discarded with the transport.
+
+**Why not real PKI or `rcgen`'s output tied to the existing Ed25519 identity (e.g., RFC 7250 raw public keys):** this matches how TCP/WebSocket/HTTP already work today (plaintext-of-identity at the transport level, real authentication one layer up), keeps this slice's scope to "QUIC as a faster/multiplexed pipe for the same envelope" rather than a new identity binding, and avoids designing key-distribution/verification machinery this slice doesn't need. **Forward note:** this split is a decision about *today's* identity model (`CryptoManager`/`sender_auth`, Ed25519-based). If sender/receiver identity later moves onto `auth-framework` (queued behind f2, and not yet at a stable 1.0 shape as of this writing), QUIC's certificate handling should be reviewed against whatever `auth-framework` actually provides at that time — this document makes no commitment about what that review will conclude, only flags that it should happen.
+
+## 4. Delivery claim, and how it composes with f2's ack
+
+`send_message` returns `DeliveryConfirmation::Sent` once the stream write completes and QUIC's own transport-level ACK confirms the peer's kernel received the bytes — and **never** `Delivered`. This mirrors TCP and WebSocket, not HTTP: HTTP claims `Delivered` because HTTP itself has a synchronous request/response built into the protocol (a real `2xx` from its own server), which QUIC (like TCP and WebSocket) does not have. A transport-level stream ACK proves the peer's QUIC stack got the bytes; it does not prove the peer's application read or processed them — exactly the gap `delivery_ack.rs` exists to close honestly, and closes already, for every transport.
+
+**Composition with f2:** this is a two-layer split, and the layers don't change each other.
+- **Transport layer (this slice):** `Sent`/`Delivered` on `DeliveryReceipt`, describing what the *transport* observed (a write succeeded; nothing more).
+- **Application layer (`delivery_ack.rs`, extended by f2):** a signed `SecureMessage` the receiving application sends back once it has actually processed the original, keyed today by `message_id` alone via `synapse.ack.for`; f2 is queued to key acknowledgement lookups on `(sender, message_id)` (almost certainly for the receiving side's own bookkeeping — disambiguating or indexing pending sends awaiting acks — since `message_id` is already a UUID and globally unique per `SecureMessage::new`, so the pairing is about lookup/indexing, not collision-avoidance).
+
+QUIC needs **zero new ack code**. It sends and receives ordinary `SecureMessage`s exactly like the other three transports; an ack built by `delivery_ack::build_ack` travels over QUIC the same way any other message does, and f2's keyed work happens entirely inside `delivery_ack.rs`/the application layer, untouched by whichever transport happened to carry either message.
+
+## 5. 0-RTT: explicitly disabled
+
+QUIC supports 0-RTT resumption — skipping the full handshake on reconnect to a recently-seen peer, using a resumption ticket. 0-RTT data is, by a well-documented property of QUIC/TLS 1.3 itself, replayable by a network attacker before the handshake completes. This is **unrelated** to this codebase's own application-level replay-suppression gate (`src/replay.rs`, `GateConfig`) — that gate protects against a *sender's own message* being replayed at the application layer; it says nothing about a QUIC handshake's 0-RTT window at the transport layer.
+
+This slice disables 0-RTT everywhere: every (re)connection, including the pool's idle-timeout reopens (§3), does the full 1-RTT handshake. This costs a little latency on the (expected to be infrequent) case of reopening an idle connection, in exchange for not taking on a transport-level replay surface this slice hasn't measured or bounded. 0-RTT can be revisited later as its own, explicitly-scoped addition with a stated bound on what it exposes — not assumed as a default because `quinn` supports it (the old, non-compiling `quic.rs` reference implementation defaulted `enable_0rtt: true`; this design deliberately does not).
+
+## 6. Message framing and size limits
+
+Follows the pattern Tasks 7–9 already established:
+
+- `max_message_size` config key, default 1 MiB of serialized JSON (matching TCP/WebSocket/HTTP's post-repair default — not the old preset's aspirational 1 GB).
+- A byte-budget queue (`max_queued_bytes`), acquired before parsing and held until drained, bounding total in-flight memory the same way the other three transports' queues do.
+- `first_byte_timeout_ms`/`idle_timeout_ms` per stream, so a stream that opens but never sends, or stalls mid-message, cannot hold resources indefinitely.
+- An oversize send is refused before opening a stream, as `SynapseError::MessageRefused` (not `TransportError`), and kept out of the circuit breaker and failure marking — exactly the Task 7 fix, reapplied here rather than reinvented.
+- Unparseable or zero config values, and a `max_queued_bytes` below `max_message_size` or above `u32::MAX`, are refused at construction (`QuicTransportFactory::validate_config`), not silently defaulted.
+
+The adversarial parsing factor (how much a maliciously-shaped message can inflate parsed memory relative to its wire size) should be *measured* for QUIC's actual send/receive path during Task 3, not assumed to equal TCP's previously-measured `f≈18 peak/12 retained` — the underlying `SecureMessage`/JSON shape is the same, but the measurement should still be taken fresh and stated as measured, per this project's stated discipline (CLAUDE.md §7: state bounds as measured vs. derived).
+
+## 7. Capabilities and metrics (Task 4)
+
+Replace `TransportCapabilities::quic()`'s current aspirational values with:
+- `max_message_size`: the configured limit (default 1 MiB), not a fixed "1GB theoretical" figure.
+- `features`: describe what this implementation actually does (e.g., `multiplexed_streams`, `connection_pooling`) — drop `zero_rtt` (disabled, §5) and `connection_migration` (not implemented by this slice) from the claimed feature list; a feature this transport doesn't provide must not be advertised, regardless of what the underlying library could support.
+- `estimate_metrics()`: a real probe (attempt a connection or reuse a pooled one), not fixed figures. On failure: unavailable, latency = the configured timeout, confidence ≤ 0.3 — matching HTTP's Task 9 repair.
+- `metrics()`: real counters (messages/bytes sent and received, failures), not placeholders.
+
+## 8. Testing and verification
+
+- **Test:** `quic_carries_a_verified_message_end_to_end`, using the same `node`/`round_trip`/`Pair` harness already in `tests/transport_repairs.rs` (adding `TransportType::Quic` to `port_key`/`socket_of` and a `quic()` factory helper, the same shape NAT traversal's Task 10 test used). Since QUIC is new rather than a repair, there is no "control: fails before the fix" step for the basic end-to-end test; adversarial tests (oversize refusal, concurrent multiplexed sends losing nothing, idle-timeout pool eviction actually reopening a usable connection) get their own positive/negative pairs per task.
+- **Verification (Task 5), same shape as PR B's Task 11:** a mutation check (predict, then run, with the test-*execution* step capped by a hard `timeout` — the lesson this session paid for twice, recorded in the transport-contract ledger); a full run in a target directory that has only ever built the current source state (the practical reading of "fresh" this session settled on, after `curve25519-dalek-derive` link failures on a literally-new directory twice); a Windows Firewall event 2097 count for the run's window, with a positive control; `cargo fmt --check` and `cargo clippy --lib --tests`; and doc updates to `CAPABILITY_INVENTORY.md` for any QUIC-specific finding this slice fixes or supersedes.
+- **Breaking changes for the 2.0 release notes** (quoted in the eventual PR body, alongside Tasks 7–10's): `TransportType::Quic`'s factory now constructs a real transport instead of always refusing; `TransportCapabilities::quic()`'s figures change from aspirational to measured; new config keys (`max_message_size`, `max_queued_bytes`, timeouts) with construction-time validation, matching the other three transports' pattern.
+
+## 9. Open questions for the PM/implementation plan
+
+None blocking — this document reflects every decision made during brainstorming. The implementation plan (via `writing-plans`) should confirm the exact `quinn`/`rcgen` version pins against what's current when implementation starts, and re-verify the `max_message_size` default and adversarial parsing factor by measurement in Task 3, per §6.
