@@ -49,7 +49,7 @@
 - Test: `tests/transport_repairs.rs` (`quic_carries_a_verified_message_end_to_end`)
 
 **Interfaces:**
-- Produces: `quic_tls::generate_self_signed_cert() -> Result<(rustls::pki_types::CertificateDer<'static>, rustls::pki_types::PrivateKeyDer<'static>)>`; `quic_tls::server_config(cert, key) -> Result<Arc<rustls::ServerConfig>>`; `quic_tls::client_config() -> Arc<rustls::ClientConfig>`; `quic_unified::QuicTransportImpl::new(config: &HashMap<String, String>) -> Result<Self>` (async); `QuicTransportFactory` implementing `abstraction::TransportFactory`, `transport_type() -> TransportType::Quic`.
+- Produces: `quic_tls::generate_self_signed_cert() -> Result<(rustls::pki_types::CertificateDer<'static>, rustls::pki_types::PrivateKeyDer<'static>)>`; `quic_tls::server_config(cert, key) -> Result<Arc<rustls::ServerConfig>>`; `quic_tls::client_config() -> Result<Arc<rustls::ClientConfig>>`; `quic_unified::QuicTransportImpl::new(config: &HashMap<String, String>) -> Result<Self>` (async); `QuicTransportFactory` implementing `abstraction::TransportFactory`, `transport_type() -> TransportType::Quic`.
 - Consumes: `abstraction::{Transport, TransportReceive, TransportType, TransportTarget, TransportCapabilities, RawInbox, IncomingMessage, DeliveryReceipt, DeliveryConfirmation, TransportEstimate, ConnectivityResult, TransportStatus, TransportMetrics}`, `crate::error::{Result, SynapseError}`, `crate::types::SecureMessage`, `crate::network_scope::BindScope`.
 
 - [ ] **Step 1: Add the dependencies**
@@ -105,30 +105,37 @@ use std::sync::Arc;
 /// One ephemeral, self-signed certificate and key pair. Generated fresh by every call --
 /// this transport never stores, rotates, or compares certificates across connections (spec §3).
 pub fn generate_self_signed_cert() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
-    let rcgen::CertifiedKey { cert, key_pair } =
+    let rcgen::CertifiedKey { cert, signing_key } =
         rcgen::generate_simple_self_signed(vec!["synapse-quic".to_string()]).map_err(|e| {
             SynapseError::TransportError(format!("Failed to generate self-signed cert: {e}"))
         })?;
-    let cert_der = CertificateDer::from(cert.der().to_vec());
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+    let cert_der = cert.der().clone();
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
     Ok((cert_der, key_der))
 }
 
-/// Ensure this process has a rustls `CryptoProvider` installed, without erroring if one already
-/// is (another dependency, e.g. `tokio-rustls`'s consumer, may have installed one first; either
-/// provider is `ring`-backed here, so which one wins does not matter for this transport).
-fn ensure_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+/// This transport's one `rustls` `CryptoProvider`, chosen explicitly rather than relying on
+/// process-wide install order. This crate's own dependency graph already pulls in both `ring`
+/// and `aws-lc-rs` transitively (via other, unrelated dependencies), so relying on
+/// `CryptoProvider::install_default()` would make this transport's TLS behavior depend on
+/// whichever unrelated code happens to install a default first -- fragile and non-obvious.
+/// `ring` is chosen because it is what `quinn`'s and `rcgen`'s own default features already use.
+fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// A `rustls::ServerConfig` presenting the given self-signed certificate. ALPN is set to
-/// `synapse-quic` so a peer speaking anything else is refused at the handshake.
+/// A `rustls::ServerConfig` presenting the given self-signed certificate, restricted to TLS 1.3
+/// (the only version QUIC ever negotiates). ALPN is set to `synapse-quic` so a peer speaking
+/// anything else is refused at the handshake.
 pub fn server_config(
     cert: CertificateDer<'static>,
     key: PrivateKeyDer<'static>,
 ) -> Result<Arc<rustls::ServerConfig>> {
-    ensure_crypto_provider();
-    let mut config = rustls::ServerConfig::builder()
+    let mut config = rustls::ServerConfig::builder_with_provider(crypto_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| {
+            SynapseError::TransportError(format!("Failed to select TLS 1.3 for QUIC server: {e}"))
+        })?
         .with_no_client_auth()
         .with_single_cert(vec![cert], key)
         .map_err(|e| {
@@ -139,15 +146,18 @@ pub fn server_config(
 }
 
 /// A `rustls::ClientConfig` that accepts any server certificate (see [`DangerAcceptAnyServerCert`]
-/// for why that is safe in this one place and nowhere else).
-pub fn client_config() -> Arc<rustls::ClientConfig> {
-    ensure_crypto_provider();
-    let mut config = rustls::ClientConfig::builder()
+/// for why that is safe in this one place and nowhere else), restricted to TLS 1.3.
+pub fn client_config() -> Result<Arc<rustls::ClientConfig>> {
+    let mut config = rustls::ClientConfig::builder_with_provider(crypto_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| {
+            SynapseError::TransportError(format!("Failed to select TLS 1.3 for QUIC client: {e}"))
+        })?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(DangerAcceptAnyServerCert))
         .with_no_client_auth();
     config.alpn_protocols = vec![b"synapse-quic".to_vec()];
-    Arc::new(config)
+    Ok(Arc::new(config))
 }
 
 /// Accepts any server certificate without inspection. **Never reuse this outside the QUIC
@@ -193,7 +203,7 @@ impl rustls::client::danger::ServerCertVerifier for DangerAcceptAnyServerCert {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
+        crypto_provider()
             .signature_verification_algorithms
             .supported_schemes()
     }
@@ -321,22 +331,22 @@ impl QuicTransportImpl {
         let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
 
         let (cert, key) = super::quic_tls::generate_self_signed_cert()?;
-        let server_tls = super::quic_tls::server_config(cert, key)?;
+        let server_tls = super::quic_tls::server_config(cert, key)?; // Arc<rustls::ServerConfig>
         let server_quic_config = quinn::ServerConfig::with_crypto(Arc::new(
-            quinn::crypto::rustls::QuicServerConfig::try_from((*server_tls).clone()).map_err(
-                |e| SynapseError::TransportError(format!("QUIC server TLS setup failed: {e}")),
-            )?,
+            quinn::crypto::rustls::QuicServerConfig::try_from(server_tls).map_err(|e| {
+                SynapseError::TransportError(format!("QUIC server TLS setup failed: {e}"))
+            })?,
         ));
 
         let bind_addr = bind_scope.listen_addr(local_port);
         let mut endpoint = quinn::Endpoint::server(server_quic_config, bind_addr)
             .map_err(|e| SynapseError::TransportError(format!("Failed to bind QUIC endpoint to {bind_addr}: {e}")))?;
 
-        let client_tls = super::quic_tls::client_config();
+        let client_tls = super::quic_tls::client_config()?; // Arc<rustls::ClientConfig>
         let client_quic_config = quinn::ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from((*client_tls).clone()).map_err(
-                |e| SynapseError::TransportError(format!("QUIC client TLS setup failed: {e}")),
-            )?,
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_tls).map_err(|e| {
+                SynapseError::TransportError(format!("QUIC client TLS setup failed: {e}"))
+            })?,
         ));
         endpoint.set_default_client_config(client_quic_config);
 
@@ -677,25 +687,35 @@ Expected: PASS on message delivery (Task 1 already handles two independent sends
 
 - [ ] **Step 5: Implement the pool**
 
+`quinn::proto::ConnectionStats`/`PathStats` (checked against the installed `quinn-proto 0.11.18`
+source) expose RTT, congestion, and packet/byte counters — nothing resembling "time since last
+use". So the pool tracks last-use time itself, as the value alongside each connection, updated on
+every hit or insert:
+
 ```rust
 // src/transport/quic_unified.rs -- add to QuicTransportImpl's fields:
-    pool: Arc<Mutex<HashMap<SocketAddr, Arc<quinn::Connection>>>>,
+    pool: Arc<Mutex<HashMap<SocketAddr, (Arc<quinn::Connection>, std::time::Instant)>>>,
     idle_timeout: std::time::Duration,
 
 // In QuicTransportImpl::new, after building `endpoint`:
     pool: Arc::new(Mutex::new(HashMap::new())),
-    idle_timeout: std::time::Duration::from_secs(300),
+    idle_timeout: std::time::Duration::from_secs(300), // Step 7 replaces this with a config-driven value
 
 // New method on QuicTransportImpl:
     /// Reuse a pooled connection to `addr`, or establish one. The pool's lock is never held
     /// across the handshake `await` (spec §3, condition 2): a miss releases the lock, connects,
     /// then re-acquires it to insert -- double-checking for a connection a racing sender
     /// established first, keeping that one and dropping the one just established, rather than
-    /// overwrite it.
+    /// overwrite it. Every return path refreshes the entry's last-use `Instant`, so the idle
+    /// sweep (below) only evicts a connection nothing has used recently.
     async fn pooled_connection(&self, addr: SocketAddr) -> Result<Arc<quinn::Connection>> {
-        if let Some(conn) = self.pool.lock().await.get(&addr) {
-            if conn.close_reason().is_none() {
-                return Ok(Arc::clone(conn));
+        {
+            let mut pool = self.pool.lock().await;
+            if let Some((conn, last_used)) = pool.get_mut(&addr) {
+                if conn.close_reason().is_none() {
+                    *last_used = std::time::Instant::now();
+                    return Ok(Arc::clone(conn));
+                }
             }
         }
         let connecting = self
@@ -708,12 +728,13 @@ Expected: PASS on message delivery (Task 1 already handles two independent sends
                 .map_err(|e| SynapseError::TransportError(format!("QUIC handshake failed: {e}")))?,
         );
         let mut pool = self.pool.lock().await;
-        if let Some(existing) = pool.get(&addr) {
+        if let Some((existing, last_used)) = pool.get_mut(&addr) {
             if existing.close_reason().is_none() {
+                *last_used = std::time::Instant::now();
                 return Ok(Arc::clone(existing));
             }
         }
-        pool.insert(addr, Arc::clone(&fresh));
+        pool.insert(addr, (Arc::clone(&fresh), std::time::Instant::now()));
         Ok(fresh)
     }
 
@@ -721,7 +742,7 @@ Expected: PASS on message delivery (Task 1 already handles two independent sends
     /// application-layer verification (spec §3, condition 3), so a connection that has started
     /// reaching the wrong peer (NAT rebinding, address reuse) is not silently reused again.
     pub async fn evict(&self, addr: SocketAddr) {
-        if let Some(conn) = self.pool.lock().await.remove(&addr) {
+        if let Some((conn, _)) = self.pool.lock().await.remove(&addr) {
             conn.close(0u32.into(), b"evicted: verification failure");
         }
     }
@@ -738,18 +759,15 @@ Expected: PASS on message delivery (Task 1 already handles two independent sends
             let mut interval = tokio::time::interval(idle_timeout / 2);
             loop {
                 interval.tick().await;
+                let now = std::time::Instant::now();
                 let mut pool = pool.lock().await;
-                pool.retain(|_, conn| {
-                    let idle = conn.max_idle_timeout().is_none()
-                        || conn.stats().path.rtt < idle_timeout; // placeholder predicate, see note below
-                    idle && conn.close_reason().is_none()
+                pool.retain(|_, (conn, last_used)| {
+                    now.duration_since(*last_used) < idle_timeout && conn.close_reason().is_none()
                 });
             }
         });
     }
 ```
-
-The idle-eviction predicate above is a placeholder shape, not a real one — `quinn::Connection` does not directly expose "seconds since last activity" as a single field; find the actual API for this in the installed `quinn` version (candidates to check: tracking last-use time yourself in the pool's value type, e.g. `HashMap<SocketAddr, (Arc<Connection>, Instant)>` updated on every `pooled_connection` hit, and evicting by that `Instant` rather than trying to query `quinn` for idle state). Rewrite this step's implementation once you've confirmed which approach the installed API actually supports, and update this plan file's Step 5 code block to match what you implemented (so a reviewer reading the plan sees the real design, not this placeholder) before moving to Step 6 — do not proceed with a predicate that always evaluates `true` or `false`, since either would defeat the test in Step 7.
 
 - [ ] **Step 6: Strengthen the pooling test now that eviction/insertion is inspectable**
 
@@ -1206,5 +1224,6 @@ Target `main`. Body: link the spec, the plan, the verification numbers with thei
 ## Self-Review Notes (for whoever executes this plan)
 
 - **Spec coverage:** §2 (task shape) → Tasks 1-5 above. §3 (pool, identity, all three PM conditions) → Task 1 Steps 4/9 (verifier module, condition 1), Task 2 Step 5 (lock-release pattern, condition 2; eviction method, condition 3). §4 (delivery claim/ack composition) → Task 1's module doc and `send_message`'s `Sent`-only return; no ack code added anywhere, matching "QUIC needs zero new ack code." §5 (0-RTT) → Task 1's `quic_tls.rs` never enables it; no step in this plan turns it on. §6 (framing/size limits) → Task 3. §7 (capabilities/metrics) → Task 4. §8 (testing/verification) → Task 5.
-- **Known plan-writing-time gaps, flagged rather than hidden:** the exact field/method names for `rcgen::CertifiedKey`, `rustls`'s `ServerCertVerifier` trait methods, and `quinn::Connection`'s RTT/idle-state accessors are this plan's best reconstruction from a general familiarity with these crates' stable API shapes, not a verified read of the exact installed versions (`quinn 0.11.12`, `rcgen 0.14.10`) at plan-writing time. Every task that touches one says explicitly, inline, to verify against the installed crate's docs before treating the listed code as final — this is not the same as a placeholder (the code is real and should compile with at most small corrections), but it is not guaranteed byte-exact either. Task 2's idle-eviction predicate is the one genuine placeholder in this plan (explicitly marked as such in Task 2 Step 5) because it depends on which of two real designs the installed `quinn` API supports; resolve it before writing Task 2 Step 6's test, not after.
+- **API shapes verified against the actually-installed crates (PM review condition 1), not left as a plan-writing-time reconstruction.** `quinn = "0.11.12"` and `rcgen = "0.14.10"` were added temporarily and their real source (`~/.cargo/registry/src/*/{quinn-0.11.12,quinn-proto-0.11.18,rcgen-0.14.10,rustls-0.23.45}`) read directly. Two real corrections came out of this: `rcgen::CertifiedKey`'s field is `signing_key`, not `key_pair` (fixed throughout Task 1); and this workspace's dependency graph already pulls in *both* `ring` and `aws-lc-rs` transitively (via unrelated dependencies), so `quic_tls.rs` selects its `CryptoProvider` explicitly (`builder_with_provider`, restricted to TLS 1.3) rather than relying on `CryptoProvider::install_default()`'s process-wide, order-dependent behavior — a real hazard the original draft's "either provider wins, it doesn't matter" reasoning missed. Every other reconstructed signature (`ServerCertVerifier`'s three verify methods, `Connection::{open_bi,accept_bi,rtt,close_reason,remote_address,close}`, `SendStream::{write_all,finish}`, `RecvStream::read_to_end`, `Endpoint::{server,client,connect,accept,set_default_client_config}`, `quinn::crypto::rustls::{QuicServerConfig,QuicClientConfig}`'s `TryFrom<Arc<rustls::{Server,Client}Config>>` impls) matched the plan's original draft exactly. The temporary dependency additions were reverted from `Cargo.toml`/`Cargo.lock` after verification, so Task 1 Step 1 still does the real, first addition.
+- **Task 2's idle-eviction design resolved (PM review condition 2), not left as a choice for whoever implements it.** `quinn-proto 0.11.18`'s `ConnectionStats`/`PathStats` (read directly) expose RTT, congestion, and packet/byte counters — nothing resembling "time since last use". The pool tracks last-use `Instant` itself, as part of each entry's value (`HashMap<SocketAddr, (Arc<Connection>, Instant)>`), refreshed on every hit or insert inside `pooled_connection`, and compared against `idle_timeout` by a periodic sweep. This is a decision, not a placeholder.
 - **Type consistency check:** `QuicTransportImpl`/`QuicTransportFactory` names, `LOCAL_PORT_KEY`/`MAX_MESSAGE_SIZE_KEY`/`MAX_QUEUED_BYTES_KEY`/`IDLE_TIMEOUT_MS_KEY` constants, and `pooled_connection`/`evict`/`pool_size` method names are used identically across Tasks 1-4 as introduced in Task 1/2 — no renaming drift found on this pass.
