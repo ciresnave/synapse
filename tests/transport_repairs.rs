@@ -2962,6 +2962,45 @@ async fn quic_refuses_at_send_a_message_over_its_limit() {
     );
 }
 
+/// An oversize refusal must be kept out of the circuit breaker *and* failure marking (spec §6 and
+/// the plan's global constraints): `send_failures` must stay at zero after one, exactly as all
+/// three sibling transports (`tcp_unified.rs`, `websocket_unified.rs`, `http_unified.rs`) never
+/// touch a counter on this exact path either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_oversize_refusal_does_not_increment_send_failures() {
+    const QUIC_LIMIT: usize = 1024;
+    let config = one_key("max_message_size", &QUIC_LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let (over, over_size) = measured(&pair, QUIC_LIMIT, false);
+
+    let alice_quic = QuicTransportImpl::new(&config)
+        .await
+        .expect("construct a raw QUIC sender with the same limit");
+    match alice_quic.send_message(&pair.bob_target(), &over).await {
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {QUIC_LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+        Err(synapse::SynapseError::MessageRefused(_)) => {}
+        Err(other) => panic!("must be MessageRefused, not {other:?}"),
+    }
+
+    let metrics = alice_quic.metrics().await;
+    assert_eq!(
+        metrics.send_failures, 0,
+        "an oversize refusal must never touch send_failures"
+    );
+    assert_eq!(metrics.messages_sent, 0);
+}
+
 /// A message that fits `max_message_size` still crosses end to end with the limit configured.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quic_delivers_a_message_at_or_under_its_limit() {
@@ -3016,6 +3055,61 @@ async fn quic_refuses_an_invalid_config() {
     quic_refuses(
         one_key("stream_idle_timeout_ms", "0"),
         "stream_idle_timeout_ms",
+    );
+    quic_refuses(one_key("send_timeout_ms", "0"), "send_timeout_ms");
+}
+
+/// `send_timeout_ms` bounds `send_message` end to end: against a peer that accepts UDP packets
+/// but never completes the QUIC handshake (a bound socket that reads and discards, unlike an
+/// unbound port, which fails fast with ICMP port-unreachable instead of hanging), a small
+/// `send_timeout_ms` must make `send_message` give up well within a few seconds, not ride
+/// quinn's own much longer idle/retry timers -- especially now that `idle_timeout_ms` actually
+/// governs the connection (see the module documentation), which could otherwise be configured
+/// large enough to block a caller for a long time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_send_times_out_against_a_silent_peer() {
+    let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind a blackhole socket");
+    let blackhole_addr = blackhole.local_addr().expect("blackhole local addr");
+    // Keep receiving (and discarding) packets so the OS never answers with ICMP
+    // port-unreachable, which would otherwise fail the connect immediately instead of hanging.
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while blackhole.recv(&mut buf).await.is_ok() {}
+    });
+
+    let config = HashMap::from([("send_timeout_ms".to_string(), "300".to_string())]);
+    let alice_quic = QuicTransportImpl::new(&config)
+        .await
+        .expect("construct a raw QUIC sender with a short send_timeout_ms");
+    let target = TransportTarget::new(BOB.to_string()).with_address(blackhole_addr.to_string());
+
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let message = pair.signed(b"into the void");
+
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        alice_quic.send_message(&target, &message),
+    )
+    .await
+    .expect("send_message must not hang past send_timeout_ms, let alone 5s");
+    assert!(
+        result.is_err(),
+        "a send to a silent peer must not be reported as Sent"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must give up near send_timeout_ms (300ms), not quinn's own idle/retry timers: {:?}",
+        started.elapsed()
     );
 }
 
@@ -3146,6 +3240,49 @@ async fn quic_reports_connectivity_only_after_a_real_handshake() {
         .expect("connectivity");
     assert!(!dead.connected, "{dead:?}");
     assert_eq!(dead.rtt, None);
+}
+
+/// `test_connectivity` is a probe, not a sender: it must not retain a connection in the pool the
+/// way `send_message`'s `pooled_connection` does, or a mere connectivity check would inflate
+/// `metrics()`'s `active_connections` and leave a stale entry behind after `stop()` (which does
+/// not clear the pool). Driven through a raw `QuicTransportImpl` because `pool_size()` is not on
+/// the `Transport` trait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_test_connectivity_does_not_populate_the_pool() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender");
+
+    let result = alice_quic
+        .test_connectivity(&pair.bob_target())
+        .await
+        .expect("connectivity");
+    assert!(result.connected, "{result:?}");
+    assert_eq!(
+        alice_quic.pool_size().await,
+        0,
+        "a connectivity probe must not leave a connection in the pool"
+    );
+
+    // A real send afterward still works, and populates the pool as normal.
+    let message = pair.signed(b"after a probe");
+    alice_quic
+        .send_message(&pair.bob_target(), &message)
+        .await
+        .expect("send after a probe");
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "a real send must still pool its connection"
+    );
 }
 
 /// `estimate_metrics` must reuse the same real probe: available with a measured latency and full

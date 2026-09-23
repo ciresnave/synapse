@@ -33,6 +33,14 @@ fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// A `rustls::ServerConfig` presenting the given self-signed certificate, restricted to TLS 1.3
 /// (the only version QUIC ever negotiates). ALPN is set to `synapse-quic` so a peer speaking
 /// anything else is refused at the handshake.
+///
+/// Built via `builder_with_provider(...)...with_single_cert(...)`, not `quinn`'s convenience
+/// constructor `quinn::ServerConfig::with_single_cert` (which builds its own `rustls::ServerConfig`
+/// this way and additionally sets `max_early_data_size`/`enable_early_data` to enable 0-RTT).
+/// 0-RTT is deliberately left off here (spec §5, no 0-RTT): the `rustls::ServerConfig` this
+/// function returns keeps `max_early_data_size` at its disabled default. A future refactor that
+/// swaps this for a "simpler-looking" `quinn` convenience constructor would silently reintroduce
+/// 0-RTT -- don't.
 pub fn server_config(
     cert: CertificateDer<'static>,
     key: PrivateKeyDer<'static>,
@@ -53,6 +61,11 @@ pub fn server_config(
 
 /// A `rustls::ClientConfig` that accepts any server certificate (see [`DangerAcceptAnyServerCert`]
 /// for why that is safe in this one place and nowhere else), restricted to TLS 1.3.
+///
+/// Built via `builder_with_provider(...)`, not `quinn`'s convenience constructor -- the same
+/// 0-RTT-stays-off reasoning as [`server_config`] applies here: this `rustls::ClientConfig` keeps
+/// `enable_early_data` at its disabled default, and a future refactor must not reach for a
+/// `quinn` convenience constructor that turns it back on.
 pub fn client_config() -> Result<Arc<rustls::ClientConfig>> {
     let mut config = rustls::ClientConfig::builder_with_provider(crypto_provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
