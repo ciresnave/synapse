@@ -363,8 +363,12 @@ impl QuicTransportImpl {
 
     /// Evict a pooled connection to `addr` -- for when a message received over it fails
     /// application-layer verification, so a connection that has started reaching the wrong peer
-    /// (NAT rebinding, address reuse) is not silently reused again. Wiring this to the manager's
-    /// verification path is a later task; this task provides the method and tests it directly.
+    /// (NAT rebinding, address reuse) is not silently reused again. **Not currently called by
+    /// anything**: `TransportManager` has no way to reach a concrete `QuicTransportImpl` from its
+    /// `Box<dyn Transport>` storage to invoke this on a verification failure. This method exists
+    /// and is directly tested; the wiring is tracked separately as a deliberate cross-transport
+    /// change (see `docs/superpowers/specs/2026-09-22-quic-transport-design.md` §3, condition 3,
+    /// and <https://github.com/ciresnave/synapse/issues/49>).
     pub async fn evict(&self, addr: SocketAddr) {
         if let Some((conn, _)) = self.pool.lock().await.remove(&addr) {
             conn.close(0u32.into(), b"evicted: verification failure");
@@ -798,11 +802,14 @@ impl Transport for QuicTransportImpl {
         // it terminates on its own once `QuicTransportImpl` itself is dropped (`pool.upgrade()`
         // then fails and the loop breaks) instead of running forever -- no explicit shutdown
         // signal needed, and `stop()` does not need to coordinate with this spawned task at all.
-        // This does not by itself stop `start()`/`stop()`/`start()` from leaving more than one
-        // sweep alive for as long as `QuicTransportImpl` itself lives (each still exits once the
-        // transport is dropped): `is_running` in practice keeps that from mattering, since a
-        // second `start()` while already running returns early above, and nothing here restarts
-        // a transport for its own sake without eventually dropping it.
+        // This does not by itself stop `start()`/`stop()`/`start()` from spawning a second sweep
+        // (`stop()` clears `is_running`, so a later `start()` does not hit the already-running
+        // early return). In practice this is harmless, not merely unlikely: `stop()` closes both
+        // `endpoint` and `queue_budget` irreversibly, so a "restarted" transport can neither
+        // receive nor usefully connect -- restart is not a supported lifecycle -- and two sweeps
+        // over the same pool with the same `idle_timeout` are idempotent (`retain` with a pure
+        // predicate, `conn.close()` on an already-closed connection is a no-op); the only cost of
+        // a redundant sweep would be one extra timer, and both still exit on drop.
         {
             let pool = Arc::downgrade(&self.pool);
             let idle_timeout = self.idle_timeout;

@@ -59,8 +59,9 @@ pub fn server_config(
     Ok(Arc::new(config))
 }
 
-/// A `rustls::ClientConfig` that accepts any server certificate (see [`DangerAcceptAnyServerCert`]
-/// for why that is safe in this one place and nowhere else), restricted to TLS 1.3.
+/// A `rustls::ClientConfig` that accepts any server certificate (see the private
+/// `DangerAcceptAnyServerCert` below for why that is safe in this one place and nowhere else),
+/// restricted to TLS 1.3.
 ///
 /// Built via `builder_with_provider(...)`, not `quinn`'s convenience constructor -- the same
 /// 0-RTT-stays-off reasoning as [`server_config`] applies here: this `rustls::ClientConfig` keeps
