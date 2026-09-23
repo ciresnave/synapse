@@ -50,6 +50,8 @@ fn port_key(kind: TransportType) -> &'static str {
         TransportType::WebSocket => "local_port",
         // NatTraversalTransportFactory (abstraction.rs, PR B Task 10) reads the same key name.
         TransportType::NatTraversal => "local_port",
+        // quic_unified.rs reads `local_port` and binds it when the endpoint is constructed.
+        TransportType::Quic => "local_port",
         other => panic!("no port key recorded for {other:?}; add it to port_key"),
     }
 }
@@ -64,7 +66,8 @@ fn socket_of(kind: TransportType) -> Socket {
     match kind {
         TransportType::Tcp | TransportType::Http | TransportType::WebSocket => Socket::Tcp,
         // NAT traversal listens on a `UdpSocket` (nat_traversal.rs, `start`).
-        TransportType::Udp | TransportType::NatTraversal => Socket::Udp,
+        // QUIC runs over UDP (quic_unified.rs binds a `quinn::Endpoint`, itself a UDP socket).
+        TransportType::Udp | TransportType::NatTraversal | TransportType::Quic => Socket::Udp,
         other => panic!("no socket family recorded for {other:?}; add it to socket_of"),
     }
 }
@@ -2678,5 +2681,32 @@ async fn nat_traversal_carries_a_verified_message_end_to_end() {
         TransportType::NatTraversal
     );
     assert_eq!(receipt.transport_used, TransportType::NatTraversal);
+    assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// QUIC (plan Task 1): one connection, one stream, one message, over loopback.
+// ---------------------------------------------------------------------------------------------
+
+fn quic() -> Box<dyn TransportFactory> {
+    Box::new(synapse::transport::QuicTransportFactory)
+}
+
+/// QUIC had no working implementation: `QuicTransportFactory::create_transport` always refused
+/// (PR A, Task 3). This is the first test to prove it sends and receives at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_carries_a_verified_message_end_to_end() {
+    let (received, receipt) = round_trip(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        b"repaired",
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+    assert_eq!(received.incoming.transport_type, TransportType::Quic);
+    assert_eq!(receipt.transport_used, TransportType::Quic);
     assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
 }

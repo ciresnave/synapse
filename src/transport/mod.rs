@@ -45,6 +45,10 @@ pub mod mdns_enhanced;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod nat_traversal;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod quic_tls;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod quic_unified;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tcp_unified; // Primary TCP implementation
 // Unified transport implementations
 #[cfg(not(target_arch = "wasm32"))]
@@ -602,6 +606,11 @@ pub use llm_discovery::{
 pub use mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use nat_traversal::{IceCandidate, NatTraversalTransport};
+// The QUIC transport that listens and receives. Named explicitly, matching `tcp_unified`'s
+// re-export just below: `abstraction` once defined a second `QuicTransportFactory` that the
+// glob re-export above would otherwise shadow.
+#[cfg(not(target_arch = "wasm32"))]
+pub use quic_unified::{QuicTransportFactory, QuicTransportImpl};
 #[cfg(not(target_arch = "wasm32"))]
 pub use router::MultiTransportRouter;
 // The TCP transport that listens and receives. Named explicitly: `abstraction` once defined a
