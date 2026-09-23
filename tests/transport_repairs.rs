@@ -8,6 +8,7 @@
 //! what Alice's receipt claims.
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -2820,6 +2821,69 @@ async fn quic_reopens_after_the_pool_evicts_an_idle_connection() {
         received.len(),
         2,
         "both messages must arrive even after an idle-timeout reopen"
+    );
+}
+
+/// `evict()` removes a peer's pooled connection directly (spec §3 condition 3 -- Task 2 only needs
+/// to provide the method and test it, not wire it to a verification failure): after a send has
+/// populated the pool, evicting Bob's address drops the pool back to empty, and the *next* send to
+/// the same address must still succeed by transparently establishing a fresh connection (proven by
+/// `pool_size()` going back up to 1, not just by re-checking the old entry).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_evict_drops_the_pooled_connection_and_the_next_send_reopens_one() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender");
+    let bob_addr: SocketAddr = pair
+        .bob_target()
+        .address
+        .as_ref()
+        .expect("bob_target has an address")
+        .parse()
+        .expect("bob_target's address parses");
+
+    let m1 = pair.signed(b"before evict");
+    alice_quic
+        .send_message(&pair.bob_target(), &m1)
+        .await
+        .expect("send 1");
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "the first send must populate the pool"
+    );
+
+    alice_quic.evict(bob_addr).await;
+    assert_eq!(
+        alice_quic.pool_size().await,
+        0,
+        "evict() must remove the pooled connection"
+    );
+
+    let m2 = pair.signed(b"after evict");
+    alice_quic
+        .send_message(&pair.bob_target(), &m2)
+        .await
+        .expect("send 2 must transparently reopen a connection after eviction");
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "the send after evict() must re-establish and re-pool a connection"
+    );
+
+    let received = poll_bob(&pair, 2, Duration::from_secs(3)).await;
+    assert_eq!(
+        received.len(),
+        2,
+        "both messages must arrive, evicted connection notwithstanding"
     );
 }
 

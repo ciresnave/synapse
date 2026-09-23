@@ -418,6 +418,10 @@ impl Transport for QuicTransportImpl {
                     interval.tick().await;
                     let now = Instant::now();
                     let mut pool = pool.lock().await;
+                    // Inlined rather than calling `evict()`: `evict()` takes the pool lock itself,
+                    // and this closure already runs with it held (via `retain`) -- calling it here
+                    // would deadlock. Keep this in sync with `evict()`'s close-and-drop behavior by
+                    // hand if either changes.
                     pool.retain(|_, (conn, last_used)| {
                         let keep = now.duration_since(*last_used) < idle_timeout
                             && conn.close_reason().is_none();
