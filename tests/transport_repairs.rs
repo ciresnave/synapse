@@ -16,8 +16,9 @@ use synapse::certificate::{AgentCertificate, Permission};
 use synapse::sealing::{self, Payload, SealingKeyPair};
 use synapse::sender_auth::{SenderVerdict, TrustStore};
 use synapse::transport::{
-    DeliveryConfirmation, DeliveryReceipt, ReceivedMessage, TransportFactory, TransportManager,
-    TransportManagerBuilder, TransportStatus, TransportTarget, TransportType,
+    DeliveryConfirmation, DeliveryReceipt, QuicTransportImpl, ReceivedMessage, Transport,
+    TransportFactory, TransportManager, TransportManagerBuilder, TransportStatus, TransportTarget,
+    TransportType,
 };
 use synapse::types::{SecureMessage, SecurityLevel};
 
@@ -2709,4 +2710,137 @@ async fn quic_carries_a_verified_message_end_to_end() {
     assert_eq!(received.incoming.transport_type, TransportType::Quic);
     assert_eq!(receipt.transport_used, TransportType::Quic);
     assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// QUIC (plan Task 2): connection pooling -- reuse, multiplexed streams, idle-timeout eviction.
+// ---------------------------------------------------------------------------------------------
+
+/// N = 200, 32 sends in flight, as for WebSocket and HTTP: proves no message is lost under
+/// concurrent sends, but -- because Task 1's one-connection-per-message code is already correct,
+/// just wasteful -- this alone cannot distinguish pooled from unpooled. See
+/// `quic_reuses_one_connection_for_two_sends_to_the_same_peer` for the test that can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn quic_loses_no_message_under_concurrent_sends() {
+    loses_no_message_under_concurrent_sends(
+        TransportType::Quic,
+        quic,
+        200,
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+}
+
+/// Two sends to the same peer must not open two connections: the second reuses the first's, and
+/// the pool ends up holding exactly one entry for Bob's address.
+///
+/// Alice's sends here go through a raw `QuicTransportImpl` (the same production type
+/// `TransportManager` wraps) instead of through `pair.alice_node`: `TransportManager` stores
+/// transports as `Box<dyn Transport>` with no way to downcast back to the concrete type, so a
+/// test that needs to inspect a transport's own pool has to hold that concrete type itself,
+/// the way `websocket_closes_a_peer_that_sends_a_control_frame_and_frees_its_permit` drives a raw
+/// socket directly rather than going through a manager for the half of the exchange it needs to
+/// inspect. Bob's side is still a full node: a real `TransportManager` receiving and verifying
+/// exactly as every other transport-repair test checks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_reuses_one_connection_for_two_sends_to_the_same_peer() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender");
+
+    let m1 = pair.signed(b"first");
+    let m2 = pair.signed(b"second");
+    alice_quic
+        .send_message(&pair.bob_target(), &m1)
+        .await
+        .expect("send 1");
+    alice_quic
+        .send_message(&pair.bob_target(), &m2)
+        .await
+        .expect("send 2");
+
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "two sends to the same peer must reuse one pooled connection, not open two"
+    );
+
+    let received = poll_bob(&pair, 2, Duration::from_secs(3)).await;
+    assert_eq!(received.len(), 2, "both messages must arrive");
+    let mut ids: Vec<_> = received
+        .iter()
+        .map(|r| r.incoming.message.message_id.0.to_string())
+        .collect();
+    ids.sort();
+    let mut expected = vec![m1.message_id.0.to_string(), m2.message_id.0.to_string()];
+    expected.sort();
+    assert_eq!(ids, expected);
+}
+
+/// An idle connection is evicted and the next send transparently reopens one: both messages must
+/// still arrive even though the pool dropped its entry for Bob's address in between.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_reopens_after_the_pool_evicts_an_idle_connection() {
+    let config = one_key("idle_timeout_ms", "200");
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+
+    let m1 = pair.signed(b"first");
+    pair.alice_node
+        .send_message(&pair.bob_target(), &m1)
+        .await
+        .expect("send 1");
+
+    // Past the idle timeout, plus room for the sweep (woken at half the idle timeout) to run.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let m2 = pair.signed(b"second");
+    pair.alice_node
+        .send_message(&pair.bob_target(), &m2)
+        .await
+        .expect("send 2 after reopen");
+
+    let received = poll_bob(&pair, 2, Duration::from_secs(3)).await;
+    assert_eq!(
+        received.len(),
+        2,
+        "both messages must arrive even after an idle-timeout reopen"
+    );
+}
+
+/// `idle_timeout_ms` = 0 or unparseable must be refused, not silently replaced by the default.
+#[tokio::test]
+async fn quic_refuses_an_unparseable_or_zero_idle_timeout() {
+    for bad in ["", "abc", "0", "-1", "1s"] {
+        let config = one_key("idle_timeout_ms", bad);
+        assert!(
+            synapse::transport::QuicTransportFactory
+                .validate_config(&config)
+                .is_err(),
+            "idle_timeout_ms = {bad:?} must be refused"
+        );
+        assert!(
+            QuicTransportImpl::new(&config).await.is_err(),
+            "idle_timeout_ms = {bad:?} must be refused by new(), not just validate_config"
+        );
+    }
+    let good = one_key("idle_timeout_ms", "1000");
+    synapse::transport::QuicTransportFactory
+        .validate_config(&good)
+        .expect("a valid idle_timeout_ms must be accepted");
 }

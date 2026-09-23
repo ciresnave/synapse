@@ -3,12 +3,23 @@
 //!
 //! # Wire format (Task 1: one connection, one stream, per message)
 //!
-//! `send_message` connects to the target (a full handshake; no 0-RTT -- spec §5), opens one
-//! bidirectional QUIC stream, writes the serialized `SecureMessage` as JSON, and finishes the
-//! send side so the receiver reads to a clean stream end. The receiver accepts the stream, reads
-//! to its end, and parses it the same way TCP/WebSocket/HTTP do. Connection pooling and stream
-//! multiplexing (reusing one connection for many messages) arrive in Task 2; this task proves
-//! the plumbing with one connection per message.
+//! `send_message` reuses a pooled connection to the target where one exists (Task 2), or
+//! connects (a full handshake; no 0-RTT -- spec §5), opens one bidirectional QUIC stream, writes
+//! the serialized `SecureMessage` as JSON, and finishes the send side so the receiver reads to a
+//! clean stream end. The receiver accepts the stream, reads to its end, and parses it the same
+//! way TCP/WebSocket/HTTP do.
+//!
+//! # Connection pooling (Task 2)
+//!
+//! One `quinn::Connection` is kept per peer address and reused across sends; concurrent sends to
+//! the same peer open independent, multiplexed streams on that one connection rather than
+//! blocking each other or paying for a fresh handshake each time. The pool's lock
+//! ([`QuicTransportImpl::pooled_connection`]) is never held across the handshake `await`: a miss
+//! releases the lock, connects, then re-acquires it to insert, keeping a connection a racing
+//! sender already established instead of overwriting it. A background sweep evicts entries idle
+//! for longer than [`IDLE_TIMEOUT_MS_KEY`]; the next send to that peer transparently reopens a
+//! connection. [`QuicTransportImpl::evict`] removes a specific peer's entry on demand (wiring it
+//! to an application-layer verification failure is a later task).
 //!
 //! # Delivery claim
 //!
@@ -24,6 +35,7 @@
 //! |---|---|---|
 //! | [`LOCAL_PORT_KEY`] (`local_port`) | `0` | the port `start` listens on; `0` lets the OS choose |
 //! | `bind_scope` | `loopback` | which interfaces the endpoint binds ([`crate::network_scope::BindScope`]) |
+//! | [`IDLE_TIMEOUT_MS_KEY`] (`idle_timeout_ms`) | [`DEFAULT_IDLE_TIMEOUT_MS`] (300000) | how long a pooled connection may go unused before the idle sweep evicts it |
 
 use super::abstraction::{
     self, ConnectivityResult, DeliveryConfirmation, DeliveryReceipt, IncomingMessage, RawInbox,
@@ -36,9 +48,39 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 pub const LOCAL_PORT_KEY: &str = "local_port";
+
+/// The config key for how long, in milliseconds, a pooled connection may go unused before the
+/// idle sweep evicts it. See the module documentation.
+pub const IDLE_TIMEOUT_MS_KEY: &str = "idle_timeout_ms";
+
+/// The default for [`IDLE_TIMEOUT_MS_KEY`]: 5 minutes.
+pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 300_000;
+
+/// Parse `idle_timeout_ms` the way `websocket_unified.rs`'s `Limits::from_config` parses its own
+/// millisecond keys: a positive integer, or the default when absent; anything else is refused
+/// rather than silently replaced.
+fn parse_idle_timeout_ms(config: &HashMap<String, String>) -> Result<u64> {
+    match config.get(IDLE_TIMEOUT_MS_KEY) {
+        None => Ok(DEFAULT_IDLE_TIMEOUT_MS),
+        Some(value) => match value.trim().parse::<u64>() {
+            Ok(0) => Err(SynapseError::Config(format!(
+                "{IDLE_TIMEOUT_MS_KEY} must be a positive integer, got 0"
+            ))),
+            Ok(ms) => Ok(ms),
+            Err(e) => Err(SynapseError::Config(format!(
+                "{IDLE_TIMEOUT_MS_KEY} must be a positive integer, got {value:?}: {e}"
+            ))),
+        },
+    }
+}
+
+/// A pooled connection together with when it was last used, keyed by peer address. The last-use
+/// `Instant` is refreshed on every hit or insert and read by the idle sweep spawned in `start`.
+type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, (Arc<quinn::Connection>, Instant)>>>;
 
 pub struct QuicTransportImpl {
     endpoint: quinn::Endpoint,
@@ -48,6 +90,10 @@ pub struct QuicTransportImpl {
     bind_scope: crate::network_scope::BindScope,
     received: Arc<Mutex<Vec<IncomingMessage>>>,
     is_running: Arc<Mutex<bool>>,
+    /// One connection per peer, reused across sends; see the module documentation.
+    pool: ConnectionPool,
+    /// How long a pooled connection may go unused before the idle sweep evicts it.
+    idle_timeout: Duration,
 }
 
 impl QuicTransportImpl {
@@ -85,12 +131,16 @@ impl QuicTransportImpl {
         ));
         endpoint.set_default_client_config(client_quic_config);
 
+        let idle_timeout = Duration::from_millis(parse_idle_timeout_ms(config)?);
+
         Ok(Self {
             endpoint,
             local_port,
             bind_scope,
             received: Arc::new(Mutex::new(Vec::new())),
             is_running: Arc::new(Mutex::new(false)),
+            pool: Arc::new(Mutex::new(HashMap::new())),
+            idle_timeout,
         })
     }
 
@@ -98,6 +148,61 @@ impl QuicTransportImpl {
         self.endpoint.local_addr().map_err(|e| {
             SynapseError::TransportError(format!("QUIC endpoint has no local address: {e}"))
         })
+    }
+
+    /// Reuse a pooled connection to `addr`, or establish one. The pool's lock is never held
+    /// across the handshake `await` (spec §3, condition 2): a miss releases the lock, connects,
+    /// then re-acquires it to insert -- double-checking for a connection a racing sender
+    /// established first, keeping that one and dropping the one just established, rather than
+    /// overwrite it. Every return path refreshes the entry's last-use `Instant`, so the idle
+    /// sweep (spawned in `start`) only evicts a connection nothing has used recently.
+    async fn pooled_connection(&self, addr: SocketAddr) -> Result<Arc<quinn::Connection>> {
+        {
+            let mut pool = self.pool.lock().await;
+            if let Some((conn, last_used)) = pool.get_mut(&addr)
+                && conn.close_reason().is_none()
+            {
+                *last_used = Instant::now();
+                return Ok(Arc::clone(conn));
+            }
+        }
+        let connecting = self
+            .endpoint
+            .connect(addr, "synapse-quic")
+            .map_err(|e| SynapseError::TransportError(format!("QUIC connect setup failed: {e}")))?;
+        let fresh =
+            Arc::new(connecting.await.map_err(|e| {
+                SynapseError::TransportError(format!("QUIC handshake failed: {e}"))
+            })?);
+        let mut pool = self.pool.lock().await;
+        if let Some((existing, last_used)) = pool.get_mut(&addr)
+            && existing.close_reason().is_none()
+        {
+            // A racing sender inserted a connection to the same peer while we were connecting:
+            // keep it, and let `fresh` be dropped (which closes it cleanly).
+            *last_used = Instant::now();
+            return Ok(Arc::clone(existing));
+        }
+        pool.insert(addr, (Arc::clone(&fresh), Instant::now()));
+        Ok(fresh)
+    }
+
+    /// Evict a pooled connection to `addr` -- for when a message received over it fails
+    /// application-layer verification, so a connection that has started reaching the wrong peer
+    /// (NAT rebinding, address reuse) is not silently reused again. Wiring this to the manager's
+    /// verification path is a later task; this task provides the method and tests it directly.
+    pub async fn evict(&self, addr: SocketAddr) {
+        if let Some((conn, _)) = self.pool.lock().await.remove(&addr) {
+            conn.close(0u32.into(), b"evicted: verification failure");
+        }
+    }
+
+    /// How many connections the pool currently holds. Exposed as a plain `pub` method rather than
+    /// `#[cfg(test)]`-gated: the integration tests in `tests/transport_repairs.rs` link against
+    /// this crate's normal build, which does not include `cfg(test)` items, so a gated accessor
+    /// would not exist in the binary they run against.
+    pub async fn pool_size(&self) -> usize {
+        self.pool.lock().await.len()
     }
 }
 
@@ -107,6 +212,7 @@ pub fn validate_config(config: &HashMap<String, String>) -> Result<()> {
     {
         return Err(SynapseError::Config("Invalid port number".to_string()));
     }
+    parse_idle_timeout_ms(config)?;
     Ok(())
 }
 
@@ -156,13 +262,7 @@ impl Transport for QuicTransportImpl {
         let start = std::time::Instant::now();
         let addr = parse_target(target)?;
 
-        let connecting = self
-            .endpoint
-            .connect(addr, "synapse-quic")
-            .map_err(|e| SynapseError::TransportError(format!("QUIC connect setup failed: {e}")))?;
-        let connection = connecting
-            .await
-            .map_err(|e| SynapseError::TransportError(format!("QUIC handshake failed: {e}")))?;
+        let connection = self.pooled_connection(addr).await?;
 
         let (mut send, _recv) = connection
             .open_bi()
@@ -177,12 +277,16 @@ impl Transport for QuicTransportImpl {
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream write failed: {e}")))?;
         send.finish()
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream finish failed: {e}")))?;
-        // Wait for the peer to acknowledge receipt of the whole stream before dropping
-        // `connection`: dropping the last handle to a `quinn::Connection` that isn't already
-        // closing sends an abrupt CONNECTION_CLOSE (see `quinn`'s `ConnectionRef::drop` ->
-        // `implicit_close`), which can race the still-in-flight STREAM/FIN frame and reset the
-        // stream before the receiver finishes reading it -- an intermittent, silent message loss
-        // that "the transport sends" would otherwise never reveal.
+        // Wait for the peer to acknowledge receipt of the whole stream before returning: without
+        // this, a caller could observe `Sent` before the peer's application ever saw the bytes.
+        // It also still guards the connection-drop race this was originally added for (dropping
+        // the last handle to a `quinn::Connection` that isn't already closing sends an abrupt
+        // CONNECTION_CLOSE -- see `quinn`'s `ConnectionRef::drop` -> `implicit_close` -- which can
+        // race the still-in-flight STREAM/FIN frame and reset the stream before the receiver
+        // finishes reading it): now that `connection` comes from the pool, the last handle is
+        // usually held there rather than dropped here, but a connection that lost the
+        // insert-race in `pooled_connection` (or one evicted concurrently) can still be the last
+        // handle at this point.
         //
         // Bounded, not an open-ended hang: `stopped()` resolves once the connection is closed for
         // any reason, including quinn's default `max_idle_timeout` (30s) if the peer never
@@ -253,39 +357,78 @@ impl Transport for QuicTransportImpl {
                         }
                     };
                     let source = connection.remote_address().to_string();
-                    let (_send, mut recv) = match connection.accept_bi().await {
-                        Ok(streams) => streams,
-                        Err(e) => {
-                            tracing::warn!("QUIC accept_bi failed from {source}: {e}");
-                            return;
-                        }
-                    };
-                    // 8 MiB is a placeholder, not a considered limit -- Task 3 replaces this with
-                    // the real size-limit design (see `stop()`'s accept-loop shutdown gap above
-                    // for the same "known Task 1 gap, noted for later" treatment).
-                    let data = match recv.read_to_end(8 * 1024 * 1024).await {
-                        Ok(d) => d,
-                        Err(e) => {
-                            tracing::warn!("QUIC stream read failed from {source}: {e}");
-                            return;
-                        }
-                    };
-                    let message: SecureMessage = match serde_json::from_slice(&data) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Dropped QUIC message from {source}: {} bytes did not parse as a SecureMessage: {e}",
-                                data.len()
-                            );
-                            return;
-                        }
-                    };
-                    let incoming_message =
-                        IncomingMessage::new(message, TransportType::Quic, source);
-                    received.lock().await.push(incoming_message);
+                    // Keep accepting streams for as long as the peer keeps the connection open
+                    // (Task 2: the sender pools and reuses one connection for many messages, so
+                    // the receiver must accept more than the first stream on it). Each stream is
+                    // handled on its own task so concurrent sends on the same connection don't
+                    // wait on each other (multiplexing). `accept_bi` returning `Err` means the
+                    // connection closed -- gracefully (idle timeout, `stop()`, or the peer's own
+                    // pool evicting it) or otherwise -- either way there is nothing left to accept.
+                    loop {
+                        let (_send, mut recv) = match connection.accept_bi().await {
+                            Ok(streams) => streams,
+                            Err(e) => {
+                                tracing::debug!("QUIC connection from {source} closed: {e}");
+                                break;
+                            }
+                        };
+                        let received = Arc::clone(&received);
+                        let source = source.clone();
+                        tokio::spawn(async move {
+                            // 8 MiB is a placeholder, not a considered limit -- Task 3 replaces
+                            // this with the real size-limit design (see `stop()`'s accept-loop
+                            // shutdown gap above for the same "known Task 1 gap, noted for later"
+                            // treatment).
+                            let data = match recv.read_to_end(8 * 1024 * 1024).await {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    tracing::warn!("QUIC stream read failed from {source}: {e}");
+                                    return;
+                                }
+                            };
+                            let message: SecureMessage = match serde_json::from_slice(&data) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Dropped QUIC message from {source}: {} bytes did not parse as a SecureMessage: {e}",
+                                        data.len()
+                                    );
+                                    return;
+                                }
+                            };
+                            let incoming_message =
+                                IncomingMessage::new(message, TransportType::Quic, source);
+                            received.lock().await.push(incoming_message);
+                        });
+                    }
                 });
             }
         });
+
+        // Idle-timeout eviction sweep: a connection nothing has used in `idle_timeout` is closed
+        // and dropped from the pool; the next send to that peer transparently reopens one.
+        // Woken at twice the idle rate so an entry is evicted within `idle_timeout` of going
+        // idle, not up to `idle_timeout` late.
+        {
+            let pool = Arc::clone(&self.pool);
+            let idle_timeout = self.idle_timeout;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(idle_timeout / 2);
+                loop {
+                    interval.tick().await;
+                    let now = Instant::now();
+                    let mut pool = pool.lock().await;
+                    pool.retain(|_, (conn, last_used)| {
+                        let keep = now.duration_since(*last_used) < idle_timeout
+                            && conn.close_reason().is_none();
+                        if !keep {
+                            conn.close(0u32.into(), b"idle timeout");
+                        }
+                        keep
+                    });
+                }
+            });
+        }
 
         *running = true;
         Ok(())
@@ -351,6 +494,10 @@ impl TransportFactory for QuicTransportFactory {
     fn default_config(&self) -> HashMap<String, String> {
         let mut cfg = HashMap::new();
         cfg.insert(LOCAL_PORT_KEY.to_string(), "0".to_string());
+        cfg.insert(
+            IDLE_TIMEOUT_MS_KEY.to_string(),
+            DEFAULT_IDLE_TIMEOUT_MS.to_string(),
+        );
         cfg
     }
 
