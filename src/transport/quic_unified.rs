@@ -82,8 +82,8 @@ use crate::types::SecureMessage;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
@@ -232,12 +232,11 @@ impl QuicTransportImpl {
         ));
 
         let bind_addr = bind_scope.listen_addr(local_port);
-        let mut endpoint =
-            quinn::Endpoint::server(server_quic_config, bind_addr).map_err(|e| {
-                SynapseError::TransportError(format!(
-                    "Failed to bind QUIC endpoint to {bind_addr}: {e}"
-                ))
-            })?;
+        let mut endpoint = quinn::Endpoint::server(server_quic_config, bind_addr).map_err(|e| {
+            SynapseError::TransportError(format!(
+                "Failed to bind QUIC endpoint to {bind_addr}: {e}"
+            ))
+        })?;
 
         let client_tls = super::quic_tls::client_config()?; // Arc<rustls::ClientConfig>
         let client_quic_config = quinn::ClientConfig::new(Arc::new(
@@ -252,10 +251,16 @@ impl QuicTransportImpl {
             parse_positive(config, MAX_MESSAGE_SIZE_KEY, DEFAULT_MAX_MESSAGE_SIZE)?;
         let max_queued_bytes =
             parse_positive(config, MAX_QUEUED_BYTES_KEY, DEFAULT_MAX_QUEUED_BYTES)?;
-        let first_byte_timeout_ms =
-            parse_positive(config, FIRST_BYTE_TIMEOUT_MS_KEY, DEFAULT_FIRST_BYTE_TIMEOUT_MS)?;
-        let stream_idle_timeout_ms =
-            parse_positive(config, STREAM_IDLE_TIMEOUT_MS_KEY, DEFAULT_STREAM_IDLE_TIMEOUT_MS)?;
+        let first_byte_timeout_ms = parse_positive(
+            config,
+            FIRST_BYTE_TIMEOUT_MS_KEY,
+            DEFAULT_FIRST_BYTE_TIMEOUT_MS,
+        )?;
+        let stream_idle_timeout_ms = parse_positive(
+            config,
+            STREAM_IDLE_TIMEOUT_MS_KEY,
+            DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+        )?;
         let stream_read_timeout =
             Duration::from_millis((first_byte_timeout_ms + stream_idle_timeout_ms) as u64);
 
@@ -368,8 +373,16 @@ pub fn validate_config(config: &HashMap<String, String>) -> Result<()> {
             u32::MAX
         )));
     }
-    parse_positive(config, FIRST_BYTE_TIMEOUT_MS_KEY, DEFAULT_FIRST_BYTE_TIMEOUT_MS)?;
-    parse_positive(config, STREAM_IDLE_TIMEOUT_MS_KEY, DEFAULT_STREAM_IDLE_TIMEOUT_MS)?;
+    parse_positive(
+        config,
+        FIRST_BYTE_TIMEOUT_MS_KEY,
+        DEFAULT_FIRST_BYTE_TIMEOUT_MS,
+    )?;
+    parse_positive(
+        config,
+        STREAM_IDLE_TIMEOUT_MS_KEY,
+        DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    )?;
     Ok(())
 }
 
@@ -440,12 +453,9 @@ impl Transport for QuicTransportImpl {
             )));
         }
 
-        let connection = self
-            .pooled_connection(addr)
-            .await
-            .inspect_err(|_| {
-                self.send_failures.fetch_add(1, Ordering::Relaxed);
-            })?;
+        let connection = self.pooled_connection(addr).await.inspect_err(|_| {
+            self.send_failures.fetch_add(1, Ordering::Relaxed);
+        })?;
 
         let (mut send, _recv) = connection
             .open_bi()
@@ -502,7 +512,8 @@ impl Transport for QuicTransportImpl {
         }
 
         self.messages_sent.fetch_add(1, Ordering::Relaxed);
-        self.bytes_sent.fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
 
         Ok(DeliveryReceipt {
             message_id: message.message_id.0.to_string(),

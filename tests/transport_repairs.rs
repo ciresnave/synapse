@@ -2987,10 +2987,7 @@ async fn quic_delivers_a_message_at_or_under_its_limit() {
 
     let received = poll_bob(&pair, 1, Duration::from_secs(3)).await;
     assert_eq!(received.len(), 1, "the message under the limit must arrive");
-    assert_eq!(
-        received[0].incoming.message.message_id.0,
-        fits.message_id.0
-    );
+    assert_eq!(received[0].incoming.message.message_id.0, fits.message_id.0);
 }
 
 /// Bad `max_message_size`, `max_queued_bytes`, and `idle_timeout_ms` values are each refused by
@@ -3012,8 +3009,14 @@ async fn quic_refuses_an_invalid_config() {
         "max_queued_bytes",
     );
     quic_refuses(one_key("idle_timeout_ms", "0"), "idle_timeout_ms");
-    quic_refuses(one_key("first_byte_timeout_ms", "0"), "first_byte_timeout_ms");
-    quic_refuses(one_key("stream_idle_timeout_ms", "0"), "stream_idle_timeout_ms");
+    quic_refuses(
+        one_key("first_byte_timeout_ms", "0"),
+        "first_byte_timeout_ms",
+    );
+    quic_refuses(
+        one_key("stream_idle_timeout_ms", "0"),
+        "stream_idle_timeout_ms",
+    );
 }
 
 /// A stream that stalls mid-message must not be able to hold resources indefinitely (spec §6):
@@ -3069,17 +3072,20 @@ async fn quic_times_out_a_stream_that_stalls_mid_message() {
         .expect("connect setup")
         .await
         .expect("handshake with Bob");
-    let (mut send, _recv) = connection.open_bi().await.expect("open a bidirectional stream");
+    let (mut send, _recv) = connection
+        .open_bi()
+        .await
+        .expect("open a bidirectional stream");
     // Write a few bytes -- enough to put a STREAM frame on the wire so Bob's `accept_bi` actually
     // sees this stream -- then deliberately never write more, and never `finish()`: this is the
     // stall-mid-message case under test.
-    send.write_all(b"{\"incomplete\"").await.expect("partial write");
+    send.write_all(b"{\"incomplete\"")
+        .await
+        .expect("partial write");
 
     let stopped = tokio::time::timeout(Duration::from_secs(5), send.stopped())
         .await
-        .expect(
-            "Bob must time out and drop the silent stream well within 5s, not hold it forever",
-        );
+        .expect("Bob must time out and drop the silent stream well within 5s, not hold it forever");
     assert!(
         matches!(stopped, Ok(Some(_))),
         "Bob must STOP_SENDING the silent stream once first_byte_timeout_ms + \
