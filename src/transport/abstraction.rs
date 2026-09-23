@@ -609,28 +609,26 @@ impl TransportCapabilities {
         }
     }
 
-    /// QUIC transport capabilities
+    /// QUIC transport capabilities, as actually implemented (`quic_unified.rs`) -- not what QUIC
+    /// in general can do. `zero_rtt` and `connection_migration` are deliberately absent: this
+    /// implementation disables 0-RTT (spec §5) and does not implement migration.
     pub fn quic() -> Self {
         Self {
-            max_message_size: 1024 * 1024 * 1024, // 1GB theoretical
+            max_message_size: 1024 * 1024, // the configured default; see quic_unified::DEFAULT_MAX_MESSAGE_SIZE
             reliable: true,
             real_time: true,
             broadcast: false,
             bidirectional: true,
-            encrypted: true, // Built-in TLS 1.3
+            encrypted: true,
             network_spanning: true,
             supported_urgencies: vec![
                 MessageUrgency::Critical,
                 MessageUrgency::RealTime,
                 MessageUrgency::Interactive,
-                MessageUrgency::Background,
             ],
             features: vec![
                 "multiplexed_streams".to_string(),
-                "zero_rtt".to_string(),
-                "connection_migration".to_string(),
-                "modern_crypto".to_string(),
-                "congestion_control".to_string(),
+                "connection_pooling".to_string(),
             ],
         }
     }

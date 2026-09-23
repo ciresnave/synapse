@@ -3102,3 +3102,149 @@ async fn quic_times_out_a_stream_that_stalls_mid_message() {
         "a normal message must still arrive after a silent peer"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// QUIC (plan Task 4): honest capabilities, a real connectivity probe, and real metrics.
+// ---------------------------------------------------------------------------------------------
+
+/// Connected only after a real handshake: against a live peer the probe actually connects (or
+/// reuses a pooled connection) and reports a measured round trip; against a port nothing listens
+/// on, `test_connectivity` must not just parse the address and call it reachable -- Task 1's
+/// version did exactly that, so `dead.connected` was `true` when it should be `false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_reports_connectivity_only_after_a_real_handshake() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let transport = synapse::transport::QuicTransportFactory
+        .create_transport(&HashMap::new())
+        .await
+        .expect("construct");
+    let live = transport
+        .test_connectivity(&pair.bob_target())
+        .await
+        .expect("connectivity");
+    assert!(live.connected, "{live:?}");
+    assert!(live.rtt.is_some());
+
+    let nobody =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{}", free_port()));
+    let dead = transport
+        .test_connectivity(&nobody)
+        .await
+        .expect("connectivity");
+    assert!(!dead.connected, "{dead:?}");
+    assert_eq!(dead.rtt, None);
+}
+
+/// `estimate_metrics` must reuse the same real probe: available with a measured latency and full
+/// confidence against a live peer, unavailable with the probe's timeout as its latency and low
+/// confidence against a dead one -- not the Task 1 placeholder that reported `available: true` and
+/// a hardcoded 20ms for every target regardless of whether anything was listening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_estimate_metrics_reflects_a_real_probe() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let transport = synapse::transport::QuicTransportFactory
+        .create_transport(&HashMap::new())
+        .await
+        .expect("construct");
+
+    let live_estimate = transport
+        .estimate_metrics(&pair.bob_target())
+        .await
+        .expect("estimate");
+    assert!(live_estimate.available, "{live_estimate:?}");
+    assert!(live_estimate.confidence > 0.9, "{live_estimate:?}");
+    assert!(
+        live_estimate.latency < Duration::from_millis(2000),
+        "{live_estimate:?}"
+    );
+
+    let nobody =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{}", free_port()));
+    let dead_estimate = transport.estimate_metrics(&nobody).await.expect("estimate");
+    assert!(!dead_estimate.available, "{dead_estimate:?}");
+    assert!(dead_estimate.confidence < 0.5, "{dead_estimate:?}");
+    assert_eq!(dead_estimate.latency, Duration::from_millis(2000));
+}
+
+/// `capabilities()` must report the configured `max_message_size` (not Task 1's hardcoded 1 MiB,
+/// nor `TransportCapabilities::quic()`'s own pre-Task-4 "1GB theoretical" figure), and must not
+/// claim `zero_rtt` or `connection_migration` -- features this implementation does not provide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_capabilities_report_the_configured_size_and_no_unimplemented_features() {
+    let config = HashMap::from([("max_message_size".to_string(), "12345".to_string())]);
+    let transport = synapse::transport::QuicTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("construct");
+    let caps = transport.capabilities();
+    assert_eq!(caps.max_message_size, 12345);
+    assert!(!caps.features.contains(&"zero_rtt".to_string()));
+    assert!(!caps.features.contains(&"connection_migration".to_string()));
+}
+
+/// `metrics()` must count real sends and receives, not return `TransportMetrics::default()` (which
+/// always reported zero messages and perfect reliability regardless of what actually happened).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_metrics_counts_real_sends_and_receives() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let payload = b"metrics matter";
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &pair.signed(payload))
+        .await
+        .expect("send");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    assert_eq!(poll_bob(&pair, 1, Duration::from_secs(3)).await.len(), 1);
+
+    // `alice_node`/`bob_node` wrap the transport in a `TransportManager`, which does not expose
+    // the underlying transport's own `metrics()` (Task 4 only touches the transport's, not the
+    // manager's), so drive raw `QuicTransportImpl`s directly the same way the pooling tests above
+    // do, on their own pair of ports.
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender");
+    let bob_port = free_port();
+    let bob_quic = QuicTransportImpl::new(&one_key("local_port", &bob_port.to_string()))
+        .await
+        .expect("construct a raw QUIC receiver");
+    bob_quic.start().await.expect("start bob");
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{bob_port}"));
+    let message = pair.signed(b"raw metrics check");
+    alice_quic
+        .send_message(&target, &message)
+        .await
+        .expect("raw send");
+
+    let alice_metrics = alice_quic.metrics().await;
+    assert_eq!(alice_metrics.transport_type, TransportType::Quic);
+    assert_eq!(alice_metrics.messages_sent, 1);
+    assert!(alice_metrics.bytes_sent > 0);
+    assert_eq!(alice_metrics.send_failures, 0);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let bob_metrics = bob_quic.metrics().await;
+    assert_eq!(bob_metrics.messages_received, 1);
+    assert!(bob_metrics.bytes_received > 0);
+}

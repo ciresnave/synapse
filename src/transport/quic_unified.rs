@@ -82,6 +82,7 @@ use crate::types::SecureMessage;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
@@ -175,9 +176,9 @@ struct Queued {
 
 pub struct QuicTransportImpl {
     endpoint: quinn::Endpoint,
-    #[allow(dead_code)] // Retained for a future capabilities/metrics pass (Task 4).
+    #[allow(dead_code)] // Neither capabilities() nor metrics() (Task 4) needed this after all.
     local_port: u16,
-    #[allow(dead_code)] // Retained for a future capabilities/metrics pass (Task 4).
+    #[allow(dead_code)] // Neither capabilities() nor metrics() (Task 4) needed this after all.
     bind_scope: crate::network_scope::BindScope,
     received: Arc<Mutex<Vec<Queued>>>,
     is_running: Arc<Mutex<bool>>,
@@ -195,6 +196,20 @@ pub struct QuicTransportImpl {
     /// `first_byte_timeout_ms` + `stream_idle_timeout_ms`, bounding one stream's whole
     /// `read_to_end` call. See "Per-stream read timeout" in the module documentation.
     stream_read_timeout: Duration,
+    /// Real counters backing `metrics()` (Task 4). Plain atomics, not a lock, because
+    /// `send_message` and the accept loop's per-stream tasks increment these independently and
+    /// concurrently, and `metrics()` only ever needs a snapshot sum, never a consistent multi-field
+    /// read -- the same reason `websocket_unified.rs` keeps `active_connections` as an `AtomicU64`
+    /// alongside its lock-guarded `TransportMetrics`.
+    messages_sent: AtomicU64,
+    bytes_sent: AtomicU64,
+    send_failures: AtomicU64,
+    /// Shared with the accept loop's per-stream tasks (spawned in `start`), which is why these
+    /// three are `Arc`-wrapped while the send-side counters above are not: `send_message` runs on
+    /// `&self` and never needs to move its counters into a spawned task.
+    messages_received: Arc<AtomicU64>,
+    bytes_received: Arc<AtomicU64>,
+    receive_failures: Arc<AtomicU64>,
 }
 
 impl QuicTransportImpl {
@@ -255,6 +270,12 @@ impl QuicTransportImpl {
             max_message_size,
             queue_budget: Arc::new(Semaphore::new(max_queued_bytes)),
             stream_read_timeout,
+            messages_sent: AtomicU64::new(0),
+            bytes_sent: AtomicU64::new(0),
+            send_failures: AtomicU64::new(0),
+            messages_received: Arc::new(AtomicU64::new(0)),
+            bytes_received: Arc::new(AtomicU64::new(0)),
+            receive_failures: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -359,17 +380,9 @@ impl Transport for QuicTransportImpl {
     }
 
     fn capabilities(&self) -> TransportCapabilities {
-        // Task 4 replaces this with measured figures. Task 1 states what is true today.
         TransportCapabilities {
-            max_message_size: 1024 * 1024,
-            reliable: true,
-            real_time: true,
-            broadcast: false,
-            bidirectional: true,
-            encrypted: true,
-            network_spanning: true,
-            supported_urgencies: vec![abstraction::MessageUrgency::RealTime],
-            features: vec!["one_stream_per_message".to_string()],
+            max_message_size: self.max_message_size,
+            ..TransportCapabilities::quic()
         }
     }
 
@@ -378,16 +391,30 @@ impl Transport for QuicTransportImpl {
     }
 
     async fn estimate_metrics(&self, target: &TransportTarget) -> Result<TransportEstimate> {
-        let _addr = parse_target(target)?;
-        // Task 4 replaces this with a real probe.
-        Ok(TransportEstimate {
-            latency: std::time::Duration::from_millis(20),
-            reliability: 0.9,
-            bandwidth: 1,
-            cost: 1.0,
-            available: true,
-            confidence: 0.5,
-        })
+        // A real connectivity probe, bounded so a target that never answers cannot hang this
+        // call: `test_connectivity` itself only returns once `pooled_connection` either succeeds
+        // or fails, and a QUIC handshake to an address nothing listens on can otherwise ride
+        // quinn's own (much longer) idle/retry timers.
+        let timeout = Duration::from_millis(2000);
+        let live = tokio::time::timeout(timeout, self.test_connectivity(target)).await;
+        match live {
+            Ok(Ok(result)) if result.connected => Ok(TransportEstimate {
+                latency: result.rtt.unwrap_or(timeout),
+                reliability: 0.9,
+                bandwidth: 1,
+                cost: 1.0,
+                available: true,
+                confidence: 1.0,
+            }),
+            _ => Ok(TransportEstimate {
+                latency: timeout,
+                reliability: 0.0,
+                bandwidth: 0,
+                cost: 1.0,
+                available: false,
+                confidence: 0.3,
+            }),
+        }
     }
 
     async fn send_message(
@@ -405,6 +432,7 @@ impl Transport for QuicTransportImpl {
             SynapseError::TransportError(format!("Failed to serialize message: {e}"))
         })?;
         if data.len() > self.max_message_size {
+            self.send_failures.fetch_add(1, Ordering::Relaxed);
             return Err(SynapseError::MessageRefused(format!(
                 "message is {} bytes, over the max_message_size limit of {} bytes",
                 data.len(),
@@ -412,17 +440,31 @@ impl Transport for QuicTransportImpl {
             )));
         }
 
-        let connection = self.pooled_connection(addr).await?;
+        let connection = self
+            .pooled_connection(addr)
+            .await
+            .inspect_err(|_| {
+                self.send_failures.fetch_add(1, Ordering::Relaxed);
+            })?;
 
         let (mut send, _recv) = connection
             .open_bi()
             .await
+            .inspect_err(|_| {
+                self.send_failures.fetch_add(1, Ordering::Relaxed);
+            })
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream open failed: {e}")))?;
 
         send.write_all(&data)
             .await
+            .inspect_err(|_| {
+                self.send_failures.fetch_add(1, Ordering::Relaxed);
+            })
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream write failed: {e}")))?;
         send.finish()
+            .inspect_err(|_| {
+                self.send_failures.fetch_add(1, Ordering::Relaxed);
+            })
             .map_err(|e| SynapseError::TransportError(format!("QUIC stream finish failed: {e}")))?;
         // Wait for the peer to acknowledge receipt of the whole stream before returning: without
         // this, a caller could observe `Sent` before the peer's application ever saw the bytes.
@@ -446,16 +488,21 @@ impl Transport for QuicTransportImpl {
                 // The peer sent STOP_SENDING: it explicitly did not accept the stream. This must
                 // not be reported as `Sent` -- that would be exactly the silent-loss-on-send this
                 // wait was added to close.
+                self.send_failures.fetch_add(1, Ordering::Relaxed);
                 return Err(SynapseError::TransportError(format!(
                     "QUIC peer rejected the stream (STOP_SENDING, code {error_code})"
                 )));
             }
             Err(e) => {
+                self.send_failures.fetch_add(1, Ordering::Relaxed);
                 return Err(SynapseError::TransportError(format!(
                     "QUIC stream was not acknowledged by the peer: {e}"
                 )));
             }
         }
+
+        self.messages_sent.fetch_add(1, Ordering::Relaxed);
+        self.bytes_sent.fetch_add(data.len() as u64, Ordering::Relaxed);
 
         Ok(DeliveryReceipt {
             message_id: message.message_id.0.to_string(),
@@ -468,18 +515,42 @@ impl Transport for QuicTransportImpl {
     }
 
     async fn test_connectivity(&self, target: &TransportTarget) -> Result<ConnectivityResult> {
-        let can_reach = self.can_reach(target).await;
-        Ok(ConnectivityResult {
-            connected: can_reach,
-            rtt: None,
-            error: if can_reach {
-                None
-            } else {
-                Some("invalid QUIC target".to_string())
-            },
-            quality: if can_reach { 0.5 } else { 0.0 },
-            details: HashMap::new(),
-        })
+        let addr = match parse_target(target) {
+            Ok(addr) => addr,
+            Err(e) => {
+                return Ok(ConnectivityResult {
+                    connected: false,
+                    rtt: None,
+                    error: Some(e.to_string()),
+                    quality: 0.0,
+                    details: HashMap::new(),
+                });
+            }
+        };
+        let start = Instant::now();
+        // A real probe: attempt/reuse a pooled connection (Task 4). A malformed address never
+        // gets here (handled above); an address nothing answers fails the handshake in
+        // `pooled_connection`, which is the only way `connected` becomes `false` from here on.
+        match self.pooled_connection(addr).await {
+            Ok(conn) => Ok(ConnectivityResult {
+                connected: true,
+                rtt: Some(start.elapsed()),
+                error: None,
+                quality: 0.9,
+                details: {
+                    let mut d = HashMap::new();
+                    d.insert("rtt_ms".to_string(), conn.rtt().as_millis().to_string());
+                    d
+                },
+            }),
+            Err(e) => Ok(ConnectivityResult {
+                connected: false,
+                rtt: None,
+                error: Some(e.to_string()),
+                quality: 0.0,
+                details: HashMap::new(),
+            }),
+        }
     }
 
     async fn start(&self) -> Result<()> {
@@ -495,15 +566,22 @@ impl Transport for QuicTransportImpl {
         let max_message_size = self.max_message_size;
         let queue_budget = Arc::clone(&self.queue_budget);
         let stream_read_timeout = self.stream_read_timeout;
+        let messages_received = Arc::clone(&self.messages_received);
+        let bytes_received = Arc::clone(&self.bytes_received);
+        let receive_failures = Arc::clone(&self.receive_failures);
         tokio::spawn(async move {
             while let Some(incoming) = endpoint.accept().await {
                 let received = Arc::clone(&received);
                 let queue_budget = Arc::clone(&queue_budget);
+                let messages_received = Arc::clone(&messages_received);
+                let bytes_received = Arc::clone(&bytes_received);
+                let receive_failures = Arc::clone(&receive_failures);
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::warn!("QUIC handshake failed: {e}");
+                            receive_failures.fetch_add(1, Ordering::Relaxed);
                             return;
                         }
                     };
@@ -525,11 +603,14 @@ impl Transport for QuicTransportImpl {
                         };
                         let received = Arc::clone(&received);
                         let queue_budget = Arc::clone(&queue_budget);
+                        let messages_received = Arc::clone(&messages_received);
+                        let bytes_received = Arc::clone(&bytes_received);
+                        let receive_failures = Arc::clone(&receive_failures);
                         let source = source.clone();
                         tokio::spawn(async move {
                             // Bounded by the configured `max_message_size` (Task 3), not a
-                            // hardcoded figure. `capabilities()` still reports a fixed figure
-                            // until Task 4 makes it honest.
+                            // hardcoded figure; `capabilities()` reports that same configured
+                            // value (Task 4).
                             //
                             // The whole call is also bounded by `stream_read_timeout`
                             // (`first_byte_timeout_ms` + `stream_idle_timeout_ms`), so a stream
@@ -549,6 +630,7 @@ impl Transport for QuicTransportImpl {
                                 Ok(Ok(d)) => d,
                                 Ok(Err(e)) => {
                                     tracing::warn!("QUIC stream read failed from {source}: {e}");
+                                    receive_failures.fetch_add(1, Ordering::Relaxed);
                                     return;
                                 }
                                 Err(_) => {
@@ -556,6 +638,7 @@ impl Transport for QuicTransportImpl {
                                         "Dropped QUIC stream from {source}: no complete message within {stream_read_timeout:?} \
                                          (first_byte_timeout_ms + stream_idle_timeout_ms)"
                                     );
+                                    receive_failures.fetch_add(1, Ordering::Relaxed);
                                     return;
                                 }
                             };
@@ -572,12 +655,14 @@ impl Transport for QuicTransportImpl {
                                     "Dropped QUIC message from {source}: {} bytes is over the queue budget's u32 limit",
                                     data.len()
                                 );
+                                receive_failures.fetch_add(1, Ordering::Relaxed);
                                 return;
                             };
                             let Ok(budget) = queue_budget.acquire_many_owned(wanted).await else {
                                 tracing::error!(
                                     "Dropped QUIC message from {source}: the receive queue was closed"
                                 );
+                                receive_failures.fetch_add(1, Ordering::Relaxed);
                                 return;
                             };
 
@@ -588,15 +673,19 @@ impl Transport for QuicTransportImpl {
                                         "Dropped QUIC message from {source}: {} bytes did not parse as a SecureMessage: {e}",
                                         data.len()
                                     );
+                                    receive_failures.fetch_add(1, Ordering::Relaxed);
                                     return;
                                 }
                             };
+                            let data_len = data.len() as u64;
                             let incoming_message =
                                 IncomingMessage::new(message, TransportType::Quic, source);
                             received.lock().await.push(Queued {
                                 message: incoming_message,
                                 _budget: budget,
                             });
+                            messages_received.fetch_add(1, Ordering::Relaxed);
+                            bytes_received.fetch_add(data_len, Ordering::Relaxed);
                         });
                     }
                 });
@@ -656,8 +745,27 @@ impl Transport for QuicTransportImpl {
     }
 
     async fn metrics(&self) -> TransportMetrics {
+        let messages_sent = self.messages_sent.load(Ordering::Relaxed);
+        let send_failures = self.send_failures.load(Ordering::Relaxed);
+        let attempts = messages_sent + send_failures;
+        // Mirrors `websocket_unified.rs`'s `metrics()`: reliability is the fraction of attempted
+        // sends that succeeded, and an untried transport claims perfect reliability rather than
+        // zero (no evidence either way yet).
+        let reliability_score = if attempts == 0 {
+            1.0
+        } else {
+            messages_sent as f64 / attempts as f64
+        };
         TransportMetrics {
             transport_type: TransportType::Quic,
+            messages_sent,
+            messages_received: self.messages_received.load(Ordering::Relaxed),
+            send_failures,
+            receive_failures: self.receive_failures.load(Ordering::Relaxed),
+            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            bytes_received: self.bytes_received.load(Ordering::Relaxed),
+            reliability_score,
+            active_connections: self.pool_size().await as u32,
             ..Default::default()
         }
     }
