@@ -183,11 +183,28 @@ impl Transport for QuicTransportImpl {
         // `implicit_close`), which can race the still-in-flight STREAM/FIN frame and reset the
         // stream before the receiver finishes reading it -- an intermittent, silent message loss
         // that "the transport sends" would otherwise never reveal.
-        send.stopped().await.map_err(|e| {
-            SynapseError::TransportError(format!(
-                "QUIC stream was not acknowledged by the peer: {e}"
-            ))
-        })?;
+        //
+        // Bounded, not an open-ended hang: `stopped()` resolves once the connection is closed for
+        // any reason, including quinn's default `max_idle_timeout` (30s) if the peer never
+        // responds at all.
+        match send.stopped().await {
+            Ok(None) => {
+                // The peer acknowledged receipt of all stream data. Proceed as success.
+            }
+            Ok(Some(error_code)) => {
+                // The peer sent STOP_SENDING: it explicitly did not accept the stream. This must
+                // not be reported as `Sent` -- that would be exactly the silent-loss-on-send this
+                // wait was added to close.
+                return Err(SynapseError::TransportError(format!(
+                    "QUIC peer rejected the stream (STOP_SENDING, code {error_code})"
+                )));
+            }
+            Err(e) => {
+                return Err(SynapseError::TransportError(format!(
+                    "QUIC stream was not acknowledged by the peer: {e}"
+                )));
+            }
+        }
 
         Ok(DeliveryReceipt {
             message_id: message.message_id.0.to_string(),
@@ -243,6 +260,9 @@ impl Transport for QuicTransportImpl {
                             return;
                         }
                     };
+                    // 8 MiB is a placeholder, not a considered limit -- Task 3 replaces this with
+                    // the real size-limit design (see `stop()`'s accept-loop shutdown gap above
+                    // for the same "known Task 1 gap, noted for later" treatment).
                     let data = match recv.read_to_end(8 * 1024 * 1024).await {
                         Ok(d) => d,
                         Err(e) => {
@@ -338,3 +358,12 @@ impl TransportFactory for QuicTransportFactory {
         validate_config(config)
     }
 }
+
+// A test attempting to cover the `Ok(Some(error_code))` (STOP_SENDING) branch above was tried and
+// removed: see the task report's fix-report section for why a bare `quinn` peer that calls
+// `recv.stop()` right after `accept_bi()` still measured `send.stopped()` resolving to `Ok(None)`
+// on loopback with a small payload -- `stopped()`'s own documentation explains why (once the
+// peer's transport layer has acknowledged all stream data, "the peer closing the stream is no
+// longer meaningful", independent of whether the application later calls `stop()`), so this is a
+// structural property of small loopback messages, not a flaky test. Known gap, flagged for a
+// later task's test coverage.
