@@ -252,6 +252,12 @@ impl Transport for MockTransport {
             network_spanning: true,
             supported_urgencies: vec![abstraction::MessageUrgency::Interactive],
             features: vec![],
+            // A test double: `metrics()` returns `TransportMetrics::default()` unconditionally,
+            // never a real observation.
+            unmeasured_metrics: vec![
+                abstraction::UnmeasuredMetric::AverageLatency,
+                abstraction::UnmeasuredMetric::ReliabilityScore,
+            ],
         }
     }
 

@@ -2686,6 +2686,57 @@ async fn nat_traversal_carries_a_verified_message_end_to_end() {
     assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
 }
 
+/// `metrics()` used to hardcode `average_latency_ms: 50` and `reliability_score: 0.8` regardless
+/// of any real traffic (board item 53), and `messages_sent`/`messages_received`/etc. were all
+/// hardcoded `0`. This proves the repair through the public API: sending moves the real send-side
+/// counters. (`receive_raw`'s own counters are unit-tested in `nat_traversal.rs` itself --
+/// `RawInbox` cannot be constructed from outside the crate, so a receive-side check belongs
+/// there, not here.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nat_traversal_metrics_counts_a_real_send() {
+    let alice = synapse::transport::NatTraversalTransport::new_with_scope(
+        0,
+        synapse::network_scope::BindScope::Loopback,
+    )
+    .await
+    .expect("construct a raw NAT sender");
+    let bob_port = free_port();
+    let bob = synapse::transport::NatTraversalTransport::new_with_scope(
+        bob_port,
+        synapse::network_scope::BindScope::Loopback,
+    )
+    .await
+    .expect("construct a raw NAT receiver so alice has a live socket to send to");
+    bob.start().await.expect("start bob");
+
+    let capabilities = alice.capabilities();
+    assert_eq!(
+        capabilities.unmeasured_metrics,
+        vec![synapse::transport::UnmeasuredMetric::AverageLatency],
+        "reliability_score and the traffic counters are real; only latency is undeclared"
+    );
+
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{bob_port}"));
+    let message = SecureMessage::new(
+        BOB,
+        "alice@repair.test",
+        b"raw metrics check".to_vec(),
+        SecurityLevel::Public,
+    );
+    alice
+        .send_message(&target, &message)
+        .await
+        .expect("raw send");
+
+    let alice_metrics = alice.metrics().await;
+    assert_eq!(alice_metrics.transport_type, TransportType::NatTraversal);
+    assert_eq!(alice_metrics.messages_sent, 1);
+    assert!(alice_metrics.bytes_sent > 0);
+    assert_eq!(alice_metrics.send_failures, 0);
+    assert_eq!(alice_metrics.reliability_score, 1.0);
+}
+
 // ---------------------------------------------------------------------------------------------
 // QUIC (plan Task 1): one connection, one stream, one message, over loopback.
 // ---------------------------------------------------------------------------------------------
