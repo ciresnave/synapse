@@ -143,11 +143,11 @@ jobs:
   # placeholder for the WASM slice, which is its own slice on the roadmap after
   # the 2.0.0 publish and will build a real `wasm/` package. Until then it is
   # `if: false` rather than left to fail: a permanently-red, non-required check
-  # makes `main`'s rollup unreadable at a glance (it can never show as many reds
-  # as there are known-red checks minus one, so a genuinely new failure looks
-  # identical to this expected one) and reports as `skipped`, not `failure` --
-  # the same distinction this project already relies on for a Sourcery skip not
-  # being a review. Remove `if: false` when the WASM slice adds the real package.
+  # means `main`'s rollup is never green, so a genuinely new failure would be
+  # indistinguishable from this expected one. `if: false` reports `skipped`
+  # instead -- the same distinction this project already relies on for a
+  # Sourcery skip not being a review. Remove `if: false` when the WASM slice
+  # adds the real package.
   wasm:
     name: Build WebAssembly package
     runs-on: ubuntu-latest
