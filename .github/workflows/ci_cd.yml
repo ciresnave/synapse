@@ -139,12 +139,19 @@ jobs:
   # required check. While it was a step of that job, it failed on every run with
   # `cd: wasm: No such file or directory` -- there is no `wasm/` directory in this
   # repository and there never has been (the only top-level wasm entries are
-  # Cargo-wasm.toml, build-wasm.sh and build-wasm.bat) -- so `Build and Test` was
-  # red on every run whatever the code did. This job stays red until the WASM
-  # slice (after Synapse 2.0) builds the package; it is deliberately not required.
+  # Cargo-wasm.toml, build-wasm.sh and build-wasm.bat). This job stays here as a
+  # placeholder for the WASM slice, which is its own slice on the roadmap after
+  # the 2.0.0 publish and will build a real `wasm/` package. Until then it is
+  # `if: false` rather than left to fail: a permanently-red, non-required check
+  # means `main`'s rollup is never green, so a genuinely new failure would be
+  # indistinguishable from this expected one. `if: false` reports `skipped`
+  # instead -- the same distinction this project already relies on for a
+  # Sourcery skip not being a review. Remove `if: false` when the WASM slice
+  # adds the real package.
   wasm:
     name: Build WebAssembly package
     runs-on: ubuntu-latest
+    if: false
     steps:
     - uses: actions/checkout@v3
 
