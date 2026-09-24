@@ -1150,10 +1150,18 @@ mod tests {
     /// The same test also guards a second, independent hazard: the metrics lock at the same site
     /// used to be taken with `try_write()`, which silently skipped the `messages_received` update
     /// whenever a concurrent reader held the lock -- the message still arrived, only its count was
-    /// lost. This test's final assertion (`messages_received == 1`) failed intermittently under
-    /// that bug, on a machine-timing schedule rather than every run, which is what made it look
-    /// like flakiness rather than a defect until the mechanism was traced. See `handle_connection`
-    /// for the fix (`write().unwrap_or_else(|e| e.into_inner())` in place of `try_write()`).
+    /// lost. See `handle_connection` for the fix (`write().unwrap_or_else(|e| e.into_inner())` in
+    /// place of `try_write()`).
+    ///
+    /// A third, independent hazard lives in this test itself, not in `handle_connection`: queuing
+    /// the message and incrementing `messages_received` are two separate lock acquisitions there,
+    /// not one atomic step, so a non-empty queue is not proof the counter update has finished. The
+    /// test's final assertion waits for `messages_received` to become nonzero before reading it,
+    /// rather than asserting on it the instant the queue drains, so it cannot land in that window
+    /// itself. Any of these three defects -- the queue-lock drop, the metrics undercount, or this
+    /// observation-ordering race -- could produce a `messages_received` value other than 1 here;
+    /// distinguishing which one fired on a given failure needs the specific evidence (which lock
+    /// was contended, how the counts diverged), not just this test's own outcome.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_message_ready_while_the_queue_is_locked_is_queued_once_the_lock_is_released() {
         use crate::types::{SecureMessage, SecurityLevel};
@@ -1223,6 +1231,15 @@ mod tests {
             vec![message.message_id.to_string()],
             "queued exactly once"
         );
+        // The handler queues the message and only afterward updates `messages_received` --
+        // two separate lock acquisitions, not one atomic step -- so a non-empty queue is not
+        // proof the counter update has finished. Wait for the counter itself rather than
+        // asserting on it the instant the queue drains, so this test cannot race the same
+        // observation-ordering window it exists to catch.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while bob.metrics.read().unwrap().messages_received == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         assert_eq!(bob.metrics.read().unwrap().messages_received, 1);
     }
 
