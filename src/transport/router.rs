@@ -266,6 +266,11 @@ impl MultiTransportRouter {
                     crate::transport::abstraction::MessageUrgency::Interactive,
                 ],
                 features: vec!["connection_offer".to_string()],
+                // A generic placeholder offer, not sourced from any transport's real metrics().
+                unmeasured_metrics: vec![
+                    crate::transport::abstraction::UnmeasuredMetric::AverageLatency,
+                    crate::transport::abstraction::UnmeasuredMetric::ReliabilityScore,
+                ],
             },
             valid_until: SystemTime::now()
                 .duration_since(UNIX_EPOCH)

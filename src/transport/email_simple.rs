@@ -90,6 +90,12 @@ impl Transport for SimpleEmailTransport {
                 "cross_network".to_string(),
                 "store_and_forward".to_string(),
             ],
+            // Every send/receive/connect path refuses until the email slice lands, so there is no
+            // `metrics()` observation for either field to be honest or dishonest about yet.
+            unmeasured_metrics: vec![
+                UnmeasuredMetric::AverageLatency,
+                UnmeasuredMetric::ReliabilityScore,
+            ],
         }
     }
 

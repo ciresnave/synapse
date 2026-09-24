@@ -1111,6 +1111,7 @@ impl Transport for HttpTransportImpl {
                 "one_request_per_connection".to_string(),
                 "firewall_friendly".to_string(),
             ],
+            unmeasured_metrics: vec![],
         }
     }
 

@@ -204,6 +204,22 @@ impl std::fmt::Display for TransportType {
     }
 }
 
+/// A [`TransportMetrics`] field that a transport's `metrics()` does not actually measure.
+///
+/// `TransportMetrics`'s numeric fields cannot themselves be absent -- the struct always has a
+/// value in every field -- so a caller cannot tell "this is a real observation" from "this is a
+/// placeholder" by looking at the metrics alone. `TransportCapabilities::unmeasured_metrics`
+/// closes that gap: a variant listed here means the corresponding `TransportMetrics` field is not
+/// evidence for this transport, whatever value happens to be in it. Check `capabilities()` before
+/// trusting either field for transport selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnmeasuredMetric {
+    /// `TransportMetrics::average_latency_ms` is not computed from real observations.
+    AverageLatency,
+    /// `TransportMetrics::reliability_score` is not computed from real observations.
+    ReliabilityScore,
+}
+
 /// Transport capabilities
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportCapabilities {
@@ -225,6 +241,10 @@ pub struct TransportCapabilities {
     pub supported_urgencies: Vec<MessageUrgency>,
     /// Transport-specific features
     pub features: Vec<String>,
+    /// `TransportMetrics` fields this transport does not measure. Empty means every numeric
+    /// field `metrics()` returns reflects a real observation of this transport's own activity.
+    /// See [`UnmeasuredMetric`].
+    pub unmeasured_metrics: Vec<UnmeasuredMetric>,
 }
 
 /// Message urgency levels for transport selection
@@ -518,6 +538,10 @@ impl TransportCapabilities {
                 "stream_based".to_string(),
                 "flow_control".to_string(),
             ],
+            // `tcp_unified.rs` computes a real running average latency (see `connect_and_send`)
+            // but never writes `reliability_score` after its `TransportMetrics::default()` of
+            // `1.0`, so that field is a constant, not an observation.
+            unmeasured_metrics: vec![UnmeasuredMetric::ReliabilityScore],
         }
     }
 
@@ -542,6 +566,9 @@ impl TransportCapabilities {
                 "low_overhead".to_string(),
                 "multicast".to_string(),
             ],
+            // Same gap as `tcp()`: `udp_unified.rs` computes a real running average latency but
+            // never writes `reliability_score` past its `TransportMetrics::default()` of `1.0`.
+            unmeasured_metrics: vec![UnmeasuredMetric::ReliabilityScore],
         }
     }
 
@@ -562,6 +589,7 @@ impl TransportCapabilities {
                 "authentication".to_string(),
                 "persistent".to_string(),
             ],
+            unmeasured_metrics: vec![],
         }
     }
 
@@ -582,6 +610,7 @@ impl TransportCapabilities {
                 "local_network".to_string(),
                 "multicast".to_string(),
             ],
+            unmeasured_metrics: vec![],
         }
     }
 
@@ -606,6 +635,7 @@ impl TransportCapabilities {
                 "frame_based".to_string(),
                 "http_upgrade".to_string(),
             ],
+            unmeasured_metrics: vec![],
         }
     }
 
@@ -630,6 +660,10 @@ impl TransportCapabilities {
                 "multiplexed_streams".to_string(),
                 "connection_pooling".to_string(),
             ],
+            // `quic_unified.rs`'s `metrics()` computes a real `reliability_score` from atomic
+            // send/failure counters, but takes `average_latency_ms` from
+            // `TransportMetrics::default()` (`0`) -- it is never sampled.
+            unmeasured_metrics: vec![UnmeasuredMetric::AverageLatency],
         }
     }
 
@@ -654,6 +688,7 @@ impl TransportCapabilities {
                 "request_response".to_string(),
                 "standard_protocol".to_string(),
             ],
+            unmeasured_metrics: vec![],
         }
     }
 

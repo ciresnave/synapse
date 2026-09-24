@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::{
@@ -46,6 +49,14 @@ pub struct NatTraversalTransport {
     upnp_mappings: Arc<RwLock<Vec<UpnpMapping>>>,
     active_connections: Arc<RwLock<HashMap<String, Arc<UdpSocket>>>>,
     is_running: Arc<Mutex<bool>>,
+    /// Real counters, matching `quic_unified.rs`'s pattern (Task 4): every field below is
+    /// incremented only where a send or receive actually happened, never a placeholder.
+    messages_sent: AtomicU64,
+    bytes_sent: AtomicU64,
+    send_failures: AtomicU64,
+    messages_received: AtomicU64,
+    bytes_received: AtomicU64,
+    receive_failures: AtomicU64,
 }
 
 /// ICE candidate for connectivity establishment
@@ -113,6 +124,12 @@ impl NatTraversalTransport {
             upnp_mappings: Arc::new(RwLock::new(Vec::new())),
             active_connections: Arc::new(RwLock::new(HashMap::new())),
             is_running: Arc::new(Mutex::new(false)),
+            messages_sent: AtomicU64::new(0),
+            bytes_sent: AtomicU64::new(0),
+            send_failures: AtomicU64::new(0),
+            messages_received: AtomicU64::new(0),
+            bytes_received: AtomicU64::new(0),
+            receive_failures: AtomicU64::new(0),
         })
     }
 
@@ -631,8 +648,12 @@ impl Transport for NatTraversalTransport {
                 "stun_discovery".to_string(),
                 "upnp_mapping".to_string(),
                 "ice_candidates".to_string(),
-                "real_implementation".to_string(),
             ],
+            // `messages_sent`/`messages_received`/`send_failures`/`receive_failures`/`bytes_sent`/
+            // `bytes_received`/`reliability_score` in `metrics()` are all real counters. There is
+            // no latency instrumentation here (see `metrics()`), matching `quic_unified.rs`'s own
+            // declared gap rather than inventing a new measurement pattern for it.
+            unmeasured_metrics: vec![abstraction::UnmeasuredMetric::AverageLatency],
         }
     }
 
@@ -701,7 +722,12 @@ impl Transport for NatTraversalTransport {
         };
 
         // Reuse the one bound socket (binding a second one on the same address is refused).
-        let socket = self.bound_socket().await?;
+        // A bind failure is a real attempt to reach the network, unlike the address-parse and
+        // serialization steps above and below, which refuse locally before touching it (matching
+        // `quic_unified.rs`'s send path: a local refusal must never count as a send failure).
+        let socket = self.bound_socket().await.inspect_err(|_| {
+            self.send_failures.fetch_add(1, Ordering::Relaxed);
+        })?;
 
         // Serialize the whole message, as the other transports do: hand-picking fields into a
         // JSON string (as this used to) replaces invalid-UTF-8 bytes in `encrypted_content` with
@@ -716,7 +742,14 @@ impl Transport for NatTraversalTransport {
         socket
             .send_to(&message_data, target_addr)
             .await
+            .inspect_err(|_| {
+                self.send_failures.fetch_add(1, Ordering::Relaxed);
+            })
             .map_err(|e| SynapseError::TransportError(format!("Failed to send message: {}", e)))?;
+
+        self.messages_sent.fetch_add(1, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(message_data.len() as u64, Ordering::Relaxed);
 
         info!("Sent message to {} via NAT traversal", target_addr);
 
@@ -868,16 +901,30 @@ impl Transport for NatTraversalTransport {
         let mappings_count = self.upnp_mappings.read().await.len();
         let connections_count = self.active_connections.read().await.len();
 
+        let messages_sent = self.messages_sent.load(Ordering::Relaxed);
+        let send_failures = self.send_failures.load(Ordering::Relaxed);
+        let attempts = messages_sent + send_failures;
+        // Mirrors `quic_unified.rs`'s `metrics()`: reliability is the fraction of attempted sends
+        // that succeeded, and an untried transport claims perfect reliability rather than zero (no
+        // evidence either way yet).
+        let reliability_score = if attempts == 0 {
+            1.0
+        } else {
+            messages_sent as f64 / attempts as f64
+        };
+
         super::abstraction::TransportMetrics {
             transport_type: self.transport_type(),
-            messages_sent: 0, // Would be tracked in a real implementation
-            messages_received: 0,
-            send_failures: 0,
-            receive_failures: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-            average_latency_ms: 50, // 50ms typical for NAT traversal
-            reliability_score: 0.8,
+            messages_sent,
+            messages_received: self.messages_received.load(Ordering::Relaxed),
+            send_failures,
+            receive_failures: self.receive_failures.load(Ordering::Relaxed),
+            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            bytes_received: self.bytes_received.load(Ordering::Relaxed),
+            // Not measured -- see `capabilities().unmeasured_metrics`. `0`, `TransportMetrics`'s
+            // own default, not a plausible-looking placeholder.
+            average_latency_ms: 0,
+            reliability_score,
             active_connections: connections_count as u32,
             last_updated_timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -934,6 +981,9 @@ impl TransportReceive for NatTraversalTransport {
                     .await
                 {
                     Ok(Some(incoming_message)) => {
+                        self.messages_received.fetch_add(1, Ordering::Relaxed);
+                        self.bytes_received
+                            .fetch_add(bytes_received as u64, Ordering::Relaxed);
                         messages.push(incoming_message);
                     }
                     Ok(None) => {
@@ -943,6 +993,7 @@ impl TransportReceive for NatTraversalTransport {
                         );
                     }
                     Err(e) => {
+                        self.receive_failures.fetch_add(1, Ordering::Relaxed);
                         warn!("Failed to parse message from {}: {}", sender_addr, e);
                     }
                 }
@@ -1018,6 +1069,72 @@ impl Clone for NatTraversalTransport {
             upnp_mappings: Arc::new(RwLock::new(Vec::new())), // New mappings for clone
             active_connections: Arc::new(RwLock::new(HashMap::new())), // New connections for clone
             is_running: Arc::new(Mutex::new(false)), // New running state for clone
+            // This clone is only ever used for background discovery (`run_nat_discovery`), which
+            // never sends or receives application messages, so fresh, independent counters are
+            // correct here -- there is nothing of the original's traffic for them to share.
+            messages_sent: AtomicU64::new(0),
+            bytes_sent: AtomicU64::new(0),
+            send_failures: AtomicU64::new(0),
+            messages_received: AtomicU64::new(0),
+            bytes_received: AtomicU64::new(0),
+            receive_failures: AtomicU64::new(0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{SecureMessage, SecurityLevel};
+
+    /// `receive_raw`'s own counters (`messages_received`/`bytes_received`) can only be exercised
+    /// from inside this crate: `RawInbox::new()` is `pub(crate)`, so an external integration test
+    /// cannot construct one to call `receive_raw` at all. See
+    /// `tests/transport_repairs.rs::nat_traversal_metrics_counts_a_real_send` for the send-side
+    /// half of this same repair (board item 53), which the public API can reach.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn receive_raw_counts_a_real_receive() {
+        let bob =
+            NatTraversalTransport::new_with_scope(0, crate::network_scope::BindScope::Loopback)
+                .await
+                .expect("construct bob");
+        bob.start().await.expect("start bob");
+        let bob_addr = bob
+            .bound_socket()
+            .await
+            .expect("bob's socket")
+            .local_addr()
+            .expect("bob's local addr");
+
+        let alice =
+            NatTraversalTransport::new_with_scope(0, crate::network_scope::BindScope::Loopback)
+                .await
+                .expect("construct alice");
+        let target =
+            abstraction::TransportTarget::new("bob".to_string()).with_address(bob_addr.to_string());
+        let message = SecureMessage::new(
+            "bob",
+            "alice",
+            b"raw receive metrics check".to_vec(),
+            SecurityLevel::Public,
+        );
+        alice
+            .send_message(&target, &message)
+            .await
+            .expect("alice's send");
+
+        // `receive_raw` reads the socket once per call with a 100ms internal timeout, so poll it
+        // rather than trusting a single call to land after the send.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut inbox = abstraction::RawInbox::new();
+        while bob.messages_received.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            bob.receive_raw(&mut inbox).await.expect("receive_raw");
+        }
+
+        let metrics = bob.metrics().await;
+        assert_eq!(metrics.messages_received, 1);
+        assert!(metrics.bytes_received > 0);
+        assert_eq!(metrics.receive_failures, 0);
+        assert_eq!(inbox.len(), 1, "the message must also reach the inbox");
     }
 }

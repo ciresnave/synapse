@@ -15,7 +15,7 @@ use crate::error::{Result, SynapseError};
 use crate::transport::abstraction::{
     ConnectivityResult, DeliveryReceipt, MessageUrgency, RawInbox, Transport,
     TransportCapabilities, TransportEstimate, TransportMetrics, TransportReceive, TransportStatus,
-    TransportTarget, TransportType,
+    TransportTarget, TransportType, UnmeasuredMetric,
 };
 use crate::types::SecureMessage;
 
@@ -260,6 +260,9 @@ impl Transport for DiscoveryTransport {
             max_message_size: 0,
             features: vec!["discovery_only".to_string()],
             supported_urgencies: Vec::<MessageUrgency>::new(),
+            // `reliability_score` is a deliberate, always-true 0.0 (it carries no messages, so it
+            // never succeeds); `average_latency_ms` is never set past its zero default.
+            unmeasured_metrics: vec![UnmeasuredMetric::AverageLatency],
         }
     }
 

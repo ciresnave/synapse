@@ -1182,6 +1182,7 @@ impl Transport for WebSocketTransportImpl {
                 "binary_frames".to_string(),
                 "one_message_per_connection".to_string(),
             ],
+            unmeasured_metrics: vec![],
         }
     }
 

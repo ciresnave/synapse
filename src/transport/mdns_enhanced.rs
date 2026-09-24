@@ -545,6 +545,11 @@ impl crate::transport::abstraction::Transport for EnhancedMdnsTransport {
             network_spanning: false,
             supported_urgencies: Vec::new(),
             features: vec!["mdns_discovery".to_string(), "discovery_only".to_string()],
+            // `reliability_score` is a deliberate, always-true 0.0 (see `metrics()`: it carries no
+            // messages, so it never succeeds); `average_latency_ms` is never set past its default.
+            unmeasured_metrics: vec![
+                crate::transport::abstraction::UnmeasuredMetric::AverageLatency,
+            ],
         }
     }
 
