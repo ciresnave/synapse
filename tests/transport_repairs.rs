@@ -8,6 +8,7 @@
 //! what Alice's receipt claims.
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,9 @@ use synapse::certificate::{AgentCertificate, Permission};
 use synapse::sealing::{self, Payload, SealingKeyPair};
 use synapse::sender_auth::{SenderVerdict, TrustStore};
 use synapse::transport::{
-    DeliveryConfirmation, DeliveryReceipt, ReceivedMessage, TransportFactory, TransportManager,
-    TransportManagerBuilder, TransportStatus, TransportTarget, TransportType,
+    DeliveryConfirmation, DeliveryReceipt, QuicTransportImpl, ReceivedMessage, Transport,
+    TransportFactory, TransportManager, TransportManagerBuilder, TransportStatus, TransportTarget,
+    TransportType,
 };
 use synapse::types::{SecureMessage, SecurityLevel};
 
@@ -50,6 +52,8 @@ fn port_key(kind: TransportType) -> &'static str {
         TransportType::WebSocket => "local_port",
         // NatTraversalTransportFactory (abstraction.rs, PR B Task 10) reads the same key name.
         TransportType::NatTraversal => "local_port",
+        // quic_unified.rs reads `local_port` and binds it when the endpoint is constructed.
+        TransportType::Quic => "local_port",
         other => panic!("no port key recorded for {other:?}; add it to port_key"),
     }
 }
@@ -64,7 +68,8 @@ fn socket_of(kind: TransportType) -> Socket {
     match kind {
         TransportType::Tcp | TransportType::Http | TransportType::WebSocket => Socket::Tcp,
         // NAT traversal listens on a `UdpSocket` (nat_traversal.rs, `start`).
-        TransportType::Udp | TransportType::NatTraversal => Socket::Udp,
+        // QUIC runs over UDP (quic_unified.rs binds a `quinn::Endpoint`, itself a UDP socket).
+        TransportType::Udp | TransportType::NatTraversal | TransportType::Quic => Socket::Udp,
         other => panic!("no socket family recorded for {other:?}; add it to socket_of"),
     }
 }
@@ -2679,4 +2684,710 @@ async fn nat_traversal_carries_a_verified_message_end_to_end() {
     );
     assert_eq!(receipt.transport_used, TransportType::NatTraversal);
     assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// QUIC (plan Task 1): one connection, one stream, one message, over loopback.
+// ---------------------------------------------------------------------------------------------
+
+fn quic() -> Box<dyn TransportFactory> {
+    Box::new(synapse::transport::QuicTransportFactory)
+}
+
+/// QUIC had no working implementation: `QuicTransportFactory::create_transport` always refused
+/// (PR A, Task 3). This is the first test to prove it sends and receives at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_carries_a_verified_message_end_to_end() {
+    let (received, receipt) = round_trip(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        b"repaired",
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+    assert_eq!(received.incoming.transport_type, TransportType::Quic);
+    assert_eq!(receipt.transport_used, TransportType::Quic);
+    assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// QUIC (plan Task 2): connection pooling -- reuse, multiplexed streams, idle-timeout eviction.
+// ---------------------------------------------------------------------------------------------
+
+/// N = 200, 32 sends in flight, as for WebSocket and HTTP: proves no message is lost under
+/// concurrent sends, but -- because Task 1's one-connection-per-message code is already correct,
+/// just wasteful -- this alone cannot distinguish pooled from unpooled. See
+/// `quic_reuses_one_connection_for_two_sends_to_the_same_peer` for the test that can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn quic_loses_no_message_under_concurrent_sends() {
+    loses_no_message_under_concurrent_sends(
+        TransportType::Quic,
+        quic,
+        200,
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+}
+
+/// Two sends to the same peer must not open two connections: the second reuses the first's, and
+/// the pool ends up holding exactly one entry for Bob's address.
+///
+/// Alice's sends here go through a raw `QuicTransportImpl` (the same production type
+/// `TransportManager` wraps) instead of through `pair.alice_node`: `TransportManager` stores
+/// transports as `Box<dyn Transport>` with no way to downcast back to the concrete type, so a
+/// test that needs to inspect a transport's own pool has to hold that concrete type itself,
+/// the way `websocket_closes_a_peer_that_sends_a_control_frame_and_frees_its_permit` drives a raw
+/// socket directly rather than going through a manager for the half of the exchange it needs to
+/// inspect. Bob's side is still a full node: a real `TransportManager` receiving and verifying
+/// exactly as every other transport-repair test checks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_reuses_one_connection_for_two_sends_to_the_same_peer() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender");
+
+    let m1 = pair.signed(b"first");
+    let m2 = pair.signed(b"second");
+    alice_quic
+        .send_message(&pair.bob_target(), &m1)
+        .await
+        .expect("send 1");
+    alice_quic
+        .send_message(&pair.bob_target(), &m2)
+        .await
+        .expect("send 2");
+
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "two sends to the same peer must reuse one pooled connection, not open two"
+    );
+
+    let received = poll_bob(&pair, 2, Duration::from_secs(3)).await;
+    assert_eq!(received.len(), 2, "both messages must arrive");
+    let mut ids: Vec<_> = received
+        .iter()
+        .map(|r| r.incoming.message.message_id.0.to_string())
+        .collect();
+    ids.sort();
+    let mut expected = vec![m1.message_id.0.to_string(), m2.message_id.0.to_string()];
+    expected.sort();
+    assert_eq!(ids, expected);
+}
+
+/// An idle connection is evicted and the next send transparently reopens one: both messages must
+/// still arrive even though the pool dropped its entry for Bob's address in between.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_reopens_after_the_pool_evicts_an_idle_connection() {
+    let config = one_key("idle_timeout_ms", "200");
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+
+    let m1 = pair.signed(b"first");
+    pair.alice_node
+        .send_message(&pair.bob_target(), &m1)
+        .await
+        .expect("send 1");
+
+    // Past the idle timeout, plus room for the sweep (woken at half the idle timeout) to run.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let m2 = pair.signed(b"second");
+    pair.alice_node
+        .send_message(&pair.bob_target(), &m2)
+        .await
+        .expect("send 2 after reopen");
+
+    let received = poll_bob(&pair, 2, Duration::from_secs(3)).await;
+    assert_eq!(
+        received.len(),
+        2,
+        "both messages must arrive even after an idle-timeout reopen"
+    );
+}
+
+/// `evict()` removes a peer's pooled connection directly (spec §3 condition 3 -- Task 2 only needs
+/// to provide the method and test it, not wire it to a verification failure): after a send has
+/// populated the pool, evicting Bob's address drops the pool back to empty, and the *next* send to
+/// the same address must still succeed by transparently establishing a fresh connection (proven by
+/// `pool_size()` going back up to 1, not just by re-checking the old entry).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_evict_drops_the_pooled_connection_and_the_next_send_reopens_one() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender");
+    let bob_addr: SocketAddr = pair
+        .bob_target()
+        .address
+        .as_ref()
+        .expect("bob_target has an address")
+        .parse()
+        .expect("bob_target's address parses");
+
+    let m1 = pair.signed(b"before evict");
+    alice_quic
+        .send_message(&pair.bob_target(), &m1)
+        .await
+        .expect("send 1");
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "the first send must populate the pool"
+    );
+
+    alice_quic.evict(bob_addr).await;
+    assert_eq!(
+        alice_quic.pool_size().await,
+        0,
+        "evict() must remove the pooled connection"
+    );
+
+    let m2 = pair.signed(b"after evict");
+    alice_quic
+        .send_message(&pair.bob_target(), &m2)
+        .await
+        .expect("send 2 must transparently reopen a connection after eviction");
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "the send after evict() must re-establish and re-pool a connection"
+    );
+
+    let received = poll_bob(&pair, 2, Duration::from_secs(3)).await;
+    assert_eq!(
+        received.len(),
+        2,
+        "both messages must arrive, evicted connection notwithstanding"
+    );
+}
+
+/// `idle_timeout_ms` = 0 or unparseable must be refused, not silently replaced by the default.
+#[tokio::test]
+async fn quic_refuses_an_unparseable_or_zero_idle_timeout() {
+    for bad in ["", "abc", "0", "-1", "1s"] {
+        let config = one_key("idle_timeout_ms", bad);
+        assert!(
+            synapse::transport::QuicTransportFactory
+                .validate_config(&config)
+                .is_err(),
+            "idle_timeout_ms = {bad:?} must be refused"
+        );
+        assert!(
+            QuicTransportImpl::new(&config).await.is_err(),
+            "idle_timeout_ms = {bad:?} must be refused by new(), not just validate_config"
+        );
+    }
+    let good = one_key("idle_timeout_ms", "1000");
+    synapse::transport::QuicTransportFactory
+        .validate_config(&good)
+        .expect("a valid idle_timeout_ms must be accepted");
+}
+
+// ---------------------------------------------------------------------------------------------
+// QUIC (plan Task 3): size limits, backpressure, and config validation.
+// ---------------------------------------------------------------------------------------------
+
+/// The sender refuses a message whose serialized form is over its `max_message_size`, before ever
+/// touching the connection pool, instead of sending it and claiming `Sent` for a message a
+/// receiver with the same limit drops. Follows `tcp_refuses_at_send_a_message_over_its_limit`'s
+/// exact pattern: asserts on the refusal's `.to_string()`, not on the error variant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_refuses_at_send_a_message_over_its_limit() {
+    const QUIC_LIMIT: usize = 1024;
+    let config = one_key("max_message_size", &QUIC_LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let (over, over_size) = measured(&pair, QUIC_LIMIT, false);
+
+    let alice_transport = synapse::transport::QuicTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("a client-only transport with the same limit");
+    let refusal = match alice_transport
+        .send_message(&pair.bob_target(), &over)
+        .await
+    {
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {QUIC_LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        refusal.contains("max_message_size")
+            && refusal.contains(&over_size.to_string())
+            && refusal.contains(&QUIC_LIMIT.to_string()),
+        "the refusal must name the limit and both sizes: {refusal}"
+    );
+    // And through the manager, the send fails rather than claiming a delivery.
+    assert!(
+        pair.alice_node
+            .send_message(&pair.bob_target(), &over)
+            .await
+            .is_err(),
+        "the manager must not report the over-limit message as sent"
+    );
+}
+
+/// An oversize refusal must be kept out of the circuit breaker *and* failure marking (spec §6 and
+/// the plan's global constraints): `send_failures` must stay at zero after one, exactly as all
+/// three sibling transports (`tcp_unified.rs`, `websocket_unified.rs`, `http_unified.rs`) never
+/// touch a counter on this exact path either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_oversize_refusal_does_not_increment_send_failures() {
+    const QUIC_LIMIT: usize = 1024;
+    let config = one_key("max_message_size", &QUIC_LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let (over, over_size) = measured(&pair, QUIC_LIMIT, false);
+
+    let alice_quic = QuicTransportImpl::new(&config)
+        .await
+        .expect("construct a raw QUIC sender with the same limit");
+    match alice_quic.send_message(&pair.bob_target(), &over).await {
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {QUIC_LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+        Err(synapse::SynapseError::MessageRefused(_)) => {}
+        Err(other) => panic!("must be MessageRefused, not {other:?}"),
+    }
+
+    let metrics = alice_quic.metrics().await;
+    assert_eq!(
+        metrics.send_failures, 0,
+        "an oversize refusal must never touch send_failures"
+    );
+    assert_eq!(metrics.messages_sent, 0);
+}
+
+/// A message that fits `max_message_size` still crosses end to end with the limit configured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_delivers_a_message_at_or_under_its_limit() {
+    const QUIC_LIMIT: usize = 4096;
+    let config = one_key("max_message_size", &QUIC_LIMIT.to_string());
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let (fits, fits_size) = measured(&pair, QUIC_LIMIT, true);
+
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &fits)
+        .await
+        .unwrap_or_else(|e| panic!("a message of {fits_size} bytes fits the limit: {e}"));
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+
+    let received = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(received.len(), 1, "the message under the limit must arrive");
+    assert_eq!(received[0].incoming.message.message_id.0, fits.message_id.0);
+}
+
+/// Bad `max_message_size`, `max_queued_bytes`, and `idle_timeout_ms` values are each refused by
+/// `validate_config`, naming the offending key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_refuses_an_invalid_config() {
+    fn quic_refuses(config: HashMap<String, String>, key: &str) {
+        let err = synapse::transport::QuicTransportFactory
+            .validate_config(&config)
+            .expect_err(&format!("{key} must be refused"));
+        assert!(format!("{err}").contains(key), "{err}");
+    }
+    quic_refuses(one_key("max_message_size", "0"), "max_message_size");
+    quic_refuses(
+        HashMap::from([
+            ("max_queued_bytes".to_string(), "10".to_string()),
+            ("max_message_size".to_string(), "1024".to_string()),
+        ]),
+        "max_queued_bytes",
+    );
+    quic_refuses(one_key("idle_timeout_ms", "0"), "idle_timeout_ms");
+    quic_refuses(
+        one_key("first_byte_timeout_ms", "0"),
+        "first_byte_timeout_ms",
+    );
+    quic_refuses(
+        one_key("stream_idle_timeout_ms", "0"),
+        "stream_idle_timeout_ms",
+    );
+    quic_refuses(one_key("send_timeout_ms", "0"), "send_timeout_ms");
+}
+
+/// `send_timeout_ms` bounds `send_message` end to end: against a peer that accepts UDP packets
+/// but never completes the QUIC handshake (a bound socket that reads and discards, unlike an
+/// unbound port, which fails fast with ICMP port-unreachable instead of hanging), a small
+/// `send_timeout_ms` must make `send_message` give up well within a few seconds, not ride
+/// quinn's own much longer idle/retry timers -- especially now that `idle_timeout_ms` actually
+/// governs the connection (see the module documentation), which could otherwise be configured
+/// large enough to block a caller for a long time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_send_times_out_against_a_silent_peer() {
+    let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind a blackhole socket");
+    let blackhole_addr = blackhole.local_addr().expect("blackhole local addr");
+    // Keep receiving (and discarding) packets so the OS never answers with ICMP
+    // port-unreachable, which would otherwise fail the connect immediately instead of hanging.
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while blackhole.recv(&mut buf).await.is_ok() {}
+    });
+
+    let config = HashMap::from([("send_timeout_ms".to_string(), "300".to_string())]);
+    let alice_quic = QuicTransportImpl::new(&config)
+        .await
+        .expect("construct a raw QUIC sender with a short send_timeout_ms");
+    let target = TransportTarget::new(BOB.to_string()).with_address(blackhole_addr.to_string());
+
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let message = pair.signed(b"into the void");
+
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        alice_quic.send_message(&target, &message),
+    )
+    .await
+    .expect("send_message must not hang past send_timeout_ms, let alone 5s");
+    assert!(
+        result.is_err(),
+        "a send to a silent peer must not be reported as Sent"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must give up near send_timeout_ms (300ms), not quinn's own idle/retry timers: {:?}",
+        started.elapsed()
+    );
+}
+
+/// A stream that stalls mid-message must not be able to hold resources indefinitely (spec §6):
+/// bounded only by the connection's own idle timeout, a peer could evade that by sending
+/// keepalives on the connection while never finishing this particular stream. (A stream that
+/// never sends *anything* is not separately observable here: QUIC never puts a STREAM frame on
+/// the wire until the sender actually writes, so the peer never learns such a stream exists at
+/// all, and there is nothing server-side for a timeout to act on -- `first_byte_timeout_ms`'s
+/// share of `stream_read_timeout` covers exactly this in-flight-but-silent-so-far case once a
+/// byte does arrive.) With `first_byte_timeout_ms` + `stream_idle_timeout_ms` configured small,
+/// Bob must actively give up on a stream that goes silent after a partial write, well within a
+/// few seconds, not hang forever -- observed here from the client side: dropping a
+/// `quinn::RecvStream` before it has read to completion sends the peer's `SendStream` a
+/// `STOP_SENDING`, which resolves `send.stopped()`. A raw `quinn` client is used (not
+/// `QuicTransportImpl::send_message`, which always writes and finishes) so the stream can be left
+/// half-written and silent on purpose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_times_out_a_stream_that_stalls_mid_message() {
+    let config = HashMap::from([
+        ("first_byte_timeout_ms".to_string(), "100".to_string()),
+        ("stream_idle_timeout_ms".to_string(), "100".to_string()),
+    ]);
+    let pair = Pair::with_config(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+        &config,
+    )
+    .await;
+    let bob_addr: SocketAddr = pair
+        .bob_target()
+        .address
+        .as_ref()
+        .expect("bob_target has an address")
+        .parse()
+        .expect("bob_target's address parses");
+
+    // A bare `quinn` client with the same TLS setup `QuicTransportImpl::new` uses, so it can
+    // complete a real handshake against Bob without going through the production sender at all.
+    let client_tls = synapse::transport::quic_tls::client_config().expect("client tls config");
+    let client_quic_config = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client_tls)
+            .expect("quic client crypto config"),
+    ));
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap())
+        .expect("bind a client-only QUIC endpoint");
+    endpoint.set_default_client_config(client_quic_config);
+
+    let connection = endpoint
+        .connect(bob_addr, "synapse-quic")
+        .expect("connect setup")
+        .await
+        .expect("handshake with Bob");
+    let (mut send, _recv) = connection
+        .open_bi()
+        .await
+        .expect("open a bidirectional stream");
+    // Write a few bytes -- enough to put a STREAM frame on the wire so Bob's `accept_bi` actually
+    // sees this stream -- then deliberately never write more, and never `finish()`: this is the
+    // stall-mid-message case under test.
+    send.write_all(b"{\"incomplete\"")
+        .await
+        .expect("partial write");
+
+    let stopped = tokio::time::timeout(Duration::from_secs(5), send.stopped())
+        .await
+        .expect("Bob must time out and drop the silent stream well within 5s, not hold it forever");
+    assert!(
+        matches!(stopped, Ok(Some(_))),
+        "Bob must STOP_SENDING the silent stream once first_byte_timeout_ms + \
+         stream_idle_timeout_ms elapses, got {stopped:?}"
+    );
+
+    // And a normal message, on its own connection, still gets through -- the silent stream did
+    // not wedge the accept loop or the transport as a whole.
+    let message = pair.signed(b"still works after a silent peer");
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &message)
+        .await
+        .expect("a normal send must still succeed");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    let received = poll_bob(&pair, 1, Duration::from_secs(3)).await;
+    assert_eq!(
+        received.len(),
+        1,
+        "a normal message must still arrive after a silent peer"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// QUIC (plan Task 4): honest capabilities, a real connectivity probe, and real metrics.
+// ---------------------------------------------------------------------------------------------
+
+/// Connected only after a real handshake: against a live peer the probe actually connects (or
+/// reuses a pooled connection) and reports a measured round trip; against a port nothing listens
+/// on, `test_connectivity` must not just parse the address and call it reachable -- Task 1's
+/// version did exactly that, so `dead.connected` was `true` when it should be `false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_reports_connectivity_only_after_a_real_handshake() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let transport = synapse::transport::QuicTransportFactory
+        .create_transport(&HashMap::new())
+        .await
+        .expect("construct");
+    let live = transport
+        .test_connectivity(&pair.bob_target())
+        .await
+        .expect("connectivity");
+    assert!(live.connected, "{live:?}");
+    assert!(live.rtt.is_some());
+
+    let nobody =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{}", free_port()));
+    let dead = transport
+        .test_connectivity(&nobody)
+        .await
+        .expect("connectivity");
+    assert!(!dead.connected, "{dead:?}");
+    assert_eq!(dead.rtt, None);
+}
+
+/// `test_connectivity` is a probe, not a sender: it must not retain a connection in the pool the
+/// way `send_message`'s `pooled_connection` does, or a mere connectivity check would inflate
+/// `metrics()`'s `active_connections` and leave a stale entry behind after `stop()` (which does
+/// not clear the pool). Driven through a raw `QuicTransportImpl` because `pool_size()` is not on
+/// the `Transport` trait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_test_connectivity_does_not_populate_the_pool() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender");
+
+    let result = alice_quic
+        .test_connectivity(&pair.bob_target())
+        .await
+        .expect("connectivity");
+    assert!(result.connected, "{result:?}");
+    assert_eq!(
+        alice_quic.pool_size().await,
+        0,
+        "a connectivity probe must not leave a connection in the pool"
+    );
+
+    // A real send afterward still works, and populates the pool as normal.
+    let message = pair.signed(b"after a probe");
+    alice_quic
+        .send_message(&pair.bob_target(), &message)
+        .await
+        .expect("send after a probe");
+    assert_eq!(
+        alice_quic.pool_size().await,
+        1,
+        "a real send must still pool its connection"
+    );
+}
+
+/// `estimate_metrics` must reuse the same real probe: available with a measured latency and full
+/// confidence against a live peer, unavailable with the probe's timeout as its latency and low
+/// confidence against a dead one -- not the Task 1 placeholder that reported `available: true` and
+/// a hardcoded 20ms for every target regardless of whether anything was listening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_estimate_metrics_reflects_a_real_probe() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let transport = synapse::transport::QuicTransportFactory
+        .create_transport(&HashMap::new())
+        .await
+        .expect("construct");
+
+    let live_estimate = transport
+        .estimate_metrics(&pair.bob_target())
+        .await
+        .expect("estimate");
+    assert!(live_estimate.available, "{live_estimate:?}");
+    assert!(live_estimate.confidence > 0.9, "{live_estimate:?}");
+    assert!(
+        live_estimate.latency < Duration::from_millis(2000),
+        "{live_estimate:?}"
+    );
+
+    let nobody =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{}", free_port()));
+    let dead_estimate = transport.estimate_metrics(&nobody).await.expect("estimate");
+    assert!(!dead_estimate.available, "{dead_estimate:?}");
+    assert!(dead_estimate.confidence < 0.5, "{dead_estimate:?}");
+    assert_eq!(dead_estimate.latency, Duration::from_millis(2000));
+}
+
+/// `capabilities()` must report the configured `max_message_size` (not Task 1's hardcoded 1 MiB,
+/// nor `TransportCapabilities::quic()`'s own pre-Task-4 "1GB theoretical" figure), and must not
+/// claim `zero_rtt` or `connection_migration` -- features this implementation does not provide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_capabilities_report_the_configured_size_and_no_unimplemented_features() {
+    let config = HashMap::from([("max_message_size".to_string(), "12345".to_string())]);
+    let transport = synapse::transport::QuicTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("construct");
+    let caps = transport.capabilities();
+    assert_eq!(caps.max_message_size, 12345);
+    assert!(!caps.features.contains(&"zero_rtt".to_string()));
+    assert!(!caps.features.contains(&"connection_migration".to_string()));
+}
+
+/// `metrics()` must count real sends and receives, not return `TransportMetrics::default()` (which
+/// always reported zero messages and perfect reliability regardless of what actually happened).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_metrics_counts_real_sends_and_receives() {
+    let pair = Pair::new(
+        TransportType::Quic,
+        quic(),
+        quic(),
+        free_port(),
+        free_port(),
+    )
+    .await;
+    let payload = b"metrics matter";
+    let receipt = pair
+        .alice_node
+        .send_message(&pair.bob_target(), &pair.signed(payload))
+        .await
+        .expect("send");
+    pair.assert_receipt(&receipt, &DeliveryConfirmation::Sent);
+    assert_eq!(poll_bob(&pair, 1, Duration::from_secs(3)).await.len(), 1);
+
+    // `alice_node`/`bob_node` wrap the transport in a `TransportManager`, which does not expose
+    // the underlying transport's own `metrics()` (Task 4 only touches the transport's, not the
+    // manager's), so drive raw `QuicTransportImpl`s directly the same way the pooling tests above
+    // do, on their own pair of ports.
+    let alice_quic = QuicTransportImpl::new(&HashMap::new())
+        .await
+        .expect("construct a raw QUIC sender");
+    let bob_port = free_port();
+    let bob_quic = QuicTransportImpl::new(&one_key("local_port", &bob_port.to_string()))
+        .await
+        .expect("construct a raw QUIC receiver");
+    bob_quic.start().await.expect("start bob");
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{bob_port}"));
+    let message = pair.signed(b"raw metrics check");
+    alice_quic
+        .send_message(&target, &message)
+        .await
+        .expect("raw send");
+
+    let alice_metrics = alice_quic.metrics().await;
+    assert_eq!(alice_metrics.transport_type, TransportType::Quic);
+    assert_eq!(alice_metrics.messages_sent, 1);
+    assert!(alice_metrics.bytes_sent > 0);
+    assert_eq!(alice_metrics.send_failures, 0);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let bob_metrics = bob_quic.metrics().await;
+    assert_eq!(bob_metrics.messages_received, 1);
+    assert!(bob_metrics.bytes_received > 0);
 }

@@ -2,6 +2,7 @@
 name = "synapse"
 version = "2.0.0"
 edition = "2024"
+rust-version = "1.88"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "Neural Communication Network with Federated Identity and Blockchain Trust"
 license = "MIT OR Apache-2.0"
@@ -167,6 +168,9 @@ gloo-utils = { version = "0.2.0", optional = true }
 gloo-storage = { version = "0.3.0", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-logger = { version = "0.2", optional = true }
+quinn = "0.11.12"
+rcgen = "0.14.10"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 # Development dependencies
 [dev-dependencies]

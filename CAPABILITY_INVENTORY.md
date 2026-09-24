@@ -42,6 +42,26 @@ test sends one over a socket, so I ran the probes myself (§2.2):
 > `send_message` refuse instead of claiming a delivery; PR B, Task 8 repaired it (below). The TCP
 > and UDP rows are unchanged by PR A.
 
+> **Status, 2026-09-23, the QUIC slice (branch `design/quic-transport`, not yet on `main`):** QUIC —
+> **DELIVERS** over loopback, a real `quinn`-backed implementation this time: a sealed, signed
+> message arrives `Verified` and opens intact (`quic_carries_a_verified_message_end_to_end`); the
+> receipt claims `Sent`, never `Delivered` (spec §4 — QUIC has no synchronous request/response the
+> way HTTP does, and delivery confirmation stays `delivery_ack.rs`'s job, transport-agnostic, unlike
+> the old simulation's fabricated `Delivered`). Self-signed TLS, connections pooled and reused per
+> peer with multiplexed streams, 0-RTT explicitly disabled, honest `capabilities()`/`metrics()`
+> replacing the old aspirational preset. Staged as 5 reviewed tasks; see
+> `docs/superpowers/specs/2026-09-22-quic-transport-design.md` and
+> `docs/superpowers/plans/2026-09-22-quic-transport.md`.
+>
+> **One known gap, not fixed here:** a misdirected pooled connection (NAT rebinding, address reuse)
+> is supposed to self-heal by evicting on the next application-layer verification failure (spec §3
+> condition 3) — the eviction method exists and is directly tested, but nothing calls it yet,
+> because `TransportManager` has no way to reach a concrete `QuicTransportImpl` to invoke it.
+> Not a confidentiality or spoofing hole (sealing/signing already rule those out) — the cost is
+> silent, indefinitely-repeating misdelivery to a stale address, a robustness defect. Tracked as
+> [issue #49](https://github.com/ciresnave/synapse/issues/49); needs a `Transport`/
+> `TransportReceive` contract change touching every transport, deliberately its own slice.
+
 > **Status, 2026-09-18, PR B of the transport contract, Task 7 (branch `feat/transport-contract-b`, not
 > yet on `main`):** TCP — the public `synapse::transport::TcpTransportFactory` built `tcp_simple`, which
 > had no listener, not `tcp_unified`: `abstraction.rs` defined a second `TcpTransportFactory` and the
@@ -580,6 +600,10 @@ fabricates its connections (§2.2). **The simulation out-claims every real trans
 > construction names its protocol event and only the manager constructs `Acknowledged` or `Expired`
 > (all in PR #44).
 
+> **Status, 2026-09-23, the QUIC slice (branch `design/quic-transport`, not yet on `main`):** the
+> real `quic_unified.rs` this slice adds claims `Sent` only, never `Delivered` (spec §4) — it does
+> not repeat the deleted simulation's overclaim.
+
 **Not fixed here.** A receiver-derived acknowledgement is a protocol addition, not a repair, and it
 is precisely the kind of decision the pending merge should make deliberately. **Recorded because it
 is cheap to design in now and, in the FAM lane's words from having lived it, unfixable later.**
@@ -961,10 +985,26 @@ orphaned `src/transport/quic.rs` (740 lines, §5.3) *does* contain a real `endpo
 > construct. `websocket_unified`'s double bind — **fixed in PR B, Task 8**, which also added the real
 > handshake, send and draining receive; PR A only made its send refuse. The orphaned `quic.rs` is deleted too.
 
-**Still unmeasured end-to-end:** UDP, QUIC, email. (WebSocket and HTTP are measured over loopback by
+**Still unmeasured end-to-end:** UDP, ~~QUIC~~, email. (WebSocket and HTTP are measured over loopback by
 `tests/transport_repairs.rs` since transport contract PR B, Tasks 8 and 9.) The table above is a reading of
 `start_server` in each, not a round trip. **`udp_unified` being structurally sound is not a claim that
 it delivers.**
+
+> **Status, 2026-09-23, the QUIC slice (branch `design/quic-transport`, not yet on `main`):** QUIC
+> is now measured end-to-end too — `quic_carries_a_verified_message_end_to_end` and 12 further tests
+> in `tests/transport_repairs.rs` cover the round trip, connection pooling/reuse, size limits, the
+> per-stream timeout, and honest capabilities/metrics. Real `quinn` finally in the build:
+> `grep -n quinn Cargo.toml` now finds the direct dependency, not just a transitive one.
+>
+> **New finding from this slice, recorded rather than fixed here (out of scope for QUIC, flagged by
+> the PM):** adding `quinn`/`rcgen` surfaced that this crate's dependency graph already carries
+> *both* `ring` and `aws-lc-rs` as compiled-in rustls crypto-provider backends (via other,
+> pre-existing dependencies) — two backends, two audit surfaces, extra build time and binary size,
+> with no single place that decides which one the process actually uses at runtime unless a
+> component asks for a specific one explicitly (as the QUIC transport's `quic_tls.rs` now does, via
+> `builder_with_provider`, precisely because relying on `CryptoProvider::install_default()`'s
+> process-wide, order-dependent behavior would have been silently non-deterministic). Worth a
+> dedicated pass to converge the whole crate on one backend; not attempted here.
 
 **Reproducing:** the two probes are ~70 lines each and are not committed (adding a build target is
 outside this pass's charter). Probe A: construct two `TcpTransportImpl` via
