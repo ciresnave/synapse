@@ -589,7 +589,12 @@ impl TransportCapabilities {
                 "authentication".to_string(),
                 "persistent".to_string(),
             ],
-            unmeasured_metrics: vec![],
+            // Unused by any live transport (`email_simple.rs` constructs its own literal): no
+            // real `metrics()` backs either field here, so both are honestly unmeasured.
+            unmeasured_metrics: vec![
+                UnmeasuredMetric::AverageLatency,
+                UnmeasuredMetric::ReliabilityScore,
+            ],
         }
     }
 
@@ -610,7 +615,12 @@ impl TransportCapabilities {
                 "local_network".to_string(),
                 "multicast".to_string(),
             ],
-            unmeasured_metrics: vec![],
+            // Unused by any live transport (`discovery.rs` and `mdns_enhanced.rs` each construct
+            // their own literal): no real `metrics()` backs either field here.
+            unmeasured_metrics: vec![
+                UnmeasuredMetric::AverageLatency,
+                UnmeasuredMetric::ReliabilityScore,
+            ],
         }
     }
 
@@ -635,7 +645,12 @@ impl TransportCapabilities {
                 "frame_based".to_string(),
                 "http_upgrade".to_string(),
             ],
-            unmeasured_metrics: vec![],
+            // Unused by any live transport (`websocket_unified.rs` constructs its own literal,
+            // which does compute both fields for real): no real `metrics()` backs this preset.
+            unmeasured_metrics: vec![
+                UnmeasuredMetric::AverageLatency,
+                UnmeasuredMetric::ReliabilityScore,
+            ],
         }
     }
 
@@ -688,7 +703,12 @@ impl TransportCapabilities {
                 "request_response".to_string(),
                 "standard_protocol".to_string(),
             ],
-            unmeasured_metrics: vec![],
+            // Unused by any live transport (`http_unified.rs` constructs its own literal, which
+            // does compute both fields for real): no real `metrics()` backs this preset.
+            unmeasured_metrics: vec![
+                UnmeasuredMetric::AverageLatency,
+                UnmeasuredMetric::ReliabilityScore,
+            ],
         }
     }
 

@@ -260,9 +260,15 @@ impl Transport for DiscoveryTransport {
             max_message_size: 0,
             features: vec!["discovery_only".to_string()],
             supported_urgencies: Vec::<MessageUrgency>::new(),
-            // `reliability_score` is a deliberate, always-true 0.0 (it carries no messages, so it
-            // never succeeds); `average_latency_ms` is never set past its zero default.
-            unmeasured_metrics: vec![UnmeasuredMetric::AverageLatency],
+            // `reliability_score`'s `0.0` is a fixed constant (this transport carries no
+            // messages, so it always reports total unreliability), not an observation -- and
+            // `0.0` is itself a meaningful reading, so leaving it off `unmeasured_metrics` would
+            // let a caller mistake "deliberately constant" for "measured, and failing".
+            // `average_latency_ms` is never set past its zero default either.
+            unmeasured_metrics: vec![
+                UnmeasuredMetric::AverageLatency,
+                UnmeasuredMetric::ReliabilityScore,
+            ],
         }
     }
 
