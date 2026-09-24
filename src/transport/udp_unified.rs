@@ -112,8 +112,15 @@ impl UdpTransportImpl {
                                     .metadata
                                     .insert("packet_size".to_string(), len.to_string());
 
-                                // Update metrics
-                                if let Ok(mut metrics) = metrics.write() {
+                                // Update metrics. `write()` already blocks here rather than
+                                // trying and skipping under contention, but it still silently
+                                // skipped the whole update on a *poisoned* lock. `unwrap_or_else`
+                                // recovers instead: see `tcp_unified.rs`'s `handle_connection`
+                                // for the full reasoning (a poisoned metrics lock is not a reason
+                                // to drop a counter update, still less inbound traffic).
+                                {
+                                    let mut metrics =
+                                        metrics.write().unwrap_or_else(|e| e.into_inner());
                                     metrics.messages_received += 1;
                                     metrics.bytes_received += len as u64;
                                     metrics.touch();
@@ -191,8 +198,10 @@ impl UdpTransportImpl {
                     target_addr, bytes_sent, send_time
                 );
 
-                // Update metrics
-                if let Ok(mut metrics) = self.metrics.try_write() {
+                // Update metrics. See `start_server`'s matching comment for why this is
+                // `write()` with poison recovery, not `try_write()`.
+                {
+                    let mut metrics = self.metrics.write().unwrap_or_else(|e| e.into_inner());
                     metrics.messages_sent += 1;
                     metrics.bytes_sent += bytes_sent as u64;
 

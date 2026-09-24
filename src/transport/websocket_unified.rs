@@ -997,7 +997,13 @@ impl WebSocketTransportImpl {
             });
             debug!("Queued WebSocket message, total: {}", messages.len());
         }
-        let mut metrics = inbound.metrics.write().unwrap();
+        // `unwrap_or_else` recovers from a poisoned lock rather than panicking this connection's
+        // handler over it: see `tcp_unified.rs`'s `handle_connection` for the full reasoning
+        // (a poisoned metrics lock is not a reason to drop a counter update, still less inbound
+        // traffic). This site previously used a bare `.unwrap()`, which did not have TCP's
+        // silent-skip-under-contention bug (it always blocked for the lock), but did panic on
+        // poison -- unified here with every other transport's metrics lock onto one policy.
+        let mut metrics = inbound.metrics.write().unwrap_or_else(|e| e.into_inner());
         metrics.messages_received += 1;
         metrics.bytes_received += bytes_read as u64;
         metrics.touch();
@@ -1056,7 +1062,12 @@ impl WebSocketTransportImpl {
         let (connect_time, ws) = match self.write_one(url, json, start).await {
             Ok(done) => done,
             Err(e) => {
-                let mut metrics = self.metrics.write().unwrap();
+                // See `handle_connection`'s comment on this same lock for why poison recovers
+                // rather than panics.
+                let mut metrics = self
+                    .metrics
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 metrics.send_failures += 1;
                 metrics.touch();
                 return Err(e);
@@ -1064,7 +1075,7 @@ impl WebSocketTransportImpl {
         };
         let total_time = start.elapsed();
         {
-            let mut metrics = self.metrics.write().unwrap();
+            let mut metrics = self.metrics.write().unwrap_or_else(|e| e.into_inner());
             metrics.messages_sent += 1;
             metrics.bytes_sent += size as u64;
             let sent = metrics.messages_sent;

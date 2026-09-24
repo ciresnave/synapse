@@ -587,8 +587,16 @@ impl TcpTransportImpl {
             debug!("Queued TCP message, total: {}", messages.len());
         }
 
-        // Update metrics
-        if let Ok(mut metrics) = metrics.try_write() {
+        // Update metrics. `write()` (not `try_write()`), same reason the queue insert above
+        // waits for `lock().await` rather than dropping the message: a lock miss under
+        // contention must not silently skip work. `try_write()` here made `messages_received`
+        // undercount whenever anything else (another connection, a `metrics()` reader) held the
+        // lock at this instant -- the message was never lost, only the counter for it.
+        // `unwrap_or_else` recovers from a poisoned lock rather than panicking a connection
+        // handler over it: an undercounted-then-recovered metric is an acceptable cost, dropping
+        // inbound traffic over it is not.
+        {
+            let mut metrics = metrics.write().unwrap_or_else(|e| e.into_inner());
             metrics.messages_received += 1;
             metrics.bytes_received += bytes_read as u64;
             metrics.touch();
@@ -678,8 +686,10 @@ impl TcpTransportImpl {
             target_addr, total_time, connect_time, send_time
         );
 
-        // Update metrics
-        if let Ok(mut metrics) = self.metrics.try_write() {
+        // Update metrics. See `handle_connection`'s matching comment for why this is `write()`
+        // with poison recovery, not `try_write()`.
+        {
+            let mut metrics = self.metrics.write().unwrap_or_else(|e| e.into_inner());
             metrics.messages_sent += 1;
             metrics.bytes_sent += message_json.len() as u64;
 
@@ -1136,6 +1146,14 @@ mod tests {
     /// `lock().await`, the handler dropped the message and this fails on every run, unlike
     /// `tcp_loses_no_message_under_concurrent_sends` in `tests/transport_repairs.rs`, which hits
     /// the contention only by chance.
+    ///
+    /// The same test also guards a second, independent hazard: the metrics lock at the same site
+    /// used to be taken with `try_write()`, which silently skipped the `messages_received` update
+    /// whenever a concurrent reader held the lock -- the message still arrived, only its count was
+    /// lost. This test's final assertion (`messages_received == 1`) failed intermittently under
+    /// that bug, on a machine-timing schedule rather than every run, which is what made it look
+    /// like flakiness rather than a defect until the mechanism was traced. See `handle_connection`
+    /// for the fix (`write().unwrap_or_else(|e| e.into_inner())` in place of `try_write()`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_message_ready_while_the_queue_is_locked_is_queued_once_the_lock_is_released() {
         use crate::types::{SecureMessage, SecurityLevel};
