@@ -50,6 +50,30 @@ use std::{
 };
 use tokio::net::TcpListener;
 
+/// The one address validator `can_reach`/`test_connectivity` use: exactly one `@`, a non-empty
+/// local part, and a domain containing a `.` with non-empty labels on each side of it. Ported from
+/// `email_simple.rs`'s validator of the same name (word for word) rather than reinvented, since a
+/// looser check here (e.g. "just contains `@`") would accept malformed addresses like `"invalid@"`
+/// that the old `SimpleEmailTransport` correctly refused --
+/// `tests/transport_error_handling_test.rs::test_transport_error_handling` exercises exactly this.
+fn valid_address(address: &str) -> bool {
+    let mut parts = address.split('@');
+    let Some(local) = parts.next() else {
+        return false;
+    };
+    let Some(domain) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        // More than one '@'.
+        return false;
+    }
+    if local.is_empty() || domain.is_empty() {
+        return false;
+    }
+    domain.contains('.') && domain.split('.').all(|label| !label.is_empty())
+}
+
 /// Accepts every SMTP envelope unconditionally. This transport's `SynapseSmtpServer` is a
 /// private, single-tenant listener (see module docs): nothing about `MAIL FROM`/`RCPT TO` is ever
 /// used for a security or routing decision here, per the Global Constraints (spec §3) that forbid
@@ -227,7 +251,7 @@ impl Transport for EmailTransportImpl {
     }
 
     async fn can_reach(&self, target: &TransportTarget) -> bool {
-        target.identifier.contains('@')
+        valid_address(&target.identifier)
     }
 
     async fn estimate_metrics(&self, target: &TransportTarget) -> Result<TransportEstimate> {

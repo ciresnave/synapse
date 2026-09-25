@@ -112,16 +112,65 @@ impl TransportProvider for ProductionTransportProvider {
     }
 
     async fn create_email_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        use crate::transport::email_simple::SimpleEmailTransport;
-        info!("Creating simplified email transport");
+        use crate::transport::email_unified::EmailTransportImpl;
+        use std::collections::HashMap;
 
-        match SimpleEmailTransport::new(config.email.clone()) {
+        // Same bridge `create_tcp_transport` above uses: build the `_unified.rs` factory's
+        // `HashMap<String, String>` config from the typed `Config`. `local_port` is hardcoded the
+        // same way TCP's `listen_port` is above (no dedicated "Direct-mode receiving port" field
+        // exists yet); `smtp_*`/`imap_*` are passed through from `config.email` even though Direct
+        // mode itself only uses `local_port`/`bind_scope` today (`send_message` connects to each
+        // target's own address, not a configured smart host -- see `email_unified.rs`'s module
+        // docs) -- they carry forward so a later relay/IMAP-polling task can read the same map
+        // without a second, separate config-bridging path.
+        let mut email_config = HashMap::new();
+        email_config.insert("local_port".to_string(), "2525".to_string());
+        email_config.insert(
+            crate::network_scope::BIND_SCOPE_KEY.to_string(),
+            config.network.bind_scope.config_value().to_string(),
+        );
+        email_config.insert("smtp_host".to_string(), config.email.smtp.host.clone());
+        email_config.insert("smtp_port".to_string(), config.email.smtp.port.to_string());
+        email_config.insert(
+            "smtp_username".to_string(),
+            config.email.smtp.username.clone(),
+        );
+        // TODO(Task 2): SecretString wrapper replaces this plain String
+        email_config.insert(
+            "smtp_password".to_string(),
+            config.email.smtp.password.clone(),
+        );
+        email_config.insert(
+            "smtp_use_tls".to_string(),
+            config.email.smtp.use_tls.to_string(),
+        );
+        email_config.insert(
+            "smtp_use_ssl".to_string(),
+            config.email.smtp.use_ssl.to_string(),
+        );
+        email_config.insert("imap_host".to_string(), config.email.imap.host.clone());
+        email_config.insert("imap_port".to_string(), config.email.imap.port.to_string());
+        email_config.insert(
+            "imap_username".to_string(),
+            config.email.imap.username.clone(),
+        );
+        // TODO(Task 2): SecretString wrapper replaces this plain String
+        email_config.insert(
+            "imap_password".to_string(),
+            config.email.imap.password.clone(),
+        );
+        email_config.insert(
+            "imap_use_ssl".to_string(),
+            config.email.imap.use_ssl.to_string(),
+        );
+
+        match EmailTransportImpl::new(&email_config).await {
             Ok(transport) => {
-                info!("Simple email transport created successfully");
+                info!("Email transport initialized (Direct mode)");
                 Ok(Some(Arc::new(transport) as Arc<dyn abstraction::Transport>))
             }
             Err(e) => {
-                warn!("Failed to create simple email transport: {}", e);
+                warn!("Failed to initialize email transport: {}", e);
                 Ok(None)
             }
         }
