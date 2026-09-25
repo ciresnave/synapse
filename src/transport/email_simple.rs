@@ -228,7 +228,7 @@ impl Default for SimpleEmailTransportFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ImapConfig, SecurityLevel, SmtpConfig};
+    use crate::types::{ImapConfig, SecretString, SecurityLevel, SmtpConfig};
 
     fn test_config() -> EmailConfig {
         EmailConfig {
@@ -236,7 +236,7 @@ mod tests {
                 host: "smtp.example.com".to_string(),
                 port: 587,
                 username: "test@example.com".to_string(),
-                password: "password".to_string(),
+                password: SecretString::new("password"),
                 use_tls: true,
                 use_ssl: false,
             },
@@ -244,7 +244,7 @@ mod tests {
                 host: "imap.example.com".to_string(),
                 port: 993,
                 username: "test@example.com".to_string(),
-                password: "password".to_string(),
+                password: SecretString::new("password"),
                 use_ssl: true,
             },
         }

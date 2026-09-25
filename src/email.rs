@@ -33,7 +33,7 @@ impl EmailTransport {
                 .port(config.smtp.port)
                 .credentials(Credentials::new(
                     config.smtp.username.clone(),
-                    config.smtp.password.clone(),
+                    config.smtp.password.expose().to_string(),
                 ))
                 .build()
         } else {
@@ -42,7 +42,7 @@ impl EmailTransport {
                 .port(config.smtp.port)
                 .credentials(Credentials::new(
                     config.smtp.username.clone(),
-                    config.smtp.password.clone(),
+                    config.smtp.password.expose().to_string(),
                 ));
 
             transport_builder.build()
@@ -217,7 +217,7 @@ impl EmailTransport {
     /// Check if SMTP is properly configured
     pub fn is_smtp_configured(&self) -> bool {
         !self.config.smtp.username.is_empty()
-            && !self.config.smtp.password.is_empty()
+            && !self.config.smtp.password.expose().is_empty()
             && !self.config.smtp.host.is_empty()
             && self.config.smtp.port > 0
     }
@@ -225,7 +225,7 @@ impl EmailTransport {
     /// Check if IMAP is properly configured
     pub fn is_imap_configured(&self) -> bool {
         !self.config.imap.username.is_empty()
-            && !self.config.imap.password.is_empty()
+            && !self.config.imap.password.expose().is_empty()
             && !self.config.imap.host.is_empty()
             && self.config.imap.port > 0
     }
@@ -323,7 +323,7 @@ mod tests {
                 host: "localhost".to_string(),
                 port: 587,
                 username: "test@localhost".to_string(),
-                password: "test".to_string(),
+                password: crate::types::SecretString::new("test"),
                 use_tls: false,
                 use_ssl: false,
             },
@@ -331,7 +331,7 @@ mod tests {
                 host: "localhost".to_string(),
                 port: 993,
                 username: "test@localhost".to_string(),
-                password: "test".to_string(),
+                password: crate::types::SecretString::new("test"),
                 use_ssl: false,
             },
         };

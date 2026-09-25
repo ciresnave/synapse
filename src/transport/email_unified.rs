@@ -185,8 +185,7 @@ impl EmailTransportImpl {
                 host: optional(config, "smtp_host"),
                 port: port(config, "smtp_port", 25)?,
                 username: optional(config, "smtp_username"),
-                // TODO(Task 2): SecretString wrapper replaces this plain String
-                password: optional(config, "smtp_password"),
+                password: crate::types::SecretString::new(optional(config, "smtp_password")),
                 use_tls: flag(config, "smtp_use_tls"),
                 use_ssl: flag(config, "smtp_use_ssl"),
             },
@@ -194,8 +193,7 @@ impl EmailTransportImpl {
                 host: optional(config, "imap_host"),
                 port: port(config, "imap_port", 143)?,
                 username: optional(config, "imap_username"),
-                // TODO(Task 2): SecretString wrapper replaces this plain String
-                password: optional(config, "imap_password"),
+                password: crate::types::SecretString::new(optional(config, "imap_password")),
                 use_ssl: flag(config, "imap_use_ssl"),
             },
         })

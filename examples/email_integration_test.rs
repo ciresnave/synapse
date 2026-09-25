@@ -7,7 +7,7 @@ use synapse::{
     config::{Config, EntityConfig, LoggingConfig, RouterConfig, SecurityConfig},
     error::Result,
     router_enhanced::EnhancedSynapseRouter,
-    types::{EmailConfig, ImapConfig, SmtpConfig},
+    types::{EmailConfig, ImapConfig, SecretString, SmtpConfig},
 };
 
 fn create_test_config() -> Config {
@@ -24,7 +24,7 @@ fn create_test_config() -> Config {
                 host: "localhost".to_string(),
                 port: 2525,
                 username: "test@test.local".to_string(),
-                password: "test".to_string(),
+                password: SecretString::new("test"),
                 use_tls: false,
                 use_ssl: false,
             },
@@ -32,7 +32,7 @@ fn create_test_config() -> Config {
                 host: "localhost".to_string(),
                 port: 1143,
                 username: "test@test.local".to_string(),
-                password: "test".to_string(),
+                password: SecretString::new("test"),
                 use_ssl: false,
             },
         },

@@ -135,10 +135,9 @@ impl TransportProvider for ProductionTransportProvider {
             "smtp_username".to_string(),
             config.email.smtp.username.clone(),
         );
-        // TODO(Task 2): SecretString wrapper replaces this plain String
         email_config.insert(
             "smtp_password".to_string(),
-            config.email.smtp.password.clone(),
+            config.email.smtp.password.expose().to_string(),
         );
         email_config.insert(
             "smtp_use_tls".to_string(),
@@ -154,10 +153,9 @@ impl TransportProvider for ProductionTransportProvider {
             "imap_username".to_string(),
             config.email.imap.username.clone(),
         );
-        // TODO(Task 2): SecretString wrapper replaces this plain String
         email_config.insert(
             "imap_password".to_string(),
-            config.email.imap.password.clone(),
+            config.email.imap.password.expose().to_string(),
         );
         email_config.insert(
             "imap_use_ssl".to_string(),
