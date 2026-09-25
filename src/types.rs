@@ -594,6 +594,50 @@ pub struct EmailConfig {
 
 // EmailTransportConfig removed; EmailConfig is now the unified type for all email transport configuration
 
+/// A credential value that redacts on `Debug` and nothing else. `Serialize`/`Deserialize` pass
+/// the real value through unchanged: `Config::to_file`/`from_file` (`config.rs`) round-trip a
+/// whole `Config`, including this value, to and from a TOML file the operator controls, and a
+/// redacted round-trip would silently corrupt every saved credential. This wrapper protects
+/// against accidental exposure via `Debug`/logging ONLY -- it does nothing to stop a generic
+/// `Serialize` sink (e.g. a struct that serializes itself into a cache or telemetry payload) from
+/// leaking the real value if `SmtpConfig`/`ImapConfig` is ever routed through one; nothing at the
+/// type level prevents that, by design, because `Config::to_file` needs the opposite behavior.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SecretString").field(&"[redacted]").finish()
+    }
+}
+
+impl Serialize for SecretString {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretString {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Ok(Self(String::deserialize(deserializer)?))
+    }
+}
+
 /// SMTP server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmtpConfig {
@@ -604,7 +648,7 @@ pub struct SmtpConfig {
     /// Username for authentication
     pub username: String,
     /// Password for authentication
-    pub password: String,
+    pub password: SecretString,
     /// Use TLS encryption
     pub use_tls: bool,
     /// Use SSL encryption
@@ -621,7 +665,7 @@ pub struct ImapConfig {
     /// Username for authentication
     pub username: String,
     /// Password for authentication
-    pub password: String,
+    pub password: SecretString,
     /// Use SSL encryption
     pub use_ssl: bool,
 }
@@ -773,5 +817,47 @@ impl StreamMetadata {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
         bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_string_redacts_debug_but_round_trips_through_serde() {
+        let secret = SecretString::new("hunter2");
+        assert_eq!(format!("{secret:?}"), "SecretString(\"[redacted]\")");
+        assert!(!format!("{secret:?}").contains("hunter2"));
+
+        let json = serde_json::to_string(&secret).expect("serialize");
+        assert_eq!(
+            json, "\"hunter2\"",
+            "Serialize must pass the real value through"
+        );
+        let round_tripped: SecretString = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round_tripped.expose(), "hunter2");
+    }
+
+    #[test]
+    fn email_config_debug_never_contains_the_password() {
+        let config = EmailConfig {
+            smtp: SmtpConfig {
+                host: "smtp.example.com".to_string(),
+                port: 587,
+                username: "user@example.com".to_string(),
+                password: SecretString::new("hunter2"),
+                use_tls: true,
+                use_ssl: false,
+            },
+            imap: ImapConfig {
+                host: "imap.example.com".to_string(),
+                port: 993,
+                username: "user@example.com".to_string(),
+                password: SecretString::new("hunter2"),
+                use_ssl: true,
+            },
+        };
+        assert!(!format!("{config:?}").contains("hunter2"));
     }
 }

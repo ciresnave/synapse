@@ -17,9 +17,9 @@ use synapse::certificate::{AgentCertificate, Permission};
 use synapse::sealing::{self, Payload, SealingKeyPair};
 use synapse::sender_auth::{SenderVerdict, TrustStore};
 use synapse::transport::{
-    DeliveryConfirmation, DeliveryReceipt, QuicTransportImpl, ReceivedMessage, Transport,
-    TransportFactory, TransportManager, TransportManagerBuilder, TransportStatus, TransportTarget,
-    TransportType,
+    DeliveryConfirmation, DeliveryReceipt, EmailTransportImpl, QuicTransportImpl, ReceivedMessage,
+    Transport, TransportFactory, TransportManager, TransportManagerBuilder, TransportStatus,
+    TransportTarget, TransportType,
 };
 use synapse::types::{SecureMessage, SecurityLevel};
 
@@ -54,6 +54,8 @@ fn port_key(kind: TransportType) -> &'static str {
         TransportType::NatTraversal => "local_port",
         // quic_unified.rs reads `local_port` and binds it when the endpoint is constructed.
         TransportType::Quic => "local_port",
+        // email_unified.rs reads `local_port` and binds it in the constructor (Direct mode).
+        TransportType::Email => "local_port",
         other => panic!("no port key recorded for {other:?}; add it to port_key"),
     }
 }
@@ -66,7 +68,11 @@ enum Socket {
 
 fn socket_of(kind: TransportType) -> Socket {
     match kind {
-        TransportType::Tcp | TransportType::Http | TransportType::WebSocket => Socket::Tcp,
+        // email_unified.rs binds a `tokio::net::TcpListener` (plain SMTP, no UDP).
+        TransportType::Tcp
+        | TransportType::Http
+        | TransportType::WebSocket
+        | TransportType::Email => Socket::Tcp,
         // NAT traversal listens on a `UdpSocket` (nat_traversal.rs, `start`).
         // QUIC runs over UDP (quic_unified.rs binds a `quinn::Endpoint`, itself a UDP socket).
         TransportType::Udp | TransportType::NatTraversal | TransportType::Quic => Socket::Udp,
@@ -2686,6 +2692,271 @@ async fn nat_traversal_carries_a_verified_message_end_to_end() {
     assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
 }
 
+fn email() -> Box<dyn TransportFactory> {
+    Box::new(synapse::transport::EmailTransportFactory)
+}
+
+/// `EmailTransportFactory` always refused (`SimpleEmailTransport`'s honest stub) until this task.
+/// This is the first test proving Direct mode actually sends and receives: alice's
+/// `EmailTransportImpl` relays via `lettre` to bob's own `EmailTransportImpl`, whose
+/// `EmailTransportFactory` starts a `SynapseSmtpServer` on `local_port`; bob's `receive_raw` drains
+/// that server's message store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_direct_mode_carries_a_verified_message_end_to_end() {
+    let (received, receipt) = round_trip(
+        TransportType::Email,
+        email(),
+        email(),
+        free_port(),
+        free_port(),
+        b"repaired",
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+    assert_eq!(received.incoming.transport_type, TransportType::Email);
+    assert_eq!(receipt.transport_used, TransportType::Email);
+    assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
+}
+
+/// Accepts any login and authorizes everything -- the `SynapseImapServer` this test starts is a
+/// private, single-purpose stand-in mailbox for this one test (never a live external provider, per
+/// spec §7), not a shared multi-user server, mirroring `email_unified.rs`'s own (private)
+/// `AcceptAllAuthHandler`.
+struct AcceptAllImapAuth;
+
+impl synapse::email_server::AuthHandler for AcceptAllImapAuth {
+    fn authenticate(&self, _username: &str, _password: &str) -> synapse::error::Result<bool> {
+        Ok(true)
+    }
+    fn is_authorized_sender(&self, _email: &str) -> synapse::error::Result<bool> {
+        Ok(true)
+    }
+    fn is_authorized_recipient(&self, _email: &str) -> synapse::error::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// Build a `TransportManager` with only `Email` enabled, forced into `RelayOut` mode via the
+/// `email_mode` config override (module docs in `email_unified.rs` explain why: a real
+/// `ConnectivityDetector` assessment probes fixed ports that other loopback tests in this same
+/// binary bind and release, so it is not deterministic here). Unlike `node()`, this asserts nothing
+/// about a bound port: RelayOut mode binds no inbound listener at all.
+async fn email_relay_out_node(
+    imap_port: u16,
+    imap_username: &str,
+    imap_password: &str,
+    store: TrustStore,
+    sealing_key: SealingKeyPair,
+) -> TransportManager {
+    let mut config = HashMap::new();
+    config.insert("email_mode".to_string(), "relay_out".to_string());
+    config.insert("imap_host".to_string(), "127.0.0.1".to_string());
+    config.insert("imap_port".to_string(), imap_port.to_string());
+    config.insert("imap_username".to_string(), imap_username.to_string());
+    config.insert("imap_password".to_string(), imap_password.to_string());
+    config.insert(
+        synapse::network_scope::BIND_SCOPE_KEY.to_string(),
+        synapse::network_scope::BindScope::Loopback
+            .config_value()
+            .to_string(),
+    );
+
+    let mut builder = TransportManagerBuilder::new();
+    for other in ALL_TRANSPORTS {
+        if other != TransportType::Email {
+            builder = builder.disable_transport(other);
+        }
+    }
+    let manager = builder
+        .enable_transport(TransportType::Email)
+        .transport_config(TransportType::Email, config)
+        .trust_store(store)
+        .sealing_key(sealing_key)
+        .build();
+    manager
+        .register_factory(email())
+        .await
+        .expect("factory registers");
+    tokio::time::timeout(Duration::from_secs(5), manager.start())
+        .await
+        .expect("start returns")
+        .expect("start succeeds");
+
+    let status = manager.get_transport_status().await;
+    assert_eq!(
+        status.get(&TransportType::Email),
+        Some(&TransportStatus::Running),
+        "RelayOut mode should report Running even with no bound listener: {status:?}"
+    );
+    manager
+}
+
+/// Relay-out/external mode: this transport cannot run its own inbound listener, so `receive_raw`
+/// polls a configured IMAP mailbox instead -- our own `SynapseImapServer` on loopback, pre-seeded,
+/// standing in for "the external mailbox already has mail" (spec §7: no live external provider in
+/// any test). The store is seeded directly (bypassing SMTP and even a real `LOGIN`-then-`APPEND`
+/// entirely, since this test is about the IMAP-*receive* path in isolation), so the message the
+/// test asserts on never touched `lettre` or `SynapseSmtpServer` at all -- it arrives at
+/// `TransportManager::receive_messages()` purely by `EmailTransportImpl::poll_imap_inbox` logging
+/// in, `SELECT`ing `INBOX`, and `FETCH`ing it over the real IMAP wire protocol (see
+/// `imap_server.rs`'s `handle_connection`, traced for this task: it has no `SEARCH` command and
+/// tracks no `\Seen` flag, hence `poll_imap_inbox`'s own client-side de-dupe by `message_id`).
+///
+/// The message is signed (not sealed) and its signer's account key is pinned in bob's trust store,
+/// the same shape `Pair::signed`/`cert_for` build elsewhere in this file, so it survives
+/// `TransportManager::receive_messages()`'s replay-admission step (an unverifiable sender is
+/// dropped there by default) and arrives `Verified`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_relay_out_mode_receives_via_imap_polling() {
+    let account = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+    let mut alice = CryptoManager::new();
+    alice.generate_keypair().expect("keypair");
+    let alice_sealing = SealingKeyPair::generate();
+    alice.set_certificate_chain(vec![cert_for(&account, &alice, &alice_sealing, ALICE)]);
+
+    let mut message = SecureMessage::new(
+        BOB,
+        ALICE,
+        b"via imap poll".to_vec(),
+        SecurityLevel::Authenticated,
+    );
+    alice.sign_secure_message(&mut message).expect("sign");
+    let message_id = message.message_id.0;
+
+    const IMAP_USER: &str = "relaytest";
+    let message_store: Arc<std::sync::Mutex<HashMap<String, Vec<SecureMessage>>>> = Arc::new(
+        std::sync::Mutex::new(HashMap::from([(IMAP_USER.to_string(), vec![message])])),
+    );
+
+    let imap_port = free_port();
+    let imap_server = synapse::email_server::SynapseImapServer::new(
+        synapse::email_server::ImapServerConfig {
+            port: imap_port,
+            bind_scope: synapse::network_scope::BindScope::Loopback,
+            ..Default::default()
+        },
+        Arc::clone(&message_store),
+        Arc::new(AcceptAllImapAuth),
+    );
+    tokio::spawn(async move {
+        let _ = imap_server.start().await;
+    });
+
+    let mut bob_store = TrustStore::new();
+    bob_store.pin_account_key("alice-account", account.verifying_key().to_bytes());
+    let bob_sealing = SealingKeyPair::generate();
+    let bob_node =
+        email_relay_out_node(imap_port, IMAP_USER, "anything", bob_store, bob_sealing).await;
+
+    // The IMAP server's own bind (inside the task just spawned) races this poll loop; a connection
+    // refused is swallowed by `receive_messages` (it only logs, per `manager.rs`), so retrying is
+    // the same shape as `round_trip`'s own poll loop, not evidence of anything else being wrong.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut found: Option<ReceivedMessage> = None;
+    while Instant::now() < deadline {
+        let mut batch = bob_node.receive_messages().await.expect("receive");
+        if let Some(received) = batch.pop() {
+            assert!(batch.is_empty(), "exactly one message was seeded");
+            found = Some(received);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let received = found.expect("the seeded message must arrive within 5s via IMAP polling");
+
+    assert_eq!(received.incoming.transport_type, TransportType::Email);
+    assert_eq!(received.incoming.message.message_id.0, message_id);
+    assert_eq!(received.payload, Payload::Plain(b"via imap poll".to_vec()));
+    match &received.sender {
+        SenderVerdict::Verified { key_id } => assert_eq!(
+            key_id,
+            &synapse::sender_auth::key_id(&alice.public_key_bytes().expect("public key")),
+            "the verdict must pin alice's signing key"
+        ),
+        other => panic!("the message must arrive Verified: {other:?}"),
+    }
+
+    // A second poll must not redeliver the same message: `SynapseImapServer` never removes it from
+    // the mailbox (no STORE/EXPUNGE support), so this is `poll_imap_inbox`'s own de-dupe being
+    // exercised, not an artifact of the server.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let second = bob_node.receive_messages().await.expect("receive");
+    assert!(
+        second.is_empty(),
+        "a second poll must not redeliver the same IMAP message; {} arrived",
+        second.len()
+    );
+}
+
+/// `metrics()` used to report `messages_sent`/`bytes_sent`/`send_failures` all hardcoded `0`, with
+/// `average_latency_ms` and `reliability_score` both blanket-declared `UnmeasuredMetric`s (Task 1's
+/// honest placeholder). This proves the Task 5 repair through the public API: a raw
+/// `EmailTransportImpl` in Direct mode, sending to a live peer, moves the real counters, computes
+/// `reliability_score` by QUIC's exact formula, and -- because `average_latency_ms` is now a real
+/// running average of `send_message`'s own elapsed time, not an invented constant -- declares
+/// nothing in `unmeasured_metrics` at all. Mirrors `quic_metrics_counts_real_sends_and_receives`'s
+/// and `nat_traversal_metrics_counts_a_real_send`'s shape (same file).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_metrics_counts_real_sends() {
+    let alice = EmailTransportImpl::new(&one_key("email_mode", "direct"))
+        .await
+        .expect("construct a raw email sender");
+
+    let bob_port = free_port();
+    let mut bob_config = one_key("email_mode", "direct");
+    bob_config.insert("local_port".to_string(), bob_port.to_string());
+    let bob = EmailTransportImpl::new(&bob_config)
+        .await
+        .expect("construct a raw email receiver");
+    bob.start().await.expect("start bob");
+
+    // Board item 53's defect (module docs on the counters/`capabilities()` in
+    // `email_unified.rs`) was two transports fabricating a plausible-looking non-zero metric
+    // instead of declaring it unmeasured. This is the exact assertion that would have caught it
+    // here: check what this transport *declares* before checking what it *reports*.
+    let capabilities = alice.capabilities();
+    assert_eq!(
+        capabilities.unmeasured_metrics,
+        Vec::new(),
+        "both reliability_score and average_latency_ms are backed by real counters/timing for \
+         email in every mode, so nothing should be declared unmeasured"
+    );
+
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{bob_port}"));
+    let message = SecureMessage::new(
+        BOB,
+        ALICE,
+        b"raw metrics check".to_vec(),
+        SecurityLevel::Public,
+    );
+    let wall_clock_start = Instant::now();
+    alice
+        .send_message(&target, &message)
+        .await
+        .expect("raw send");
+    let wall_elapsed_ms = wall_clock_start.elapsed().as_millis() as u64;
+
+    let alice_metrics = alice.metrics().await;
+    assert_eq!(alice_metrics.transport_type, TransportType::Email);
+    assert_eq!(alice_metrics.messages_sent, 1);
+    assert!(alice_metrics.bytes_sent > 0);
+    assert_eq!(alice_metrics.send_failures, 0);
+    assert_eq!(alice_metrics.reliability_score, 1.0);
+    // A real measurement can never exceed the wall-clock window it was taken inside (a small
+    // slack covers rounding/scheduling noise around the two `Instant`s). This is what actually
+    // distinguishes a genuine running average from a plausible-looking hardcoded fabrication --
+    // board item 53's transports hardcoded exactly `average_latency_ms: 50`, which a bare
+    // non-zero check would happily let through but this bound would not, on loopback.
+    assert!(
+        alice_metrics.average_latency_ms <= wall_elapsed_ms + 5,
+        "average_latency_ms ({}) exceeds the wall-clock time actually observed around the one \
+         send it is averaging ({wall_elapsed_ms} ms + 5ms slack) -- a real measurement cannot \
+         exceed reality",
+        alice_metrics.average_latency_ms
+    );
+}
+
 /// `metrics()` used to hardcode `average_latency_ms: 50` and `reliability_score: 0.8` regardless
 /// of any real traffic (board item 53), and `messages_sent`/`messages_received`/etc. were all
 /// hardcoded `0`. This proves the repair through the public API: sending moves the real send-side
@@ -3441,4 +3712,254 @@ async fn quic_metrics_counts_real_sends_and_receives() {
     let bob_metrics = bob_quic.metrics().await;
     assert_eq!(bob_metrics.messages_received, 1);
     assert!(bob_metrics.bytes_received > 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Email (plan Task 4): size limits, backpressure, and config validation.
+// ---------------------------------------------------------------------------------------------
+
+/// The sender refuses a message whose serialized form is over its `max_message_size`, before
+/// building a `lettre::Message` or touching an SMTP client, instead of dialing out and claiming
+/// `Sent` for a message a receiver with the same limit would drop. Mirrors
+/// `tcp_refuses_at_send_a_message_over_its_limit`'s shape: the target address points at a bound-
+/// and-released port nothing listens on, so a real send attempt would fail fast with a connection
+/// error (`TransportError`) -- proving the refusal happens first, distinguishable from "tried and
+/// failed" by the error variant alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_refuses_at_send_a_message_over_its_limit() {
+    const LIMIT: usize = 1024;
+    // Direct mode is the default under `BindScope::Loopback` (email_unified.rs's module docs), so
+    // no `email_mode` override is needed; `local_port` defaults to 0 (OS-assigned), so this binds
+    // without needing a `free_port()` of its own.
+    let config = one_key("max_message_size", &LIMIT.to_string());
+
+    let alice_transport = synapse::transport::EmailTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("a Direct-mode transport with a small max_message_size");
+
+    // Nobody listens here; if the refusal were skipped, `send_message` would get a connection
+    // error instead, which is a different `Result` variant than `MessageRefused`.
+    let dead_port = free_port();
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{dead_port}"));
+
+    let over = SecureMessage::new(BOB, ALICE, vec![7u8; LIMIT * 4], SecurityLevel::Public);
+    let over_size = wire_size(&over);
+    assert!(
+        over_size > LIMIT,
+        "the message must actually serialize over the {LIMIT}-byte limit; got {over_size}"
+    );
+
+    match alice_transport.send_message(&target, &over).await {
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+        Err(synapse::SynapseError::MessageRefused(reason)) => {
+            assert!(
+                reason.contains("max_message_size")
+                    && reason.contains(&over_size.to_string())
+                    && reason.contains(&LIMIT.to_string()),
+                "the refusal must name the limit and both sizes: {reason}"
+            );
+        }
+        Err(other) => panic!(
+            "must be refused with MessageRefused (before any SMTP connection is attempted), \
+             not {other:?}"
+        ),
+    }
+}
+
+/// A `max_message_size` that does not parse, or is zero, must refuse construction: before this
+/// task, `EmailTransportFactory::validate_config` accepted anything and the key did not exist at
+/// all. Mirrors `tcp_refuses_an_unparseable_or_zero_limit`.
+#[tokio::test]
+async fn email_refuses_an_unparseable_or_zero_max_message_size() {
+    for bad in ["", "abc", "0", "-1", "1MiB"] {
+        let config = one_key("max_message_size", bad);
+        assert!(
+            synapse::transport::EmailTransportFactory
+                .validate_config(&config)
+                .is_err(),
+            "max_message_size = {bad:?} must be refused by validate_config"
+        );
+        match synapse::transport::EmailTransportFactory
+            .create_transport(&config)
+            .await
+        {
+            Ok(_) => {
+                panic!("max_message_size = {bad:?} must be refused, not replaced by a default")
+            }
+            Err(e) => assert!(
+                e.to_string().contains("max_message_size"),
+                "the error for max_message_size = {bad:?} must name the key: {e}"
+            ),
+        }
+    }
+    let good = one_key("max_message_size", "4096");
+    synapse::transport::EmailTransportFactory
+        .validate_config(&good)
+        .expect("a valid max_message_size must be accepted");
+    assert!(
+        synapse::transport::EmailTransportFactory
+            .create_transport(&good)
+            .await
+            .is_ok(),
+        "max_message_size = 4096 must be accepted"
+    );
+}
+
+/// The queue budget must hold the largest message the receiver stores, or a stored message would
+/// wait forever for budget that never comes; and it must fit the `u32` one semaphore acquire
+/// counts in. Construction refuses a budget below `max_message_size`, above `u32::MAX`,
+/// unparseable or zero, naming the key; a budget equal to `max_message_size` is the positive
+/// control. Mirrors `tcp_refuses_a_queue_budget_smaller_than_its_largest_message`.
+#[tokio::test]
+async fn email_refuses_a_queue_budget_smaller_than_its_largest_message() {
+    let config = |budget: &str, message: &str| {
+        HashMap::from([
+            ("max_queued_bytes".to_string(), budget.to_string()),
+            ("max_message_size".to_string(), message.to_string()),
+        ])
+    };
+    let over_u32 = (u64::from(u32::MAX) + 1).to_string();
+    for (budget, message) in [
+        ("4095", "4096"),
+        ("1", "4096"),
+        ("1048575", "1048576"),
+        (over_u32.as_str(), over_u32.as_str()),
+        ("0", "4096"),
+        ("abc", "4096"),
+    ] {
+        match synapse::transport::EmailTransportFactory
+            .create_transport(&config(budget, message))
+            .await
+        {
+            Ok(_) => panic!(
+                "max_queued_bytes = {budget} with max_message_size = {message} must be refused"
+            ),
+            Err(e) => assert!(
+                e.to_string().contains("max_queued_bytes"),
+                "the error for max_queued_bytes = {budget} must name the key: {e}"
+            ),
+        }
+    }
+    // Without `max_message_size`, the budget is checked against its default of 10 MiB.
+    assert!(
+        synapse::transport::EmailTransportFactory
+            .create_transport(&one_key("max_queued_bytes", "4096"))
+            .await
+            .is_err(),
+        "max_queued_bytes = 4096 is under the default max_message_size and must be refused"
+    );
+    for (budget, message) in [("4096", "4096"), ("8192", "4096")] {
+        assert!(
+            synapse::transport::EmailTransportFactory
+                .create_transport(&config(budget, message))
+                .await
+                .is_ok(),
+            "max_queued_bytes = {budget} with max_message_size = {message} must be accepted"
+        );
+    }
+    let u32_max = u32::MAX.to_string();
+    assert!(
+        synapse::transport::EmailTransportFactory
+            .create_transport(&config(&u32_max, "4096"))
+            .await
+            .is_ok(),
+        "max_queued_bytes = u32::MAX must be accepted"
+    );
+}
+
+/// A message body over `max_message_size` sent straight to Direct mode's own `SynapseSmtpServer`
+/// (bypassing `EmailTransportImpl::send_message`'s own check, to prove the receiver enforces the
+/// same limit independently -- e.g. against a peer that ignores the sender-side check) is refused
+/// by `store_message` before it is parsed, queued, or delivered to `receive_raw`, and does not
+/// increment `receive_failures` (that counter is for bodies that parse-fail, module docs; refusal
+/// for size is a distinct outcome).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_smtp_server_refuses_a_data_body_over_its_limit() {
+    let auth_handler: Arc<dyn synapse::email_server::AuthHandler + Send + Sync> =
+        Arc::new(AcceptAllImapAuth);
+    let message_store = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let server = synapse::email_server::SynapseSmtpServer::new(
+        synapse::email_server::SmtpServerConfig {
+            max_message_size: 64,
+            require_auth: false,
+            ..Default::default()
+        },
+        auth_handler,
+        message_store,
+    );
+    let port = free_port();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .expect("bind");
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        let _ = server_clone.serve(listener).await;
+    });
+
+    let message = SecureMessage::new(BOB, ALICE, vec![9u8; 512], SecurityLevel::Public);
+    let json = serde_json::to_vec(&message).expect("serialize");
+    assert!(
+        json.len() > 64,
+        "the DATA body must actually be over the 64-byte limit; got {}",
+        json.len()
+    );
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (read_half, mut write_half) = stream.split();
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("greeting"); // 220
+    write_half.write_all(b"EHLO test\r\n").await.unwrap();
+    line.clear();
+    while reader.read_line(&mut line).await.unwrap() > 0 {
+        let done = line.starts_with("250 ");
+        line.clear();
+        if done {
+            break;
+        }
+    }
+    write_half
+        .write_all(b"MAIL FROM:<alice@repair.test>\r\n")
+        .await
+        .unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    write_half
+        .write_all(b"RCPT TO:<bob@repair.test>\r\n")
+        .await
+        .unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    write_half.write_all(b"DATA\r\n").await.unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(line.starts_with("354"), "expected 354, got {line:?}");
+
+    write_half
+        .write_all(b"Content-Type: text/plain\r\n\r\n")
+        .await
+        .unwrap();
+    write_half.write_all(&json).await.unwrap();
+    write_half.write_all(b"\r\n.\r\n").await.unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(
+        line.starts_with("552"),
+        "an over-limit DATA body must be refused with 552, got {line:?}"
+    );
+
+    let stored = server.drain_all_messages().expect("drain");
+    assert!(
+        stored.is_empty(),
+        "a refused-for-size body must never be stored: {} messages arrived",
+        stored.len()
+    );
 }

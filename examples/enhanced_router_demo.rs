@@ -14,7 +14,7 @@ use synapse::{
     config::{Config, EntityConfig, LoggingConfig, RouterConfig, SecurityConfig},
     error::Result,
     transport::abstraction::MessageUrgency,
-    types::{EmailConfig, ImapConfig, MessageType, SecurityLevel, SmtpConfig},
+    types::{EmailConfig, ImapConfig, MessageType, SecretString, SecurityLevel, SmtpConfig},
 };
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -244,7 +244,7 @@ fn create_demo_config() -> Config {
                 host: "localhost".to_string(),
                 port: 2525,
                 username: "demo@synapse.local".to_string(),
-                password: "demo_password".to_string(),
+                password: SecretString::new("demo_password"),
                 use_tls: false,
                 use_ssl: false,
             },
@@ -252,7 +252,7 @@ fn create_demo_config() -> Config {
                 host: "localhost".to_string(),
                 port: 1143,
                 username: "demo@synapse.local".to_string(),
-                password: "demo_password".to_string(),
+                password: SecretString::new("demo_password"),
                 use_ssl: false,
             },
         },

@@ -402,6 +402,15 @@ owns it may not survive the merge.
 > ("not implemented yet; it arrives in the email slice") instead of faking one.
 > `transport_error_handling_test` passes; the full run at `593f1c9`, a commit of PR #44 before its squash, shows 0 failures.
 
+> **Status, 2026-09-25, the email-transport slice (branch `feat/email-transport`, not yet on
+> `main`):** the "arrives in the email slice" placeholder above is this slice. `TransportType::Email`'s
+> factory now constructs a real `EmailTransportImpl` (Direct/RelayOut/External modes: real SMTP
+> send via `lettre`, real IMAP-polling receive via `async-imap`) instead of `SimpleEmailTransport`'s
+> permanent refusal. `tests/transport_repairs.rs`'s
+> `email_direct_mode_carries_a_verified_message_end_to_end` and
+> `email_relay_out_mode_receives_via_imap_polling` measure a real round trip over loopback, the same
+> standard applied to WebSocket/HTTP (PR B) and QUIC (the QUIC slice) above.
+
 ### 2.2 ⚠️ END-TO-END ROUND TRIP: MEASURED, AND IT FAILS WHILE REPORTING SUCCESS
 
 **No test in the suite sends a message between two endpoints over a real socket, so I ran one.** This
@@ -674,7 +683,9 @@ mis-read an early return as the whole body.
 > (`manager.rs:653`), and the unrelated `email.rs:162` and `router.rs:109`, which are not transports.
 > Of the semantics above, the two cloning implementations (`production_http`, `quic_unified`) are
 > deleted; `discovery` still adds nothing, `email_simple` now refuses, and `tcp_simple` added nothing
-> until transport contract PR B, Task 7 deleted it (below).
+> until transport contract PR B, Task 7 deleted it (below). **Status, 2026-09-25:** `email_simple`'s
+> refusal is itself superseded by the email-transport slice's real `EmailTransportImpl` -- see the
+> "email-transport slice" status notes under §2.1 above and "Still unmeasured end-to-end" below.
 
 > **Status, 2026-09-18, PR B Task 7 (branch `feat/transport-contract-b`, not yet on `main`):**
 > `tcp_simple.rs` is deleted, with the shadowing `TcpTransportFactory` that built it; the public
@@ -985,10 +996,50 @@ orphaned `src/transport/quic.rs` (740 lines, §5.3) *does* contain a real `endpo
 > construct. `websocket_unified`'s double bind — **fixed in PR B, Task 8**, which also added the real
 > handshake, send and draining receive; PR A only made its send refuse. The orphaned `quic.rs` is deleted too.
 
-**Still unmeasured end-to-end:** UDP, ~~QUIC~~, email. (WebSocket and HTTP are measured over loopback by
+**Still unmeasured end-to-end:** UDP, ~~QUIC~~, ~~email~~. (WebSocket and HTTP are measured over loopback by
 `tests/transport_repairs.rs` since transport contract PR B, Tasks 8 and 9.) The table above is a reading of
 `start_server` in each, not a round trip. **`udp_unified` being structurally sound is not a claim that
 it delivers.**
+
+> **Status, 2026-09-25, the email-transport slice:** email is now measured end-to-end too --
+> `tests/transport_repairs.rs`'s `email_direct_mode_carries_a_verified_message_end_to_end` and
+> `email_relay_out_mode_receives_via_imap_polling` cover Direct-mode SMTP send/receive and
+> RelayOut-mode IMAP polling round trips, plus size limits, backpressure and honest
+> capabilities/metrics (`email_refuses_at_send_a_message_over_its_limit`,
+> `email_metrics_counts_real_sends`). `async-imap` and `lettre` are non-optional dependencies now
+> (no longer gated behind the `email` Cargo feature).
+>
+> **New finding, recorded rather than fixed here (out of scope for this slice, flagged for the
+> project owner):** the wire-format-hand-picking bug class (a component building a `SecureMessage`
+> by hand-picking a field into `encrypted_content` instead of parsing/serializing the whole
+> structure) was swept across the codebase in parallel with this slice's Task 4. Of 4 instances
+> found, 3 are fixed in this slice's commits (NAT traversal, `smtp_server.rs`'s `store_message`,
+> `imap_server.rs`); the 4th, `src/email.rs`'s `create_email_message` (reachable via the public
+> `SynapseRouter` in `src/router.rs`, which still constructs the legacy `EmailTransport` from
+> `src/email.rs`, not `EmailTransportImpl`), is explicitly **out of scope** for this slice and
+> pending the project owner's decision -- not fixed, not silently ignored.
+>
+> **`TransportMetrics::active_connections` for email is a verified `0`, not a default standing in
+> for one:** this transport holds no persistent connection or pool in any mode (the SMTP client and
+> IMAP session are both constructed fresh per call), so `active_connections: 0` is measured, not
+> guessed. But `capabilities().unmeasured_metrics` being empty for this transport does **not** mean
+> every `TransportMetrics` field is measured in general: `UnmeasuredMetric` (`abstraction.rs`) has
+> only two variants, `AverageLatency` and `ReliabilityScore`, so a transport with a real gap in a
+> field outside those two (this one doesn't have one, but the enum itself can't express one if a
+> future transport does) would still read `unmeasured_metrics: []`. This is an asserted, documented
+> limitation of the honesty-contract enum, not a silent absence.
+>
+> **`poll_imap_inbox`'s RelayOut/External receive always full-scans (`FETCH "1:*"`) rather than using
+> `SEARCH UNSEEN`, and this is correct behaviour today, not a shortcut taken.** Its trigger, stated
+> precisely rather than left as a general to-do: this slice's own `SynapseImapServer` (the loopback
+> stand-in every test in this slice runs against, per the "no live external provider" constraint) has
+> no `SEARCH`/`STORE` support at all, so there is nothing narrower to ask it for — client-side
+> dedup (`imap_seen_ids`) is the only option against that server. **The behaviour becomes wrong, not
+> merely inefficient, only when External mode is pointed at a real provider** (Gmail, Outlook, etc.)
+> that does support `SEARCH UNSEEN`/`STORE +FLAGS`: at that point this full-scan-and-dedup approach
+> should be replaced with a real `CAPABILITY` negotiation and narrower fetches. Not fixed here because
+> the trigger condition (a real external provider in the loop) does not exist yet in this slice's own
+> scope.
 
 > **Status, 2026-09-23, the QUIC slice (branch `design/quic-transport`, not yet on `main`):** QUIC
 > is now measured end-to-end too — `quic_carries_a_verified_message_end_to_end` and 12 further tests

@@ -75,10 +75,12 @@ impl SynapseEmailServer {
         // Shared message store
         let message_store = Arc::new(Mutex::new(HashMap::new()));
 
-        // Create servers
+        // Create servers, sharing one message store between them (previously the SMTP server held
+        // its own private store that the IMAP server, and everything else, could never read).
         let smtp_server = SynapseSmtpServer::new(
             smtp_config,
             Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+            Arc::clone(&message_store),
         );
         let imap_server = SynapseImapServer::new(
             imap_config,
@@ -106,6 +108,7 @@ impl SynapseEmailServer {
         let smtp_server = SynapseSmtpServer::new(
             smtp_config,
             Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+            Arc::clone(&message_store),
         );
         let imap_server = SynapseImapServer::new(
             imap_config,
@@ -250,6 +253,7 @@ pub async fn create_test_email_server() -> Result<SynapseEmailServer> {
     let smtp_server = SynapseSmtpServer::new(
         smtp_config,
         Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
+        Arc::clone(&message_store),
     );
     let imap_server = SynapseImapServer::new(
         imap_config,

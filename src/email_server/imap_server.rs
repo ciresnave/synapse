@@ -307,13 +307,21 @@ impl SynapseImapServer {
                 for seq_num in seq_nums {
                     if let Some(message) = messages.get(seq_num - 1) {
                         if items.contains("RFC822") || items.contains("BODY[]") {
-                            let email_content = self.format_as_email(message);
+                            let email_content = self.format_as_email(message)?;
+                            // IMAP literal syntax (RFC 3501 §9): after the declared byte count,
+                            // the response's syntax continues immediately -- no CRLF belongs
+                            // between the literal's last byte and the closing `)`. A previous
+                            // version pushed `email_content + "\r\n"` as its own response before
+                            // `)\r\n`, adding two bytes the declared `{len}` did not count; a
+                            // strict client (this task's `async-imap`) reads exactly `len` bytes
+                            // of literal and then finds a stray `\r\n` where `)` must be, which
+                            // fails to parse.
                             responses.push(format!(
-                                "* {} FETCH (RFC822 {{{}}}\r\n",
+                                "* {} FETCH (RFC822 {{{}}}\r\n{}",
                                 seq_num,
-                                email_content.len()
+                                email_content.len(),
+                                email_content
                             ));
-                            responses.push(format!("{email_content}\r\n"));
                             responses.push(")\r\n".to_string());
                         } else if items.contains("FLAGS") {
                             responses.push(format!("* {seq_num} FETCH (FLAGS ())\r\n"));
@@ -354,13 +362,30 @@ impl SynapseImapServer {
         }
     }
 
-    /// Format SecureMessage as email content
-    fn format_as_email(&self, message: &SecureMessage) -> String {
-        let content = String::from_utf8_lossy(&message.encrypted_content);
-        format!(
-            "From: {}\r\nTo: {}\r\nSubject: EMRP Message\r\nDate: {:?}\r\n\r\n{}",
-            message.from_global_id, message.to_global_id, message.timestamp, content
-        )
+    /// Format `message` as the RFC822 body a `FETCH ... RFC822`/`BODY[]` response carries. Carries
+    /// the whole `SecureMessage` as JSON in the body, exactly as a peer's own SMTP DATA body does
+    /// (`email_unified.rs`'s `send_message`, `smtp_server.rs`'s `store_message`) -- never
+    /// hand-picked fields, per the Global Constraints (spec §4). A previous version reconstructed
+    /// a lossy, human-readable envelope from only `from_global_id`/`to_global_id`/`timestamp`/
+    /// `encrypted_content`, dropping `sender_proof`, `metadata`, `routing_path` and
+    /// `protocol_version` entirely -- unusable by an IMAP-polling receiver that needs the whole
+    /// `SecureMessage` back (`email_unified.rs`'s `poll_imap_inbox`).
+    /// Errors rather than silently producing a truncated/empty body: the same failure mode as
+    /// the wire-format bug this function used to have (a message reaching the wire with content
+    /// missing and nothing saying so), by a different mechanism -- a serialize failure here must
+    /// not become an empty body a client reads as an empty, successfully-delivered message.
+    fn format_as_email(&self, message: &SecureMessage) -> Result<String> {
+        let json = serde_json::to_vec(message).map_err(|e| {
+            SynapseError::InvalidMessageFormat(format!(
+                "failed to serialize SecureMessage for IMAP delivery: {e}"
+            ))
+        })?;
+        Ok(format!(
+            "From: {}\r\nTo: {}\r\nSubject: Synapse\r\n\r\n{}",
+            message.from_global_id,
+            message.to_global_id,
+            String::from_utf8_lossy(&json)
+        ))
     }
 }
 

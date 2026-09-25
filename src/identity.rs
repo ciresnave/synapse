@@ -176,7 +176,7 @@
 //! ### Import from External Sources
 //! ```rust
 //! # use synapse::identity::IdentityRegistry;
-//! # use synapse::types::{EmailConfig, SmtpConfig, ImapConfig};
+//! # use synapse::types::{EmailConfig, SmtpConfig, ImapConfig, SecretString};
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let mut registry = IdentityRegistry::new();
@@ -185,7 +185,7 @@
 //! #         host: "smtp.example.com".to_string(),
 //! #         port: 587,
 //! #         username: "user".to_string(),
-//! #         password: "pass".to_string(),
+//! #         password: SecretString::new("pass"),
 //! #         use_tls: true,
 //! #         use_ssl: false,
 //! #     },
@@ -193,7 +193,7 @@
 //! #         host: "imap.example.com".to_string(),
 //! #         port: 993,
 //! #         username: "user".to_string(),
-//! #         password: "pass".to_string(),
+//! #         password: SecretString::new("pass"),
 //! #         use_ssl: true,
 //! #     }
 //! # };

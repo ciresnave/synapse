@@ -39,7 +39,7 @@ pub use discovery::DiscoveryTransport;
 pub mod http_unified;
 // Consolidated TCP implementation - using tcp_unified as primary
 #[cfg(not(target_arch = "wasm32"))]
-pub mod email_simple; // Simplified email transport avoiding TLS complexity
+pub mod email_unified; // Real SMTP send / SynapseSmtpServer receive (Direct mode)
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mdns_enhanced;
 #[cfg(not(target_arch = "wasm32"))]
@@ -596,7 +596,7 @@ pub use udp_unified::{UdpTransportFactory, UdpTransportImpl};
 
 // Platform-specific re-exports (only on non-WASM platforms)
 #[cfg(not(target_arch = "wasm32"))]
-pub use email_simple::{SimpleEmailTransport, SimpleEmailTransportFactory};
+pub use email_unified::{EmailTransportFactory, EmailTransportImpl};
 #[cfg(not(target_arch = "wasm32"))]
 pub use llm_discovery::{
     DiscoveredLlm, LlmConnection, LlmConnectionInfo, LlmDiscoveryConfig, LlmDiscoveryManager,

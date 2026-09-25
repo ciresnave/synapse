@@ -2,7 +2,7 @@
 //! Configuration management for EMRP
 
 use crate::error::{ConfigError, Result};
-use crate::types::{EmailConfig, ImapConfig, SmtpConfig};
+use crate::types::{EmailConfig, ImapConfig, SecretString, SmtpConfig};
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -135,7 +135,7 @@ impl Config {
                     host: "localhost".to_string(),
                     port: 587,
                     username: format!("{}@synapse.local", local_name.to_lowercase()),
-                    password: "changeme".to_string(),
+                    password: SecretString::new("changeme"),
                     use_tls: true,
                     use_ssl: false,
                 },
@@ -143,7 +143,7 @@ impl Config {
                     host: "localhost".to_string(),
                     port: 993,
                     username: format!("{}@synapse.local", local_name.to_lowercase()),
-                    password: "changeme".to_string(),
+                    password: SecretString::new("changeme"),
                     use_ssl: true,
                 },
             },
@@ -280,7 +280,7 @@ impl Config {
             host: "smtp.gmail.com".to_string(),
             port: 587,
             username: email.clone(),
-            password: password.clone(),
+            password: SecretString::new(password.clone()),
             use_tls: true,
             use_ssl: false,
         };
@@ -289,7 +289,7 @@ impl Config {
             host: "imap.gmail.com".to_string(),
             port: 993,
             username: email,
-            password,
+            password: SecretString::new(password),
             use_ssl: true,
         };
 
@@ -314,7 +314,7 @@ impl Config {
             host: "smtp-mail.outlook.com".to_string(),
             port: 587,
             username: email.clone(),
-            password: password.clone(),
+            password: SecretString::new(password.clone()),
             use_tls: true,
             use_ssl: false,
         };
@@ -323,7 +323,7 @@ impl Config {
             host: "outlook.office365.com".to_string(),
             port: 993,
             username: email,
-            password,
+            password: SecretString::new(password),
             use_ssl: true,
         };
 
@@ -445,6 +445,13 @@ mod tests {
         // Load config
         let loaded_config = Config::from_file(temp_file.path()).unwrap();
         assert_eq!(config.entity.local_name, loaded_config.entity.local_name);
+        // Previously unchecked: a blanket-redact SecretString would have passed this test's other
+        // assertion while silently corrupting every saved credential. See this plan's spec review.
+        assert_eq!(
+            config.email.smtp.password.expose(),
+            loaded_config.email.smtp.password.expose(),
+            "the real password must survive a save/load round-trip"
+        );
     }
 
     #[test]
