@@ -309,9 +309,30 @@ pub struct EmailTransportImpl {
     /// Direct mode, which drains its own store instead.
     imap_seen_ids: StdMutex<HashSet<uuid::Uuid>>,
     /// Real counter: incremented only where an IMAP-fetched body actually failed to parse as a
-    /// `SecureMessage` (module docs). `metrics()` (Task 5) is where every transport's counters are
-    /// finalized; this one exists now because Task 3's own contract requires the signal to exist.
+    /// `SecureMessage` (module docs).
     receive_failures: AtomicU64,
+    /// Real counter, incremented once per successful `send_message` (i.e. `LettreTransport::send`
+    /// actually returned `Ok`) -- never on a local refusal (oversized message, bad address, no
+    /// `smtp_host` configured), matching `quic_unified.rs`'s convention of only counting
+    /// network-touching outcomes.
+    messages_sent: AtomicU64,
+    /// Bytes of serialized `SecureMessage` JSON sent, incremented alongside `messages_sent`. Same
+    /// unit `max_message_size` counts.
+    bytes_sent: AtomicU64,
+    /// Incremented only when the real SMTP send (`LettreTransport::send`) itself fails -- never on
+    /// a local refusal that never touched the network (see `messages_sent`'s doc).
+    send_failures: AtomicU64,
+    /// Real counter, incremented once per `SecureMessage` actually handed to a caller's inbox by
+    /// `receive_raw` (Direct's drain or an IMAP fetch that parsed and was not a duplicate).
+    messages_received: AtomicU64,
+    /// Bytes of serialized `SecureMessage` JSON received, incremented alongside
+    /// `messages_received`.
+    bytes_received: AtomicU64,
+    /// Running sum of `send_message`'s own `start.elapsed()` (constructor to the real SMTP `Ok`
+    /// return, mirroring `tcp_unified.rs`'s `total_time`) for every send counted in
+    /// `messages_sent`, in milliseconds. `metrics()` divides this by `messages_sent` to report a
+    /// genuine, real running average -- not an invented constant (Global Constraints).
+    latency_sum_ms: AtomicU64,
 }
 
 impl EmailTransportImpl {
@@ -375,6 +396,12 @@ impl EmailTransportImpl {
             listener: StdMutex::new(listener),
             imap_seen_ids: StdMutex::new(HashSet::new()),
             receive_failures: AtomicU64::new(0),
+            messages_sent: AtomicU64::new(0),
+            bytes_sent: AtomicU64::new(0),
+            send_failures: AtomicU64::new(0),
+            messages_received: AtomicU64::new(0),
+            bytes_received: AtomicU64::new(0),
+            latency_sum_ms: AtomicU64::new(0),
         })
     }
 
@@ -499,8 +526,7 @@ impl Transport for EmailTransportImpl {
     }
 
     fn capabilities(&self) -> TransportCapabilities {
-        // Metrics finalization (messages_sent/bytes_sent/etc.) is a later task; `features` here
-        // is real -- it names the mode actually in effect, not a placeholder.
+        // `features` names the mode actually in effect, not a placeholder.
         let features = match self.mode {
             EmailMode::Direct => vec!["direct_smtp".to_string()],
             EmailMode::RelayOut => vec!["relay_smtp".to_string(), "imap_poll".to_string()],
@@ -516,10 +542,14 @@ impl Transport for EmailTransportImpl {
             network_spanning: true,
             supported_urgencies: vec![MessageUrgency::Background, MessageUrgency::Batch],
             features,
-            unmeasured_metrics: vec![
-                UnmeasuredMetric::AverageLatency,
-                UnmeasuredMetric::ReliabilityScore,
-            ],
+            // Both `reliability_score` (from real messages_sent/send_failures counters) and
+            // `average_latency_ms` (a real running average of send_message's own elapsed time,
+            // see `latency_sum_ms`'s field doc) are backed by real measurements for this
+            // transport in every mode, so nothing is declared unmeasured here -- unlike QUIC,
+            // which never samples latency at all. `send_message` still only ever returns
+            // `DeliveryConfirmation::Sent` (a `250 OK` from one SMTP hop, not end-to-end
+            // delivery); nothing here claims otherwise.
+            unmeasured_metrics: vec![],
         }
     }
 
@@ -614,13 +644,29 @@ impl Transport for EmailTransportImpl {
             }
         };
 
-        LettreTransport::send(&smtp_client, &email)
-            .map_err(|e| SynapseError::TransportError(format!("SMTP send failed: {e}")))?;
+        // Only a real, network-touching outcome moves `messages_sent`/`send_failures` (module
+        // docs on the fields themselves): everything above this point (size check, address
+        // parsing, message building, missing smtp_host) is a local refusal that never reached the
+        // network and is deliberately not counted here, matching `quic_unified.rs`'s convention
+        // of only counting failures from an actual connect/write attempt.
+        if let Err(e) = LettreTransport::send(&smtp_client, &email) {
+            self.send_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(SynapseError::TransportError(format!(
+                "SMTP send failed: {e}"
+            )));
+        }
+
+        let elapsed = start.elapsed();
+        self.messages_sent.fetch_add(1, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(body.len() as u64, Ordering::Relaxed);
+        self.latency_sum_ms
+            .fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
 
         Ok(DeliveryReceipt {
             message_id: message.message_id.0.to_string(),
             transport_used: TransportType::Email,
-            delivery_time: start.elapsed(),
+            delivery_time: elapsed,
             target_reached: to_email.clone(),
             confirmation: DeliveryConfirmation::Sent,
             metadata: HashMap::new(),
@@ -671,11 +717,34 @@ impl Transport for EmailTransportImpl {
     }
 
     async fn metrics(&self) -> TransportMetrics {
-        // Send-side counters (messages_sent/bytes_sent/send_failures) are a later task; the
-        // receive-failure counter this task adds (module docs) is real.
+        let messages_sent = self.messages_sent.load(Ordering::Relaxed);
+        let send_failures = self.send_failures.load(Ordering::Relaxed);
+        let attempts = messages_sent + send_failures;
+        // QUIC's exact formula (Global Constraints): an untried transport claims perfect
+        // reliability rather than zero, since there is no evidence either way yet.
+        let reliability_score = if attempts == 0 {
+            1.0
+        } else {
+            messages_sent as f64 / attempts as f64
+        };
+        // A genuine running average of real send_message timings (latency_sum_ms's field doc),
+        // never an invented constant. Zero sends means zero average (`checked_div` covers it),
+        // not a guess.
+        let average_latency_ms = self
+            .latency_sum_ms
+            .load(Ordering::Relaxed)
+            .checked_div(messages_sent)
+            .unwrap_or(0);
         TransportMetrics {
             transport_type: TransportType::Email,
+            messages_sent,
+            messages_received: self.messages_received.load(Ordering::Relaxed),
+            send_failures,
             receive_failures: self.receive_failures.load(Ordering::Relaxed),
+            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            bytes_received: self.bytes_received.load(Ordering::Relaxed),
+            reliability_score,
+            average_latency_ms,
             ..Default::default()
         }
     }
@@ -696,6 +765,15 @@ impl TransportReceive for EmailTransportImpl {
                 })?;
                 let messages = smtp_server.drain_all_messages()?;
                 for secure_message in messages {
+                    // Same unit `bytes_sent` counts (serialized JSON): re-serializing here is the
+                    // only way to know how many bytes this particular message was, since
+                    // `drain_all_messages` hands back the parsed `SecureMessage`, not its wire
+                    // bytes.
+                    let bytes = serde_json::to_vec(&secure_message)
+                        .map(|v| v.len() as u64)
+                        .unwrap_or(0);
+                    self.messages_received.fetch_add(1, Ordering::Relaxed);
+                    self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
                     inbox.push(IncomingMessage::new(
                         secure_message,
                         TransportType::Email,
@@ -797,6 +875,9 @@ impl EmailTransportImpl {
                     continue;
                 }
 
+                self.messages_received.fetch_add(1, Ordering::Relaxed);
+                self.bytes_received
+                    .fetch_add(body.len() as u64, Ordering::Relaxed);
                 inbox.push(IncomingMessage::new(
                     secure_message,
                     TransportType::Email,

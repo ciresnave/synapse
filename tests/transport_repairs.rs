@@ -17,9 +17,9 @@ use synapse::certificate::{AgentCertificate, Permission};
 use synapse::sealing::{self, Payload, SealingKeyPair};
 use synapse::sender_auth::{SenderVerdict, TrustStore};
 use synapse::transport::{
-    DeliveryConfirmation, DeliveryReceipt, QuicTransportImpl, ReceivedMessage, Transport,
-    TransportFactory, TransportManager, TransportManagerBuilder, TransportStatus, TransportTarget,
-    TransportType,
+    DeliveryConfirmation, DeliveryReceipt, EmailTransportImpl, QuicTransportImpl, ReceivedMessage,
+    Transport, TransportFactory, TransportManager, TransportManagerBuilder, TransportStatus,
+    TransportTarget, TransportType,
 };
 use synapse::types::{SecureMessage, SecurityLevel};
 
@@ -2885,6 +2885,75 @@ async fn email_relay_out_mode_receives_via_imap_polling() {
         second.is_empty(),
         "a second poll must not redeliver the same IMAP message; {} arrived",
         second.len()
+    );
+}
+
+/// `metrics()` used to report `messages_sent`/`bytes_sent`/`send_failures` all hardcoded `0`, with
+/// `average_latency_ms` and `reliability_score` both blanket-declared `UnmeasuredMetric`s (Task 1's
+/// honest placeholder). This proves the Task 5 repair through the public API: a raw
+/// `EmailTransportImpl` in Direct mode, sending to a live peer, moves the real counters, computes
+/// `reliability_score` by QUIC's exact formula, and -- because `average_latency_ms` is now a real
+/// running average of `send_message`'s own elapsed time, not an invented constant -- declares
+/// nothing in `unmeasured_metrics` at all. Mirrors `quic_metrics_counts_real_sends_and_receives`'s
+/// and `nat_traversal_metrics_counts_a_real_send`'s shape (same file).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_metrics_counts_real_sends() {
+    let alice = EmailTransportImpl::new(&one_key("email_mode", "direct"))
+        .await
+        .expect("construct a raw email sender");
+
+    let bob_port = free_port();
+    let mut bob_config = one_key("email_mode", "direct");
+    bob_config.insert("local_port".to_string(), bob_port.to_string());
+    let bob = EmailTransportImpl::new(&bob_config)
+        .await
+        .expect("construct a raw email receiver");
+    bob.start().await.expect("start bob");
+
+    // Board item 53's defect (module docs on the counters/`capabilities()` in
+    // `email_unified.rs`) was two transports fabricating a plausible-looking non-zero metric
+    // instead of declaring it unmeasured. This is the exact assertion that would have caught it
+    // here: check what this transport *declares* before checking what it *reports*.
+    let capabilities = alice.capabilities();
+    assert_eq!(
+        capabilities.unmeasured_metrics,
+        Vec::new(),
+        "both reliability_score and average_latency_ms are backed by real counters/timing for \
+         email in every mode, so nothing should be declared unmeasured"
+    );
+
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{bob_port}"));
+    let message = SecureMessage::new(
+        BOB,
+        ALICE,
+        b"raw metrics check".to_vec(),
+        SecurityLevel::Public,
+    );
+    let wall_clock_start = Instant::now();
+    alice
+        .send_message(&target, &message)
+        .await
+        .expect("raw send");
+    let wall_elapsed_ms = wall_clock_start.elapsed().as_millis() as u64;
+
+    let alice_metrics = alice.metrics().await;
+    assert_eq!(alice_metrics.transport_type, TransportType::Email);
+    assert_eq!(alice_metrics.messages_sent, 1);
+    assert!(alice_metrics.bytes_sent > 0);
+    assert_eq!(alice_metrics.send_failures, 0);
+    assert_eq!(alice_metrics.reliability_score, 1.0);
+    // A real measurement can never exceed the wall-clock window it was taken inside (a small
+    // slack covers rounding/scheduling noise around the two `Instant`s). This is what actually
+    // distinguishes a genuine running average from a plausible-looking hardcoded fabrication --
+    // board item 53's transports hardcoded exactly `average_latency_ms: 50`, which a bare
+    // non-zero check would happily let through but this bound would not, on loopback.
+    assert!(
+        alice_metrics.average_latency_ms <= wall_elapsed_ms + 5,
+        "average_latency_ms ({}) exceeds the wall-clock time actually observed around the one \
+         send it is averaging ({wall_elapsed_ms} ms + 5ms slack) -- a real measurement cannot \
+         exceed reality",
+        alice_metrics.average_latency_ms
     );
 }
 
