@@ -2718,6 +2718,176 @@ async fn email_direct_mode_carries_a_verified_message_end_to_end() {
     assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
 }
 
+/// Accepts any login and authorizes everything -- the `SynapseImapServer` this test starts is a
+/// private, single-purpose stand-in mailbox for this one test (never a live external provider, per
+/// spec §7), not a shared multi-user server, mirroring `email_unified.rs`'s own (private)
+/// `AcceptAllAuthHandler`.
+struct AcceptAllImapAuth;
+
+impl synapse::email_server::AuthHandler for AcceptAllImapAuth {
+    fn authenticate(&self, _username: &str, _password: &str) -> synapse::error::Result<bool> {
+        Ok(true)
+    }
+    fn is_authorized_sender(&self, _email: &str) -> synapse::error::Result<bool> {
+        Ok(true)
+    }
+    fn is_authorized_recipient(&self, _email: &str) -> synapse::error::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// Build a `TransportManager` with only `Email` enabled, forced into `RelayOut` mode via the
+/// `email_mode` config override (module docs in `email_unified.rs` explain why: a real
+/// `ConnectivityDetector` assessment probes fixed ports that other loopback tests in this same
+/// binary bind and release, so it is not deterministic here). Unlike `node()`, this asserts nothing
+/// about a bound port: RelayOut mode binds no inbound listener at all.
+async fn email_relay_out_node(
+    imap_port: u16,
+    imap_username: &str,
+    imap_password: &str,
+    store: TrustStore,
+    sealing_key: SealingKeyPair,
+) -> TransportManager {
+    let mut config = HashMap::new();
+    config.insert("email_mode".to_string(), "relay_out".to_string());
+    config.insert("imap_host".to_string(), "127.0.0.1".to_string());
+    config.insert("imap_port".to_string(), imap_port.to_string());
+    config.insert("imap_username".to_string(), imap_username.to_string());
+    config.insert("imap_password".to_string(), imap_password.to_string());
+    config.insert(
+        synapse::network_scope::BIND_SCOPE_KEY.to_string(),
+        synapse::network_scope::BindScope::Loopback
+            .config_value()
+            .to_string(),
+    );
+
+    let mut builder = TransportManagerBuilder::new();
+    for other in ALL_TRANSPORTS {
+        if other != TransportType::Email {
+            builder = builder.disable_transport(other);
+        }
+    }
+    let manager = builder
+        .enable_transport(TransportType::Email)
+        .transport_config(TransportType::Email, config)
+        .trust_store(store)
+        .sealing_key(sealing_key)
+        .build();
+    manager
+        .register_factory(email())
+        .await
+        .expect("factory registers");
+    tokio::time::timeout(Duration::from_secs(5), manager.start())
+        .await
+        .expect("start returns")
+        .expect("start succeeds");
+
+    let status = manager.get_transport_status().await;
+    assert_eq!(
+        status.get(&TransportType::Email),
+        Some(&TransportStatus::Running),
+        "RelayOut mode should report Running even with no bound listener: {status:?}"
+    );
+    manager
+}
+
+/// Relay-out/external mode: this transport cannot run its own inbound listener, so `receive_raw`
+/// polls a configured IMAP mailbox instead -- our own `SynapseImapServer` on loopback, pre-seeded,
+/// standing in for "the external mailbox already has mail" (spec §7: no live external provider in
+/// any test). The store is seeded directly (bypassing SMTP and even a real `LOGIN`-then-`APPEND`
+/// entirely, since this test is about the IMAP-*receive* path in isolation), so the message the
+/// test asserts on never touched `lettre` or `SynapseSmtpServer` at all -- it arrives at
+/// `TransportManager::receive_messages()` purely by `EmailTransportImpl::poll_imap_inbox` logging
+/// in, `SELECT`ing `INBOX`, and `FETCH`ing it over the real IMAP wire protocol (see
+/// `imap_server.rs`'s `handle_connection`, traced for this task: it has no `SEARCH` command and
+/// tracks no `\Seen` flag, hence `poll_imap_inbox`'s own client-side de-dupe by `message_id`).
+///
+/// The message is signed (not sealed) and its signer's account key is pinned in bob's trust store,
+/// the same shape `Pair::signed`/`cert_for` build elsewhere in this file, so it survives
+/// `TransportManager::receive_messages()`'s replay-admission step (an unverifiable sender is
+/// dropped there by default) and arrives `Verified`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_relay_out_mode_receives_via_imap_polling() {
+    let account = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+    let mut alice = CryptoManager::new();
+    alice.generate_keypair().expect("keypair");
+    let alice_sealing = SealingKeyPair::generate();
+    alice.set_certificate_chain(vec![cert_for(&account, &alice, &alice_sealing, ALICE)]);
+
+    let mut message = SecureMessage::new(
+        BOB,
+        ALICE,
+        b"via imap poll".to_vec(),
+        SecurityLevel::Authenticated,
+    );
+    alice.sign_secure_message(&mut message).expect("sign");
+    let message_id = message.message_id.0;
+
+    const IMAP_USER: &str = "relaytest";
+    let message_store: Arc<std::sync::Mutex<HashMap<String, Vec<SecureMessage>>>> = Arc::new(
+        std::sync::Mutex::new(HashMap::from([(IMAP_USER.to_string(), vec![message])])),
+    );
+
+    let imap_port = free_port();
+    let imap_server = synapse::email_server::SynapseImapServer::new(
+        synapse::email_server::ImapServerConfig {
+            port: imap_port,
+            bind_scope: synapse::network_scope::BindScope::Loopback,
+            ..Default::default()
+        },
+        Arc::clone(&message_store),
+        Arc::new(AcceptAllImapAuth),
+    );
+    tokio::spawn(async move {
+        let _ = imap_server.start().await;
+    });
+
+    let mut bob_store = TrustStore::new();
+    bob_store.pin_account_key("alice-account", account.verifying_key().to_bytes());
+    let bob_sealing = SealingKeyPair::generate();
+    let bob_node =
+        email_relay_out_node(imap_port, IMAP_USER, "anything", bob_store, bob_sealing).await;
+
+    // The IMAP server's own bind (inside the task just spawned) races this poll loop; a connection
+    // refused is swallowed by `receive_messages` (it only logs, per `manager.rs`), so retrying is
+    // the same shape as `round_trip`'s own poll loop, not evidence of anything else being wrong.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut found: Option<ReceivedMessage> = None;
+    while Instant::now() < deadline {
+        let mut batch = bob_node.receive_messages().await.expect("receive");
+        if let Some(received) = batch.pop() {
+            assert!(batch.is_empty(), "exactly one message was seeded");
+            found = Some(received);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let received = found.expect("the seeded message must arrive within 5s via IMAP polling");
+
+    assert_eq!(received.incoming.transport_type, TransportType::Email);
+    assert_eq!(received.incoming.message.message_id.0, message_id);
+    assert_eq!(received.payload, Payload::Plain(b"via imap poll".to_vec()));
+    match &received.sender {
+        SenderVerdict::Verified { key_id } => assert_eq!(
+            key_id,
+            &synapse::sender_auth::key_id(&alice.public_key_bytes().expect("public key")),
+            "the verdict must pin alice's signing key"
+        ),
+        other => panic!("the message must arrive Verified: {other:?}"),
+    }
+
+    // A second poll must not redeliver the same message: `SynapseImapServer` never removes it from
+    // the mailbox (no STORE/EXPUNGE support), so this is `poll_imap_inbox`'s own de-dupe being
+    // exercised, not an artifact of the server.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let second = bob_node.receive_messages().await.expect("receive");
+    assert!(
+        second.is_empty(),
+        "a second poll must not redeliver the same IMAP message; {} arrived",
+        second.len()
+    );
+}
+
 /// `metrics()` used to hardcode `average_latency_ms: 50` and `reliability_score: 0.8` regardless
 /// of any real traffic (board item 53), and `messages_sent`/`messages_received`/etc. were all
 /// hardcoded `0`. This proves the repair through the public API: sending moves the real send-side

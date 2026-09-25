@@ -1,19 +1,29 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Email transport: SMTP send, SMTP-server receive (Direct mode). Relay-out/External modes and
-//! IMAP polling arrive in a later task.
+//! Email transport: SMTP send, SMTP-server receive (Direct mode); relay/smart-host SMTP send and
+//! IMAP-polling receive (RelayOut/External modes).
 //!
-//! # Direct mode
+//! # Three modes, chosen at construction
+//!
+//! [`EmailMode`] is decided once, in [`EmailTransportImpl::new`], from
+//! [`ConnectivityDetector::assess_connectivity`] -- unless the config map's `email_mode` key names
+//! one explicitly (`"direct"`/`"relay_out"`/`"external"`), which skips the detector entirely. That
+//! override exists for two reasons: an operator who already knows their network shape (e.g. "this
+//! box is firewalled, don't bother probing") can say so directly, and it is the only way to test
+//! RelayOut/External deterministically -- `ConnectivityDetector::assess_connectivity` probes fixed
+//! ports (25/587/2525, 143/993/1143) that other loopback tests in the same `cargo test` run bind
+//! and release, so a real assessment can flap between `RelayOnly`/`ExternalProvider` and
+//! `RunLocalServer` from one run to the next.
+//!
+//! ## Direct mode
 //!
 //! Direct mode is literal direct-to-recipient SMTP: this transport connects straight to the
 //! target's own mail server (its address, `host:port`, comes from [`TransportTarget::address`] --
 //! in production that would be resolved via the target's MX record; in this crate's loopback
 //! tests it is the peer's own `SynapseSmtpServer` port) rather than relaying through a
 //! statically-configured smart host. That is why `send_message` builds a fresh, unauthenticated
-//! `lettre` client per send targeting `target.address`, instead of reusing one client built once
-//! in [`EmailTransportImpl::new`] against a configured `smtp_host` -- there is no single
-//! "our-account" SMTP host to relay through in Direct mode; `smtp_host`/`smtp_port`/
-//! `smtp_username`/`smtp_password` in [`EmailConfig`] are for the smart-host relay a later task
-//! adds, not for Direct mode.
+//! `lettre` client per send targeting `target.address` in this mode, instead of the configured
+//! `smtp_host`. This is the only mode that binds an inbound `SynapseSmtpServer`, in
+//! [`EmailTransportImpl::new`] (see [`Transport::start`]'s doc on binding-in-constructor).
 //!
 //! Per the Global Constraints (spec §3): this transport never bases any trust or authorization
 //! decision on `MAIL FROM`, `From:`, or the connecting client's address. Sender authentication is
@@ -24,31 +34,74 @@
 //! server), so there is no local recipient identity to check against, and even if there were,
 //! checking it would not be a security control (spec §3 forbids treating it as one).
 //!
-//! # Receiving
-//!
 //! Because there is no configured local recipient address to filter by (see above),
 //! `receive_raw` drains every message the whole store holds
 //! ([`SynapseSmtpServer::drain_all_messages`]), not a single recipient's queue -- matching every
 //! other transport's shape, where `receive_raw` empties this instance's own inbound queue
 //! wholesale rather than filtering by identity (identity is `TransportManager`'s job, from the
 //! `SecureMessage`'s signature).
+//!
+//! ## RelayOut and External modes
+//!
+//! Per spec §1a(4) (CireSnave verbatim, design doc): IMAP here exists so one server can send and
+//! receive on behalf of another as a proxy, when direct SMTP isn't reachable (firewalled network,
+//! corporate policy) -- never for a human to read agent traffic. Both modes share one
+//! implementation, because from this transport's point of view they are the same shape: it cannot
+//! run an inbound listener (`start` is a no-op; no `SynapseSmtpServer` is ever constructed), so
+//! `send_message` relays through the configured `smtp_host`/`smtp_port` smart host instead of
+//! dialing `target.address` directly, and `receive_raw` polls the configured
+//! `imap_host`/`imap_port` mailbox over `async-imap` instead of draining an owned store. They
+//! differ only in *why* a direct listener isn't available (`RelayOnly` vs `ExternalProvider`,
+//! from [`ServerRecommendation`]), which changes nothing about how this transport behaves.
+//!
+//! `SynapseImapServer` (the only IMAP peer any test here is allowed to use -- spec §7 forbids a
+//! live external provider in any test) implements no `SEARCH` command and tracks no `\Seen` flag,
+//! so "fetch only unseen" is not literally available against it. `receive_raw` fetches every
+//! message in the mailbox on every poll and de-duplicates client-side by `message_id`
+//! ([`EmailTransportImpl::imap_seen_ids`]): nothing is ever removed from the mailbox, but nothing
+//! already delivered to a caller's inbox is delivered again. A message whose fetched body does not
+//! parse as a `SecureMessage` increments `receive_failures` and is skipped, not fatal to the poll
+//! -- mirroring `nat_traversal.rs`'s `receive_raw` handling of an unparseable UDP datagram.
 
 use super::abstraction::*;
 use crate::{
-    email_server::{AuthHandler, SmtpServerConfig, SynapseSmtpServer},
+    email_server::{
+        AuthHandler, ConnectivityDetector, ServerRecommendation, SmtpServerConfig,
+        SynapseSmtpServer,
+    },
     error::{Result, SynapseError},
     types::{EmailConfig, ImapConfig, SecureMessage, SmtpConfig},
 };
 use async_trait::async_trait;
+use futures::StreamExt;
 use lettre::{
     SmtpTransport, Transport as LettreTransport,
     message::{Mailbox, Message, SinglePart, header},
+    transport::smtp::authentication::Credentials,
 };
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex as StdMutex},
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::net::TcpListener;
+
+/// Which of the three shapes (module docs) this transport instance is operating in, decided once
+/// at construction. `RelayOut` and `External` are kept as separate variants (rather than one
+/// `Proxied` variant) to preserve *why* -- useful in logs/metrics -- even though `send_message`
+/// and `receive_raw` dispatch on them identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmailMode {
+    /// Owns an inbound `SynapseSmtpServer`; sends straight to `target.address`.
+    Direct,
+    /// Can bind locally but not reach the internet directly (behind NAT/firewall): send relays
+    /// through the configured smart host, receive polls the configured IMAP mailbox.
+    RelayOut,
+    /// Cannot bind an inbound listener at all: same send/receive shape as `RelayOut`.
+    External,
+}
 
 /// The one address validator `can_reach`/`test_connectivity` use: exactly one `@`, a non-empty
 /// local part, and a domain containing a `.` with non-empty labels on each side of it. Ported from
@@ -97,18 +150,25 @@ impl AuthHandler for AcceptAllAuthHandler {
     }
 }
 
-/// Direct-mode email transport: sends via `lettre` straight to the target's own SMTP server
-/// (`target.address`), receives via its own `SynapseSmtpServer` listening on `local_port`.
-///
-/// The listener is bound synchronously in [`new`](Self::new), not in [`start`](Self::start): every
-/// other transport in this contract (`tcp_unified.rs`'s `start_server` comment documents the bug
-/// this avoids) binds its socket during construction so that, by the time `TransportManager`
-/// reports this transport `Running`, the port is actually held. `start` only spawns the accept
-/// loop over the listener `new` already bound.
+/// Email transport, dispatching `send_message`/`start`/`receive_raw` on [`EmailMode`] (module
+/// docs). Direct mode's listener is bound synchronously in [`new`](Self::new), not in
+/// [`start`](Self::start): every other transport in this contract (`tcp_unified.rs`'s
+/// `start_server` comment documents the bug this avoids) binds its socket during construction so
+/// that, by the time `TransportManager` reports this transport `Running`, the port is actually
+/// held. `start` only spawns the accept loop over the listener `new` already bound. RelayOut and
+/// External modes bind no listener at all (module docs), so `smtp_server`/`listener` stay `None`.
 pub struct EmailTransportImpl {
     config: EmailConfig,
-    smtp_server: Arc<SynapseSmtpServer>,
+    mode: EmailMode,
+    smtp_server: Option<Arc<SynapseSmtpServer>>,
     listener: StdMutex<Option<TcpListener>>,
+    /// `message_id`s already delivered by a RelayOut/External poll (module docs) -- unused in
+    /// Direct mode, which drains its own store instead.
+    imap_seen_ids: StdMutex<HashSet<uuid::Uuid>>,
+    /// Real counter: incremented only where an IMAP-fetched body actually failed to parse as a
+    /// `SecureMessage` (module docs). `metrics()` (Task 5) is where every transport's counters are
+    /// finalized; this one exists now because Task 3's own contract requires the signal to exist.
+    receive_failures: AtomicU64,
 }
 
 impl EmailTransportImpl {
@@ -122,36 +182,93 @@ impl EmailTransportImpl {
         let bind_scope = crate::network_scope::BindScope::from_config_map(config)?;
 
         let email_config = Self::email_config_from_map(config)?;
+        let mode = Self::determine_mode(config, bind_scope).await?;
 
-        let bind_addr = bind_scope.listen_addr(local_port);
-        let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
-            SynapseError::NetworkError(format!(
-                "failed to bind email transport's SMTP server to {bind_addr}: {e}"
-            ))
-        })?;
+        let (smtp_server, listener) = if mode == EmailMode::Direct {
+            let bind_addr = bind_scope.listen_addr(local_port);
+            let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
+                SynapseError::NetworkError(format!(
+                    "failed to bind email transport's SMTP server to {bind_addr}: {e}"
+                ))
+            })?;
 
-        let auth_handler: Arc<dyn AuthHandler + Send + Sync> = Arc::new(AcceptAllAuthHandler);
-        let message_store = Arc::new(StdMutex::new(HashMap::new()));
-        let smtp_server = Arc::new(SynapseSmtpServer::new(
-            SmtpServerConfig {
-                port: local_port,
-                bind_scope,
-                // Direct mode receives mail addressed to us from arbitrary senders on the
-                // internet, the same as any ordinary mail server -- it does not require SMTP
-                // AUTH from them. SMTP AUTH governs *relay-out submission* (a later task), never
-                // inbound delivery, and per the Global Constraints must never stand in for
-                // sender identity either way.
-                require_auth: false,
-                ..Default::default()
-            },
-            auth_handler,
-            message_store,
-        ));
+            let auth_handler: Arc<dyn AuthHandler + Send + Sync> = Arc::new(AcceptAllAuthHandler);
+            let message_store = Arc::new(StdMutex::new(HashMap::new()));
+            let smtp_server = Arc::new(SynapseSmtpServer::new(
+                SmtpServerConfig {
+                    port: local_port,
+                    bind_scope,
+                    // Direct mode receives mail addressed to us from arbitrary senders on the
+                    // internet, the same as any ordinary mail server -- it does not require SMTP
+                    // AUTH from them. SMTP AUTH governs *relay-out submission* (RelayOut/External
+                    // modes), never inbound delivery, and per the Global Constraints must never
+                    // stand in for sender identity either way.
+                    require_auth: false,
+                    ..Default::default()
+                },
+                auth_handler,
+                message_store,
+            ));
+            (Some(smtp_server), Some(listener))
+        } else {
+            // RelayOut/External: no inbound listener (module docs) -- send relays through
+            // `email_config.smtp`, receive polls `email_config.imap`.
+            (None, None)
+        };
 
         Ok(Self {
             config: email_config,
+            mode,
             smtp_server,
-            listener: StdMutex::new(Some(listener)),
+            listener: StdMutex::new(listener),
+            imap_seen_ids: StdMutex::new(HashSet::new()),
+            receive_failures: AtomicU64::new(0),
+        })
+    }
+
+    /// `config`'s `email_mode` key, if present, names the mode directly (`"direct"`/
+    /// `"relay_out"`/`"external"`) and skips connectivity detection entirely -- see the module
+    /// docs for why (determinism in tests; an operator who already knows their network shape).
+    ///
+    /// Absent that override, `bind_scope` decides whether detection can say anything useful at
+    /// all: `ConnectivityDetector::detect_external_ip` (spec: `network_scope.rs` module docs) is
+    /// switched off entirely under `BindScope::Loopback`, so a real assessment there can *never*
+    /// recommend `RunLocalServer` (`connectivity.rs`'s `determine_recommendation` has no arm that
+    /// reaches it without `external_ip: Some`) -- it would always force RelayOut/External, which
+    /// would silently break every loopback deployment, including Task 1's own established
+    /// contract (`docs/superpowers/specs/2026-09-24-email-transport-design.md`'s Direct-mode
+    /// loopback tests, e.g. `tests/transport_repairs.rs::email_direct_mode_carries_a_verified_message_end_to_end`).
+    /// So `BindScope::Loopback` keeps defaulting to `Direct` without invoking the detector; only
+    /// `BindScope::AllInterfaces` (a real, off-box deployment, where external-IP detection
+    /// actually runs) calls [`ConnectivityDetector::assess_connectivity`] and maps its
+    /// [`ServerRecommendation`] onto [`EmailMode`].
+    async fn determine_mode(
+        config: &HashMap<String, String>,
+        bind_scope: crate::network_scope::BindScope,
+    ) -> Result<EmailMode> {
+        if let Some(forced) = config.get("email_mode") {
+            return match forced.as_str() {
+                "direct" => Ok(EmailMode::Direct),
+                "relay_out" => Ok(EmailMode::RelayOut),
+                "external" => Ok(EmailMode::External),
+                other => Err(SynapseError::Config(format!(
+                    "email_mode must be \"direct\", \"relay_out\" or \"external\", not {other:?}"
+                ))),
+            };
+        }
+
+        if !bind_scope.is_all_interfaces() {
+            return Ok(EmailMode::Direct);
+        }
+
+        let assessment = ConnectivityDetector::default()
+            .with_bind_scope(bind_scope)
+            .assess_connectivity()
+            .await?;
+        Ok(match assessment.recommended_config {
+            ServerRecommendation::RunLocalServer { .. } => EmailMode::Direct,
+            ServerRecommendation::RelayOnly { .. } => EmailMode::RelayOut,
+            ServerRecommendation::ExternalProvider { .. } => EmailMode::External,
         })
     }
 
@@ -230,7 +347,13 @@ impl Transport for EmailTransportImpl {
     }
 
     fn capabilities(&self) -> TransportCapabilities {
-        // A later task finalizes this; this skeleton only needs enough to pass its own test.
+        // Metrics finalization (messages_sent/bytes_sent/etc.) is a later task; `features` here
+        // is real -- it names the mode actually in effect, not a placeholder.
+        let features = match self.mode {
+            EmailMode::Direct => vec!["direct_smtp".to_string()],
+            EmailMode::RelayOut => vec!["relay_smtp".to_string(), "imap_poll".to_string()],
+            EmailMode::External => vec!["external_smtp".to_string(), "imap_poll".to_string()],
+        };
         TransportCapabilities {
             max_message_size: 10 * 1024 * 1024,
             reliable: true,
@@ -240,7 +363,7 @@ impl Transport for EmailTransportImpl {
             encrypted: self.config.smtp.use_tls || self.config.smtp.use_ssl,
             network_spanning: true,
             supported_urgencies: vec![MessageUrgency::Background, MessageUrgency::Batch],
-            features: vec!["direct_smtp".to_string()],
+            features,
             unmeasured_metrics: vec![
                 UnmeasuredMetric::AverageLatency,
                 UnmeasuredMetric::ReliabilityScore,
@@ -294,12 +417,36 @@ impl Transport for EmailTransportImpl {
             )
             .map_err(|e| SynapseError::TransportError(format!("build failed: {e}")))?;
 
-        // Direct mode: connect straight to the target's own SMTP server (its address, not a
-        // configured smart host -- see module docs), unauthenticated, no TLS. `builder_dangerous`
-        // is lettre's name for "plain SMTP, no implicit TLS wrapping" -- appropriate here since
-        // our own `SynapseSmtpServer` speaks plain SMTP with no STARTTLS support.
-        let (host, port) = Self::target_smtp_addr(target)?;
-        let smtp_client = SmtpTransport::builder_dangerous(&host).port(port).build();
+        let smtp_client = match self.mode {
+            EmailMode::Direct => {
+                // Connect straight to the target's own SMTP server (its address, not a configured
+                // smart host -- see module docs), unauthenticated, no TLS. `builder_dangerous` is
+                // lettre's name for "plain SMTP, no implicit TLS wrapping" -- appropriate here
+                // since our own `SynapseSmtpServer` speaks plain SMTP with no STARTTLS support.
+                let (host, port) = Self::target_smtp_addr(target)?;
+                SmtpTransport::builder_dangerous(&host).port(port).build()
+            }
+            EmailMode::RelayOut | EmailMode::External => {
+                // No direct route to the target (module docs): relay through the configured smart
+                // host/external provider instead. SMTP AUTH here governs who may submit to that
+                // relay -- never a claim about the sender's identity, which is the
+                // `SecureMessage` signature alone (Global Constraints, spec §3).
+                if self.config.smtp.host.is_empty() {
+                    return Err(SynapseError::TransportError(
+                        "email RelayOut/External mode needs a configured smtp_host".to_string(),
+                    ));
+                }
+                let mut builder = SmtpTransport::builder_dangerous(&self.config.smtp.host)
+                    .port(self.config.smtp.port);
+                if !self.config.smtp.username.is_empty() {
+                    builder = builder.credentials(Credentials::new(
+                        self.config.smtp.username.clone(),
+                        self.config.smtp.password.expose().to_string(),
+                    ));
+                }
+                builder.build()
+            }
+        };
 
         LettreTransport::send(&smtp_client, &email)
             .map_err(|e| SynapseError::TransportError(format!("SMTP send failed: {e}")))?;
@@ -325,15 +472,27 @@ impl Transport for EmailTransportImpl {
     }
 
     async fn start(&self) -> Result<()> {
-        let listener = self.listener.lock().unwrap().take().ok_or_else(|| {
-            SynapseError::TransportError("email transport already started".to_string())
-        })?;
-        let server = Arc::clone(&self.smtp_server);
-        tokio::spawn(async move {
-            if let Err(e) = server.serve(listener).await {
-                tracing::warn!("email SMTP server error: {e}");
+        match self.mode {
+            EmailMode::Direct => {
+                let listener = self.listener.lock().unwrap().take().ok_or_else(|| {
+                    SynapseError::TransportError("email transport already started".to_string())
+                })?;
+                let server = Arc::clone(self.smtp_server.as_ref().ok_or_else(|| {
+                    SynapseError::TransportError(
+                        "email transport in Direct mode has no SynapseSmtpServer (bug)".to_string(),
+                    )
+                })?);
+                tokio::spawn(async move {
+                    if let Err(e) = server.serve(listener).await {
+                        tracing::warn!("email SMTP server error: {e}");
+                    }
+                });
             }
-        });
+            EmailMode::RelayOut | EmailMode::External => {
+                // No inbound listener to run (module docs): sending relays out per-call, and
+                // receiving polls IMAP per-call from `receive_raw`. Nothing to spawn here.
+            }
+        }
         Ok(())
     }
 
@@ -346,9 +505,11 @@ impl Transport for EmailTransportImpl {
     }
 
     async fn metrics(&self) -> TransportMetrics {
-        // A later task finalizes this with real counters.
+        // Send-side counters (messages_sent/bytes_sent/send_failures) are a later task; the
+        // receive-failure counter this task adds (module docs) is real.
         TransportMetrics {
             transport_type: TransportType::Email,
+            receive_failures: self.receive_failures.load(Ordering::Relaxed),
             ..Default::default()
         }
     }
@@ -357,16 +518,129 @@ impl Transport for EmailTransportImpl {
 #[async_trait]
 impl TransportReceive for EmailTransportImpl {
     async fn receive_raw(&self, inbox: &mut RawInbox) -> Result<()> {
-        // Direct mode: drain our own SMTP server's whole message store. There is no configured
-        // local recipient address to filter by (module docs); this instance is single-tenant, so
-        // everything that landed here is ours.
-        let messages = self.smtp_server.drain_all_messages()?;
-        for secure_message in messages {
-            inbox.push(IncomingMessage::new(
-                secure_message,
-                TransportType::Email,
-                "smtp".to_string(),
-            ));
+        match self.mode {
+            EmailMode::Direct => {
+                // Drain our own SMTP server's whole message store. There is no configured local
+                // recipient address to filter by (module docs); this instance is single-tenant,
+                // so everything that landed here is ours.
+                let smtp_server = self.smtp_server.as_ref().ok_or_else(|| {
+                    SynapseError::TransportError(
+                        "email transport in Direct mode has no SynapseSmtpServer (bug)".to_string(),
+                    )
+                })?;
+                let messages = smtp_server.drain_all_messages()?;
+                for secure_message in messages {
+                    inbox.push(IncomingMessage::new(
+                        secure_message,
+                        TransportType::Email,
+                        "smtp".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            EmailMode::RelayOut | EmailMode::External => self.poll_imap_inbox(inbox).await,
+        }
+    }
+}
+
+impl EmailTransportImpl {
+    /// RelayOut/External receive (module docs): log in to the configured IMAP mailbox, select
+    /// `INBOX`, fetch every message and parse each one as a `SecureMessage` -- same wire format as
+    /// the SMTP path (`serde_json`, after stripping the RFC 5322 envelope with `mail_parser` the
+    /// same way `smtp_server.rs`'s `handle_connection` does for its DATA body). A body that does
+    /// not parse increments `receive_failures` and is skipped, not fatal to the poll (matches
+    /// `nat_traversal.rs`'s `receive_raw` handling of an unparseable UDP datagram). A message
+    /// already delivered on an earlier poll (tracked by `imap_seen_ids`) is skipped silently, not
+    /// counted as a failure.
+    async fn poll_imap_inbox(&self, inbox: &mut RawInbox) -> Result<()> {
+        let imap = &self.config.imap;
+        let addr = (imap.host.as_str(), imap.port);
+        let stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
+            SynapseError::TransportError(format!(
+                "IMAP connect to {}:{} failed: {e}",
+                imap.host, imap.port
+            ))
+        })?;
+
+        let client = async_imap::Client::new(stream);
+        let mut session = client
+            .login(&imap.username, imap.password.expose())
+            .await
+            .map_err(|(e, _client)| {
+                SynapseError::TransportError(format!("IMAP login failed: {e}"))
+            })?;
+
+        session
+            .select("INBOX")
+            .await
+            .map_err(|e| SynapseError::TransportError(format!("IMAP SELECT INBOX failed: {e}")))?;
+
+        // No SEARCH support to ask for UNSEEN (module docs): fetch everything, de-dupe below.
+        // Scoped in its own block so the mutable borrow `fetch_stream` holds on `session` (via
+        // `std::pin::pin!`'s hidden local, which otherwise lives to the end of this function) ends
+        // before `session.logout()` below needs its own `&mut session`.
+        {
+            let fetch_stream = session
+                .fetch("1:*", "RFC822")
+                .await
+                .map_err(|e| SynapseError::TransportError(format!("IMAP FETCH failed: {e}")))?;
+            let mut fetch_stream = std::pin::pin!(fetch_stream);
+
+            while let Some(fetch_result) = fetch_stream.next().await {
+                let fetch = match fetch_result {
+                    Ok(fetch) => fetch,
+                    Err(e) => {
+                        self.receive_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!("IMAP FETCH response did not parse: {e}");
+                        continue;
+                    }
+                };
+                let Some(raw) = fetch.body() else {
+                    continue;
+                };
+
+                // Same extraction as `smtp_server.rs`'s DATA handler: strip the RFC 5322 envelope
+                // and reverse whatever transfer encoding `lettre` applied, rather than assuming
+                // the body starts unencoded right after the first blank line.
+                let body = mail_parser::MessageParser::default()
+                    .parse(raw)
+                    .and_then(|parsed| {
+                        parsed
+                            .body_text(0)
+                            .map(|text| text.into_owned().into_bytes())
+                    })
+                    .unwrap_or_else(|| raw.to_vec());
+
+                let secure_message: SecureMessage = match serde_json::from_slice(&body) {
+                    Ok(message) => message,
+                    Err(e) => {
+                        self.receive_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            "IMAP message did not parse as a SecureMessage: {} bytes, {e}",
+                            body.len()
+                        );
+                        continue;
+                    }
+                };
+
+                let already_delivered = {
+                    let mut seen = self.imap_seen_ids.lock().unwrap();
+                    !seen.insert(secure_message.message_id.0)
+                };
+                if already_delivered {
+                    continue;
+                }
+
+                inbox.push(IncomingMessage::new(
+                    secure_message,
+                    TransportType::Email,
+                    "imap".to_string(),
+                ));
+            }
+        }
+
+        if let Err(e) = session.logout().await {
+            tracing::debug!("IMAP LOGOUT failed (non-fatal): {e}");
         }
         Ok(())
     }

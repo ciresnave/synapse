@@ -105,10 +105,15 @@ igd = { version = "0.12", optional = true }       # UPnP port mapping
 sysinfo = { version = "0.36.0", optional = true }
 parking_lot = { version = "0.12", optional = true }
 
-# Email protocols - optional
+# Email protocols
 async-smtp = { version = "0.10", optional = true }
-async-imap = { version = "0.10", optional = true }
-lettre = { version = "0.11", optional = true }
+# Regular (non-optional) dependency, not gated behind the `email` feature: every other
+# `TransportType` in this crate is unconditionally compiled, and email should not be the one
+# exception requiring a non-default build flag to exist at all (task-3-brief.md, plan decision).
+# `default-features = false` + `runtime-tokio`: this crate is built on tokio throughout, never
+# async-std (async-imap's own default runtime).
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+lettre = { version = "0.11" }
 mail-parser = { version = "0.11", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
@@ -396,12 +401,11 @@ nat_traversal = [
     "dep:igd",
 ]
 
-# Email feature (adds email server capabilities)
+# Email feature (adds email server capabilities). async-imap and lettre are regular, non-optional
+# dependencies now (see their Cargo.toml comments), so they are not listed with `dep:` here.
 email = [
     "core",
     "dep:async-smtp",
-    "dep:async-imap",
-    "dep:lettre",
     "dep:mail-parser",
     "dep:native-tls",
     "dep:tokio-rustls",
