@@ -745,6 +745,19 @@ impl Transport for EmailTransportImpl {
             bytes_received: self.bytes_received.load(Ordering::Relaxed),
             reliability_score,
             average_latency_ms,
+            // This transport holds no persistent connection or pool in any mode: the SMTP client
+            // (`SmtpTransport::builder_dangerous(..).build()`, `send_message` above) and the IMAP
+            // session (`async_imap::Client::new(stream)`, `receive_raw` below) are both constructed
+            // fresh per call. So `active_connections: 0` is an explicit, measured true count, not a
+            // default standing in for one -- verified rather than left to `..Default::default()`,
+            // since a correct value reached by accident is one refactor away from becoming wrong.
+            // `SynapseSmtpServer.clients` (Direct mode's inbound side) is a field that is
+            // constructed but never populated anywhere (no `.insert`/`.remove` calls exist on it) --
+            // dead state that reads empty forever. Do not mistake it for a connection source: wiring
+            // `active_connections` to `clients.len()` would look like connecting an unmeasured field
+            // to real data, but since `clients` is never populated it would just turn this honest,
+            // correct `0` into a fabricated-looking one.
+            active_connections: 0,
             ..Default::default()
         }
     }
