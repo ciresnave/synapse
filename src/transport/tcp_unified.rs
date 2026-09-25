@@ -152,7 +152,14 @@ const READ_CHUNK: usize = 8 * 1024;
 
 /// `config[key]` as a positive integer, or `default` when the key is absent. A value that does not
 /// parse, or is zero, is an error: silently falling back to the default would hide a typo.
-fn positive_limit(config: &HashMap<String, String>, key: &str, default: usize) -> Result<usize> {
+///
+/// `pub(crate)` so `email_unified.rs`'s config validation can apply exactly this rule rather than
+/// reinventing it -- see this task's requirement to match `tcp_unified.rs`'s validation pattern.
+pub(crate) fn positive_limit(
+    config: &HashMap<String, String>,
+    key: &str,
+    default: usize,
+) -> Result<usize> {
     match config.get(key) {
         None => Ok(default),
         Some(value) => match value.trim().parse::<usize>() {

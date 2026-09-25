@@ -62,8 +62,91 @@
 //! already delivered to a caller's inbox is delivered again. A message whose fetched body does not
 //! parse as a `SecureMessage` increments `receive_failures` and is skipped, not fatal to the poll
 //! -- mirroring `nat_traversal.rs`'s `receive_raw` handling of an unparseable UDP datagram.
+//!
+//! # Size limits and backpressure (Task 4)
+//!
+//! [`MAX_MESSAGE_SIZE_KEY`] (`max_message_size`) and [`MAX_QUEUED_BYTES_KEY`]
+//! (`max_queued_bytes`) are validated exactly as `tcp_unified.rs`'s own `Limits::from_config`
+//! does (see [`EmailLimits::from_config`]): an unparseable or zero value is refused, not
+//! defaulted, and `max_queued_bytes` must be at least `max_message_size` and at most `u32::MAX`.
+//! `send_message` refuses a message whose serialized JSON is over `max_message_size` with
+//! [`SynapseError::MessageRefused`](crate::error::SynapseError::MessageRefused), before building
+//! a `lettre::Message` or touching an SMTP client -- Direct and RelayOut/External alike. In Direct
+//! mode, the same limit is handed to this instance's own `SynapseSmtpServer`
+//! (`SmtpServerConfig::max_message_size`), whose `DATA` handler refuses an over-limit body with
+//! SMTP `552` before it is parsed or stored (`smtp_server.rs`'s `handle_connection`/
+//! `store_message`), and a `max_queued_bytes`-sized semaphore (`SynapseSmtpServer::queue_budget`)
+//! gates how many stored-but-undrained bytes may accumulate, the same shape as `tcp_unified.rs`'s
+//! `queue_budget` (see that server's own field docs for exactly how bytes are acquired and
+//! released, since its store's shape -- a `HashMap` keyed by recipient, shared with
+//! `SynapseImapServer` and seeded directly in some tests -- does not carry a queued message's size
+//! alongside it the way `tcp_unified.rs`'s `Queued` does).
+//!
+//! ## The adversarial parsing factor, measured for this transport's actual path
+//!
+//! `tcp_unified.rs`'s module docs measure `f`, the heap a `SecureMessage` takes while it is parsed
+//! and after, per byte of its **serialized JSON**, for a bare `serde_json` parse of the wire
+//! bytes. This transport's receive path is not that: Direct mode's `DATA` handler and
+//! `poll_imap_inbox` both first parse an RFC 5322 envelope and extract the body (`mail_parser`,
+//! reversing whatever transfer encoding `lettre` applied) *before* the `serde_json` parse that
+//! actually produces a `SecureMessage` -- an extra pass over the bytes this transport's own
+//! `send_message` produced, that TCP's wire format never has. Per this crate's standing
+//! discipline (CLAUDE.md §7: state a measurement with its method, don't assume another
+//! transport's number applies), `f` was re-measured for this transport's real pipeline rather than
+//! reusing TCP's ≈18/≈12, the same way `http_unified.rs` measured its own connection-buffer
+//! overhead instead of assuming TCP's.
+//!
+//! **Method** (mirrors `tcp_unified.rs`'s): a `GlobalAlloc` wrapper counting live and peak bytes
+//! (a reallocation counted as a new block, a copy, and a free, so its transient is in the peak --
+//! the same convention `http_unified.rs`'s module docs state), around a release build on Windows.
+//! For each of `tcp_unified.rs`'s three representative `SecureMessage` shapes at about 1.4-1.8 MiB
+//! of serialized JSON (a `routing_path` of empty strings, one of one-character strings, and
+//! `metadata` with short keys), a `lettre::Message` was built exactly as `send_message` builds one
+//! (a `SinglePart`, `TEXT_PLAIN`, body the JSON text) and its raw RFC 5322 bytes
+//! (`Message::formatted()`) fed through the exact receive-path pipeline: `mail_parser` envelope
+//! parse and `body_text(0)` extraction, then `serde_json::from_slice` into a `SecureMessage`. A
+//! fourth shape -- one large `encrypted_content` byte array, the size a sender would most
+//! naturally reach for, as opposed to the other three's adversarial string/map shapes -- was
+//! measured too, as a lower bound. The harness itself (`examples/measure_email_parse_factor.rs` at
+//! the time of this measurement) was throwaway, not shipped with the crate, the same as
+//! `tcp_unified.rs`'s and `http_unified.rs`'s own measurement code evidently was.
+//!
+//! **Measured**, relative to the serialized-JSON bytes `max_message_size` counts (the unit this
+//! module's size checks use): `routing_path` of empty strings peaked at 13.00x and retained 9.00x;
+//! one of one-character strings peaked at 14.69x and retained 10.25x; `metadata` with short keys
+//! peaked at 12.65x and retained 9.00x; the large `encrypted_content` shape peaked at 2.12x and
+//! retained 1.28x. So take `f` ≈ 15 while parsing and ≈ 10 retained for this transport's own
+//! receive path -- the largest factors measured across these four shapes, not proven maxima, and
+//! **lower** than TCP's own previously-measured ≈18/≈12 despite the added MIME/RFC822 decoding
+//! pass: the dominant cost in both is the same `serde_json` parse of a `Vec<String>`/
+//! `HashMap<String, String>` full of small heap allocations, and that cost evidently varies with
+//! `serde_json`'s version and the optimizer more than the extra `mail_parser` pass adds on top of
+//! it. This is a measured result, not a derivation from TCP's figure -- the direction was not
+//! assumed either way before measuring.
+//!
+//! Direct mode's worst case, using this factor: with `C` inbound connections' `DATA` bodies each
+//! bounded during read at `max_message_size + 64 KiB` (`handle_connection`'s `read_cap`, a coarse
+//! bound checked against the raw RFC 5322 bytes, looser than the exact check `store_message` makes
+//! against the extracted body) and no cap today on how many connections `SynapseSmtpServer::serve`
+//! accepts at once (unlike `tcp_unified.rs`'s `connection_permits`), the read-buffer term is
+//! unbounded in the number of concurrent connections; only the **queued** term is bounded, at
+//! `max_queued_bytes × f` while a batch is parsed (`Bₚ × f`) plus `max_queued_bytes` retained
+//! once every stored message is drained and kept (`Bₚ × 12`, using `f` ≈ 10 rounded up to
+//! `tcp_unified.rs`'s own retained figure for a conservative shared bound where the two differ).
+//! With the default `max_queued_bytes` (40 MiB, [`DEFAULT_MAX_QUEUED_BYTES`]), that is up to
+//! 40 MiB × 15 = 600 MiB while a full queue is parsed at once, an upper bound this crate has not
+//! needed to defend against with a connection cap the way `tcp_unified.rs` does, since Direct
+//! mode's `SynapseSmtpServer` has no `max_concurrent_connections` config key today -- a gap this
+//! task does not close (out of scope: the brief asks for `max_message_size`/`max_queued_bytes`
+//! and the refusal/backpressure they gate, not a new connection-limiting config key).
+//!
+//! The single-line-with-no-CRLF gap `handle_connection`'s DATA-loop comment notes (a peer that
+//! never sends a newline can still make `read_line` buffer without bound before the loop's own
+//! cap is ever checked) is pre-existing to this server's line-oriented command/DATA reader, shared
+//! by every command it reads, not introduced or closed by this task.
 
 use super::abstraction::*;
+use super::tcp_unified::positive_limit;
 use crate::{
     email_server::{
         AuthHandler, ConnectivityDetector, ServerRecommendation, SmtpServerConfig,
@@ -87,6 +170,60 @@ use std::{
     },
 };
 use tokio::net::TcpListener;
+
+/// The config key for the largest message, in bytes of serialized JSON, this transport sends and
+/// (in Direct mode) its own `SynapseSmtpServer` accepts. Same unit and meaning as
+/// `tcp_unified.rs`'s `MAX_MESSAGE_SIZE_KEY`.
+pub const MAX_MESSAGE_SIZE_KEY: &str = "max_message_size";
+
+/// The default for [`MAX_MESSAGE_SIZE_KEY`]: 10 MiB of serialized JSON -- the figure
+/// `capabilities()` reported before this task, now actually enforced rather than only advertised.
+pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+/// The config key for how many bytes of received-but-undrained message bodies (Direct mode's
+/// `SynapseSmtpServer` store) may accumulate at once. Same unit and meaning as `tcp_unified.rs`'s
+/// `MAX_QUEUED_BYTES_KEY`: must be at least [`MAX_MESSAGE_SIZE_KEY`] and at most `u32::MAX`.
+pub const MAX_QUEUED_BYTES_KEY: &str = "max_queued_bytes";
+
+/// The default for [`MAX_QUEUED_BYTES_KEY`]: 4x [`DEFAULT_MAX_MESSAGE_SIZE`], the same ratio
+/// `tcp_unified.rs` defaults to.
+pub const DEFAULT_MAX_QUEUED_BYTES: usize = 4 * DEFAULT_MAX_MESSAGE_SIZE;
+
+/// [`MAX_MESSAGE_SIZE_KEY`]/[`MAX_QUEUED_BYTES_KEY`], parsed and cross-checked exactly as
+/// `tcp_unified.rs`'s `Limits::from_config` does: an unparseable or zero value is refused (not
+/// defaulted), and `max_queued_bytes` must be at least `max_message_size` (or a message that
+/// passed the size check could never be queued) and at most `u32::MAX` (the most one
+/// `acquire_many_owned` call can take).
+struct EmailLimits {
+    max_message_size: usize,
+    max_queued_bytes: usize,
+}
+
+impl EmailLimits {
+    fn from_config(config: &HashMap<String, String>) -> Result<Self> {
+        let max_message_size =
+            positive_limit(config, MAX_MESSAGE_SIZE_KEY, DEFAULT_MAX_MESSAGE_SIZE)?;
+        let max_queued_bytes =
+            positive_limit(config, MAX_QUEUED_BYTES_KEY, DEFAULT_MAX_QUEUED_BYTES)?;
+        if max_queued_bytes < max_message_size {
+            return Err(SynapseError::Config(format!(
+                "{MAX_QUEUED_BYTES_KEY} ({max_queued_bytes}) must be at least \
+                 {MAX_MESSAGE_SIZE_KEY} ({max_message_size}), or a message of that size could \
+                 never be queued"
+            )));
+        }
+        if u32::try_from(max_queued_bytes).is_err() {
+            return Err(SynapseError::Config(format!(
+                "{MAX_QUEUED_BYTES_KEY} ({max_queued_bytes}) must be at most {}",
+                u32::MAX
+            )));
+        }
+        Ok(Self {
+            max_message_size,
+            max_queued_bytes,
+        })
+    }
+}
 
 /// Which of the three shapes (module docs) this transport instance is operating in, decided once
 /// at construction. `RelayOut` and `External` are kept as separate variants (rather than one
@@ -160,6 +297,12 @@ impl AuthHandler for AcceptAllAuthHandler {
 pub struct EmailTransportImpl {
     config: EmailConfig,
     mode: EmailMode,
+    /// The largest message, in bytes of serialized JSON, `send_message` will send. Checked before
+    /// building any `lettre::Message` or touching an SMTP client (Task 4); in Direct mode this is
+    /// also the value `smtp_server`'s own `SmtpServerConfig::max_message_size` enforces, so what is
+    /// advertised (`capabilities()`) is what both sides enforce, the same invariant
+    /// `tcp_unified.rs`'s module docs state for its own `max_message_size`.
+    max_message_size: usize,
     smtp_server: Option<Arc<SynapseSmtpServer>>,
     listener: StdMutex<Option<TcpListener>>,
     /// `message_id`s already delivered by a RelayOut/External poll (module docs) -- unused in
@@ -183,6 +326,10 @@ impl EmailTransportImpl {
 
         let email_config = Self::email_config_from_map(config)?;
         let mode = Self::determine_mode(config, bind_scope).await?;
+        let EmailLimits {
+            max_message_size,
+            max_queued_bytes,
+        } = EmailLimits::from_config(config)?;
 
         let (smtp_server, listener) = if mode == EmailMode::Direct {
             let bind_addr = bind_scope.listen_addr(local_port);
@@ -204,6 +351,10 @@ impl EmailTransportImpl {
                     // modes), never inbound delivery, and per the Global Constraints must never
                     // stand in for sender identity either way.
                     require_auth: false,
+                    // What `capabilities()` advertises is what this server enforces (Task 4): see
+                    // `max_message_size`'s field doc.
+                    max_message_size,
+                    max_queued_bytes,
                     ..Default::default()
                 },
                 auth_handler,
@@ -219,6 +370,7 @@ impl EmailTransportImpl {
         Ok(Self {
             config: email_config,
             mode,
+            max_message_size,
             smtp_server,
             listener: StdMutex::new(listener),
             imap_seen_ids: StdMutex::new(HashSet::new()),
@@ -355,7 +507,7 @@ impl Transport for EmailTransportImpl {
             EmailMode::External => vec!["external_smtp".to_string(), "imap_poll".to_string()],
         };
         TransportCapabilities {
-            max_message_size: 10 * 1024 * 1024,
+            max_message_size: self.max_message_size,
             reliable: true,
             real_time: false,
             broadcast: false,
@@ -398,6 +550,20 @@ impl Transport for EmailTransportImpl {
         // Whole SecureMessage as JSON -- never hand-picked fields (Global Constraints, spec §4).
         let body = serde_json::to_vec(message)
             .map_err(|e| SynapseError::TransportError(format!("serialize failed: {e}")))?;
+
+        // Refuse before building a `lettre::Message` or touching an SMTP client (Direct and
+        // RelayOut/External alike), the same as `tcp_unified.rs`'s `connect_and_send`: writing a
+        // message a receiver with this limit would drop is not a "Sent" this transport may claim.
+        if body.len() > self.max_message_size {
+            return Err(SynapseError::MessageRefused(format!(
+                "email message {} serializes to {} bytes, over this transport's {} of {} bytes \
+                 (serialized JSON); a receiver with that limit would drop it",
+                message.message_id.0,
+                body.len(),
+                MAX_MESSAGE_SIZE_KEY,
+                self.max_message_size
+            )));
+        }
 
         let from_mailbox: Mailbox = "synapse-agent@localhost"
             .parse()
@@ -662,10 +828,23 @@ impl TransportFactory for EmailTransportFactory {
     }
 
     fn default_config(&self) -> HashMap<String, String> {
-        HashMap::new()
+        let mut config = HashMap::new();
+        config.insert(
+            MAX_MESSAGE_SIZE_KEY.to_string(),
+            DEFAULT_MAX_MESSAGE_SIZE.to_string(),
+        );
+        config.insert(
+            MAX_QUEUED_BYTES_KEY.to_string(),
+            DEFAULT_MAX_QUEUED_BYTES.to_string(),
+        );
+        config
     }
 
-    fn validate_config(&self, _config: &HashMap<String, String>) -> Result<()> {
+    fn validate_config(&self, config: &HashMap<String, String>) -> Result<()> {
+        // The same check `new` applies (via `EmailTransportImpl::new`'s own
+        // `EmailLimits::from_config` call), so validating and constructing cannot disagree --
+        // mirrors `tcp_unified.rs`'s `TcpTransportFactory::validate_config`.
+        EmailLimits::from_config(config)?;
         Ok(())
     }
 }

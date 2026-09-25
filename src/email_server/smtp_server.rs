@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info};
 
 /// High-performance SMTP server optimized for EMRP
@@ -15,6 +16,23 @@ pub struct SynapseSmtpServer {
     config: SmtpServerConfig,
     /// Message storage
     message_store: Arc<Mutex<HashMap<String, Vec<SecureMessage>>>>,
+    /// The `DATA` body length stored for each message in `message_store`, same keys and index
+    /// order, so `drain_messages`/`drain_all_messages` know exactly how many queue-budget bytes to
+    /// release for what they remove without re-serializing (which could differ by a few bytes from
+    /// what was actually acquired). Kept as a separate map, rather than changing
+    /// `message_store`'s value type to carry the size alongside each message, because that type is
+    /// shared with `SynapseImapServer` and seeded directly in tests (see `mod.rs`,
+    /// `tests/transport_repairs.rs`) -- widening it here would break both.
+    queued_sizes: Arc<Mutex<HashMap<String, Vec<usize>>>>,
+    /// Free bytes of queue budget for messages stored but not yet drained, one permit per byte of
+    /// the `DATA` body a message was stored from (`config.max_queued_bytes` at construction).
+    /// `store_message` acquires bytes for each recipient copy it stores (after the
+    /// `max_message_size` check and a successful parse) and forgets the permits;
+    /// `drain_messages`/`drain_all_messages` release the same number of bytes back, read from
+    /// `queued_sizes`. Task 4's equivalent of `tcp_unified.rs`'s `queue_budget`, sized here in bytes
+    /// of the extracted `DATA` body rather than a per-connection read buffer, since this server's
+    /// messages queue in a shared store rather than per-connection.
+    queue_budget: Arc<Semaphore>,
     /// Connected clients
     clients: Arc<Mutex<HashMap<String, ClientSession>>>,
     /// Authorization handler
@@ -27,8 +45,16 @@ pub struct SynapseSmtpServer {
 pub struct SmtpServerConfig {
     /// SMTP port (usually 25, 587, or 2525)
     pub port: u16,
-    /// Maximum message size in bytes
+    /// Maximum message size in bytes, counted as the extracted `DATA` body (the JSON
+    /// `SecureMessage`, after the RFC 5322 envelope and any transfer encoding are stripped -- the
+    /// same unit `email_unified.rs`'s `send_message` checks). A body over this is refused by
+    /// `store_message` with `SynapseError::MessageRefused`, before it is parsed or queued.
     pub max_message_size: usize,
+    /// How many bytes of stored-but-undrained message bodies may accumulate at once, counted the
+    /// same way as `max_message_size`. Must be at least `max_message_size` (checked by
+    /// `email_unified.rs`'s config validation, not here) or a message that passed the size check
+    /// could never be queued.
+    pub max_queued_bytes: usize,
     /// Authentication required
     pub require_auth: bool,
     /// TLS configuration
@@ -110,8 +136,9 @@ pub trait AuthHandler {
 impl Default for SmtpServerConfig {
     fn default() -> Self {
         Self {
-            port: 2525,                         // Non-privileged port for development
-            max_message_size: 25 * 1024 * 1024, // 25MB
+            port: 2525,                             // Non-privileged port for development
+            max_message_size: 25 * 1024 * 1024,     // 25MB
+            max_queued_bytes: 4 * 25 * 1024 * 1024, // 100MB, 4x max_message_size (tcp_unified.rs's ratio)
             require_auth: true,
             tls_config: None,
             performance: PerformanceConfig {
@@ -135,9 +162,12 @@ impl SynapseSmtpServer {
         auth_handler: Arc<dyn AuthHandler + Send + Sync>,
         message_store: Arc<Mutex<HashMap<String, Vec<SecureMessage>>>>,
     ) -> Self {
+        let queue_budget = Arc::new(Semaphore::new(config.max_queued_bytes));
         Self {
             config,
             message_store,
+            queued_sizes: Arc::new(Mutex::new(HashMap::new())),
+            queue_budget,
             clients: Arc::new(Mutex::new(HashMap::new())),
             auth_handler,
             metrics: Arc::new(Mutex::new(ServerMetrics::default())),
@@ -236,6 +266,19 @@ impl SynapseSmtpServer {
             if response.starts_with("354") {
                 let mut raw_message = Vec::new();
                 let mut data_line = String::new();
+                // Task 4: stop growing `raw_message` well before it could reach an attacker-chosen
+                // multiple of `max_message_size` -- the RFC 5322 envelope (headers, a blank line,
+                // and any transfer encoding `lettre` applied) is at most a few hundred bytes to a
+                // few KiB over the extracted body for messages this size, so this slack keeps
+                // bounding cheap while still leaving `store_message`'s own check (on the *extracted*
+                // body, a stricter, exact comparison) the one that actually decides refusal. Lines
+                // read past the cap are still consumed (not stored) so the connection stays in sync
+                // with the terminator instead of desyncing SMTP state -- this does not bound a
+                // single pathological line with no CRLF at all, a pre-existing limitation of this
+                // server's line-oriented reader shared by every command it reads, not new to this
+                // check.
+                let read_cap = self.config.max_message_size.saturating_add(64 * 1024);
+                let mut over_cap = false;
                 loop {
                     data_line.clear();
                     let bytes_read = reader.read_line(&mut data_line).await?;
@@ -247,39 +290,62 @@ impl SynapseSmtpServer {
                     if content == "." {
                         break;
                     }
+                    if raw_message.len() >= read_cap {
+                        over_cap = true;
+                        continue;
+                    }
                     let unstuffed = content.strip_prefix('.').unwrap_or(content);
                     raw_message.extend_from_slice(unstuffed.as_bytes());
                     raw_message.extend_from_slice(b"\r\n");
                 }
 
-                // What DATA carries is the whole RFC 5322 message: MIME headers, a blank line,
-                // then the body, which `lettre` may transfer-encode (quoted-printable or base64)
-                // to keep lines within SMTP's length limit. `store_message`'s own JSON parse
-                // (and its test in `mod tests`) expects to receive the bare `SecureMessage` JSON,
-                // not this envelope, so the envelope is stripped and any transfer encoding
-                // reversed here -- once, in the wire-format layer -- via `mail_parser`, which
-                // decodes whichever encoding was actually used rather than assuming one.
-                let body = mail_parser::MessageParser::default()
-                    .parse(&raw_message)
-                    .and_then(|parsed| {
-                        parsed
-                            .body_text(0)
-                            .map(|text| text.into_owned().into_bytes())
-                    })
-                    .unwrap_or(raw_message);
+                let data_response = if over_cap {
+                    // Refused for size before any MIME parsing, queuing, or storage is attempted --
+                    // the same outcome `store_message`'s own check reaches for a body that arrived
+                    // under this cap but still over `max_message_size` once the envelope is
+                    // stripped.
+                    session.current_message = None;
+                    "552 5.3.4 message size exceeds fixed maximum message size\r\n".to_string()
+                } else {
+                    // What DATA carries is the whole RFC 5322 message: MIME headers, a blank line,
+                    // then the body, which `lettre` may transfer-encode (quoted-printable or base64)
+                    // to keep lines within SMTP's length limit. `store_message`'s own JSON parse
+                    // (and its test in `mod tests`) expects to receive the bare `SecureMessage` JSON,
+                    // not this envelope, so the envelope is stripped and any transfer encoding
+                    // reversed here -- once, in the wire-format layer -- via `mail_parser`, which
+                    // decodes whichever encoding was actually used rather than assuming one.
+                    let body = mail_parser::MessageParser::default()
+                        .parse(&raw_message)
+                        .and_then(|parsed| {
+                            parsed
+                                .body_text(0)
+                                .map(|text| text.into_owned().into_bytes())
+                        })
+                        .unwrap_or(raw_message);
 
-                let data_response = match session.current_message.take() {
-                    Some(mut msg) => {
-                        msg.data = body;
-                        match self.store_message(msg).await {
-                            Ok(()) => "250 Ok: message accepted\r\n".to_string(),
-                            Err(e) => {
-                                error!("Failed to store SMTP message: {e}");
-                                "554 Transaction failed: message body did not parse\r\n".to_string()
+                    match session.current_message.take() {
+                        Some(mut msg) => {
+                            msg.data = body;
+                            match self.store_message(msg).await {
+                                Ok(()) => "250 Ok: message accepted\r\n".to_string(),
+                                // Refused for size, before it was parsed or queued (Task 4): a
+                                // distinct response so a sender can tell "too big" from
+                                // "malformed", the same distinction `email_unified.rs`'s send-side
+                                // check draws with `SynapseError::MessageRefused`.
+                                Err(SynapseError::MessageRefused(reason)) => {
+                                    error!("Refused SMTP message: {reason}");
+                                    "552 5.3.4 message size exceeds fixed maximum message size\r\n"
+                                        .to_string()
+                                }
+                                Err(e) => {
+                                    error!("Failed to store SMTP message: {e}");
+                                    "554 Transaction failed: message body did not parse\r\n"
+                                        .to_string()
+                                }
                             }
                         }
+                        None => "503 Bad sequence of commands\r\n".to_string(),
                     }
-                    None => "503 Bad sequence of commands\r\n".to_string(),
                 };
 
                 writer.write_all(data_response.as_bytes()).await?;
@@ -453,6 +519,17 @@ impl SynapseSmtpServer {
     /// not raw content to wrap: hand-picking fields here was the exact bug NAT traversal's PR B
     /// fixed, and this server had the same one, just never reachable until now.
     async fn store_message(&self, message: SmtpMessage) -> Result<()> {
+        // Refuse before parsing or queuing, the same shape as `email_unified.rs`'s send-side check
+        // and `tcp_unified.rs`'s `MessageRefused` (Task 4): never counted as a parse failure, and
+        // never allowed to take queue budget or a place in the store.
+        if message.data.len() > self.config.max_message_size {
+            return Err(SynapseError::MessageRefused(format!(
+                "SMTP DATA body is {} bytes, over this server's max_message_size of {} bytes",
+                message.data.len(),
+                self.config.max_message_size
+            )));
+        }
+
         let start_time = SystemTime::now();
 
         let secure_message: SecureMessage = serde_json::from_slice(&message.data).map_err(|e| {
@@ -461,12 +538,51 @@ impl SynapseSmtpServer {
             ))
         })?;
 
-        // Store message for each recipient
+        // Queue budget: acquire bytes for every recipient copy this message is about to store
+        // (below), before it is stored -- released by `drain_messages`/`drain_all_messages` when
+        // the application takes a copy out. `forget()` keeps the semaphore's count down until that
+        // explicit release, rather than an RAII guard that would need to live inside the store
+        // alongside the message (which would change `message_store`'s shared, externally-seeded
+        // type -- see this struct's field docs on why that type is fixed).
+        let per_copy_bytes = message.data.len();
+        let total_bytes = per_copy_bytes.saturating_mul(message.to.len().max(1));
+        if let Ok(total_u32) = u32::try_from(total_bytes) {
+            Arc::clone(&self.queue_budget)
+                .acquire_many_owned(total_u32)
+                .await
+                .map_err(|_| {
+                    SynapseError::TransportError(
+                        "SMTP server queue budget semaphore closed".to_string(),
+                    )
+                })?
+                .forget();
+        } else {
+            // Unreachable in practice: `max_message_size` is refused above at values that, times a
+            // realistic recipient count, would already exceed `u32::MAX`, and `max_queued_bytes`
+            // (which bounds the semaphore's own capacity) is validated at construction to fit
+            // `u32::MAX` (`email_unified.rs`'s `EmailLimits::from_config`). Refuse rather than
+            // silently skip the budget accounting if it ever is reached.
+            return Err(SynapseError::MessageRefused(format!(
+                "SMTP message queue-budget cost ({total_bytes} bytes across {} recipients) \
+                 overflows u32",
+                message.to.len()
+            )));
+        }
+
+        // Store message for each recipient, and record the budget-cost of that copy alongside it
+        // in lockstep (same key, same push order) so drain can release exactly what was acquired.
         {
             let mut store = self.message_store.lock().unwrap();
+            let mut sizes = self.queued_sizes.lock().unwrap();
             for recipient in &message.to {
-                let messages = store.entry(recipient.clone()).or_default();
-                messages.push(secure_message.clone());
+                store
+                    .entry(recipient.clone())
+                    .or_default()
+                    .push(secure_message.clone());
+                sizes
+                    .entry(recipient.clone())
+                    .or_default()
+                    .push(per_copy_bytes);
             }
         }
 
@@ -495,23 +611,42 @@ impl SynapseSmtpServer {
         Ok(store.get(recipient).cloned().unwrap_or_default())
     }
 
-    /// Take every message queued for `recipient`, removing them from the store. `receive_raw`
-    /// callers that track a specific local recipient address call this, not `get_messages` (which
-    /// is non-destructive and used elsewhere for inspection/tests).
+    /// Take every message queued for `recipient`, removing them from the store, and release the
+    /// queue budget those messages held (Task 4). `receive_raw` callers that track a specific local
+    /// recipient address call this, not `get_messages` (which is non-destructive and used elsewhere
+    /// for inspection/tests). A message that reached the store some other way than
+    /// `store_message` (a test seeding it directly) has no recorded size and releases nothing for
+    /// itself -- it never took budget in the first place, so nothing is owed back.
     pub fn drain_messages(&self, recipient: &str) -> Result<Vec<SecureMessage>> {
         let mut store = self.message_store.lock().unwrap();
-        Ok(store.remove(recipient).unwrap_or_default())
+        let messages = store.remove(recipient).unwrap_or_default();
+        drop(store);
+        let mut sizes = self.queued_sizes.lock().unwrap();
+        let released: usize = sizes.remove(recipient).unwrap_or_default().iter().sum();
+        drop(sizes);
+        if released > 0 {
+            self.queue_budget.add_permits(released);
+        }
+        Ok(messages)
     }
 
-    /// Take every message queued for every recipient, removing them from the store. Used by a
-    /// single-tenant caller (an `EmailTransportImpl` running its own dedicated `SynapseSmtpServer`
-    /// in Direct mode) that has no configured local recipient address to filter by -- everything
-    /// that landed on this server's port belongs to it.
+    /// Take every message queued for every recipient, removing them from the store, and release
+    /// the queue budget every one of them held (Task 4). Used by a single-tenant caller (an
+    /// `EmailTransportImpl` running its own dedicated `SynapseSmtpServer` in Direct mode) that has
+    /// no configured local recipient address to filter by -- everything that landed on this
+    /// server's port belongs to it.
     pub fn drain_all_messages(&self) -> Result<Vec<SecureMessage>> {
         let mut store = self.message_store.lock().unwrap();
         let mut all = Vec::new();
         for (_, mut messages) in store.drain() {
             all.append(&mut messages);
+        }
+        drop(store);
+        let mut sizes = self.queued_sizes.lock().unwrap();
+        let released: usize = sizes.drain().flat_map(|(_, v)| v).sum();
+        drop(sizes);
+        if released > 0 {
+            self.queue_budget.add_permits(released);
         }
         Ok(all)
     }
@@ -527,6 +662,8 @@ impl Clone for SynapseSmtpServer {
         Self {
             config: self.config.clone(),
             message_store: Arc::clone(&self.message_store),
+            queued_sizes: Arc::clone(&self.queued_sizes),
+            queue_budget: Arc::clone(&self.queue_budget),
             clients: Arc::clone(&self.clients),
             auth_handler: Arc::clone(&self.auth_handler),
             metrics: Arc::clone(&self.metrics),

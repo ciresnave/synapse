@@ -3644,3 +3644,253 @@ async fn quic_metrics_counts_real_sends_and_receives() {
     assert_eq!(bob_metrics.messages_received, 1);
     assert!(bob_metrics.bytes_received > 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Email (plan Task 4): size limits, backpressure, and config validation.
+// ---------------------------------------------------------------------------------------------
+
+/// The sender refuses a message whose serialized form is over its `max_message_size`, before
+/// building a `lettre::Message` or touching an SMTP client, instead of dialing out and claiming
+/// `Sent` for a message a receiver with the same limit would drop. Mirrors
+/// `tcp_refuses_at_send_a_message_over_its_limit`'s shape: the target address points at a bound-
+/// and-released port nothing listens on, so a real send attempt would fail fast with a connection
+/// error (`TransportError`) -- proving the refusal happens first, distinguishable from "tried and
+/// failed" by the error variant alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_refuses_at_send_a_message_over_its_limit() {
+    const LIMIT: usize = 1024;
+    // Direct mode is the default under `BindScope::Loopback` (email_unified.rs's module docs), so
+    // no `email_mode` override is needed; `local_port` defaults to 0 (OS-assigned), so this binds
+    // without needing a `free_port()` of its own.
+    let config = one_key("max_message_size", &LIMIT.to_string());
+
+    let alice_transport = synapse::transport::EmailTransportFactory
+        .create_transport(&config)
+        .await
+        .expect("a Direct-mode transport with a small max_message_size");
+
+    // Nobody listens here; if the refusal were skipped, `send_message` would get a connection
+    // error instead, which is a different `Result` variant than `MessageRefused`.
+    let dead_port = free_port();
+    let target =
+        TransportTarget::new(BOB.to_string()).with_address(format!("127.0.0.1:{dead_port}"));
+
+    let over = SecureMessage::new(BOB, ALICE, vec![7u8; LIMIT * 4], SecurityLevel::Public);
+    let over_size = wire_size(&over);
+    assert!(
+        over_size > LIMIT,
+        "the message must actually serialize over the {LIMIT}-byte limit; got {over_size}"
+    );
+
+    match alice_transport.send_message(&target, &over).await {
+        Ok(receipt) => panic!(
+            "a {over_size}-byte message over the {LIMIT}-byte limit must be refused, not {:?}",
+            receipt.confirmation
+        ),
+        Err(synapse::SynapseError::MessageRefused(reason)) => {
+            assert!(
+                reason.contains("max_message_size")
+                    && reason.contains(&over_size.to_string())
+                    && reason.contains(&LIMIT.to_string()),
+                "the refusal must name the limit and both sizes: {reason}"
+            );
+        }
+        Err(other) => panic!(
+            "must be refused with MessageRefused (before any SMTP connection is attempted), \
+             not {other:?}"
+        ),
+    }
+}
+
+/// A `max_message_size` that does not parse, or is zero, must refuse construction: before this
+/// task, `EmailTransportFactory::validate_config` accepted anything and the key did not exist at
+/// all. Mirrors `tcp_refuses_an_unparseable_or_zero_limit`.
+#[tokio::test]
+async fn email_refuses_an_unparseable_or_zero_max_message_size() {
+    for bad in ["", "abc", "0", "-1", "1MiB"] {
+        let config = one_key("max_message_size", bad);
+        assert!(
+            synapse::transport::EmailTransportFactory
+                .validate_config(&config)
+                .is_err(),
+            "max_message_size = {bad:?} must be refused by validate_config"
+        );
+        match synapse::transport::EmailTransportFactory
+            .create_transport(&config)
+            .await
+        {
+            Ok(_) => {
+                panic!("max_message_size = {bad:?} must be refused, not replaced by a default")
+            }
+            Err(e) => assert!(
+                e.to_string().contains("max_message_size"),
+                "the error for max_message_size = {bad:?} must name the key: {e}"
+            ),
+        }
+    }
+    let good = one_key("max_message_size", "4096");
+    synapse::transport::EmailTransportFactory
+        .validate_config(&good)
+        .expect("a valid max_message_size must be accepted");
+    assert!(
+        synapse::transport::EmailTransportFactory
+            .create_transport(&good)
+            .await
+            .is_ok(),
+        "max_message_size = 4096 must be accepted"
+    );
+}
+
+/// The queue budget must hold the largest message the receiver stores, or a stored message would
+/// wait forever for budget that never comes; and it must fit the `u32` one semaphore acquire
+/// counts in. Construction refuses a budget below `max_message_size`, above `u32::MAX`,
+/// unparseable or zero, naming the key; a budget equal to `max_message_size` is the positive
+/// control. Mirrors `tcp_refuses_a_queue_budget_smaller_than_its_largest_message`.
+#[tokio::test]
+async fn email_refuses_a_queue_budget_smaller_than_its_largest_message() {
+    let config = |budget: &str, message: &str| {
+        HashMap::from([
+            ("max_queued_bytes".to_string(), budget.to_string()),
+            ("max_message_size".to_string(), message.to_string()),
+        ])
+    };
+    let over_u32 = (u64::from(u32::MAX) + 1).to_string();
+    for (budget, message) in [
+        ("4095", "4096"),
+        ("1", "4096"),
+        ("1048575", "1048576"),
+        (over_u32.as_str(), over_u32.as_str()),
+        ("0", "4096"),
+        ("abc", "4096"),
+    ] {
+        match synapse::transport::EmailTransportFactory
+            .create_transport(&config(budget, message))
+            .await
+        {
+            Ok(_) => panic!(
+                "max_queued_bytes = {budget} with max_message_size = {message} must be refused"
+            ),
+            Err(e) => assert!(
+                e.to_string().contains("max_queued_bytes"),
+                "the error for max_queued_bytes = {budget} must name the key: {e}"
+            ),
+        }
+    }
+    // Without `max_message_size`, the budget is checked against its default of 10 MiB.
+    assert!(
+        synapse::transport::EmailTransportFactory
+            .create_transport(&one_key("max_queued_bytes", "4096"))
+            .await
+            .is_err(),
+        "max_queued_bytes = 4096 is under the default max_message_size and must be refused"
+    );
+    for (budget, message) in [("4096", "4096"), ("8192", "4096")] {
+        assert!(
+            synapse::transport::EmailTransportFactory
+                .create_transport(&config(budget, message))
+                .await
+                .is_ok(),
+            "max_queued_bytes = {budget} with max_message_size = {message} must be accepted"
+        );
+    }
+    let u32_max = u32::MAX.to_string();
+    assert!(
+        synapse::transport::EmailTransportFactory
+            .create_transport(&config(&u32_max, "4096"))
+            .await
+            .is_ok(),
+        "max_queued_bytes = u32::MAX must be accepted"
+    );
+}
+
+/// A message body over `max_message_size` sent straight to Direct mode's own `SynapseSmtpServer`
+/// (bypassing `EmailTransportImpl::send_message`'s own check, to prove the receiver enforces the
+/// same limit independently -- e.g. against a peer that ignores the sender-side check) is refused
+/// by `store_message` before it is parsed, queued, or delivered to `receive_raw`, and does not
+/// increment `receive_failures` (that counter is for bodies that parse-fail, module docs; refusal
+/// for size is a distinct outcome).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_smtp_server_refuses_a_data_body_over_its_limit() {
+    let auth_handler: Arc<dyn synapse::email_server::AuthHandler + Send + Sync> =
+        Arc::new(AcceptAllImapAuth);
+    let message_store = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let server = synapse::email_server::SynapseSmtpServer::new(
+        synapse::email_server::SmtpServerConfig {
+            max_message_size: 64,
+            require_auth: false,
+            ..Default::default()
+        },
+        auth_handler,
+        message_store,
+    );
+    let port = free_port();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .expect("bind");
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        let _ = server_clone.serve(listener).await;
+    });
+
+    let message = SecureMessage::new(BOB, ALICE, vec![9u8; 512], SecurityLevel::Public);
+    let json = serde_json::to_vec(&message).expect("serialize");
+    assert!(
+        json.len() > 64,
+        "the DATA body must actually be over the 64-byte limit; got {}",
+        json.len()
+    );
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (read_half, mut write_half) = stream.split();
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("greeting"); // 220
+    write_half.write_all(b"EHLO test\r\n").await.unwrap();
+    line.clear();
+    while reader.read_line(&mut line).await.unwrap() > 0 {
+        let done = line.starts_with("250 ");
+        line.clear();
+        if done {
+            break;
+        }
+    }
+    write_half
+        .write_all(b"MAIL FROM:<alice@repair.test>\r\n")
+        .await
+        .unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    write_half
+        .write_all(b"RCPT TO:<bob@repair.test>\r\n")
+        .await
+        .unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    write_half.write_all(b"DATA\r\n").await.unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(line.starts_with("354"), "expected 354, got {line:?}");
+
+    write_half
+        .write_all(b"Content-Type: text/plain\r\n\r\n")
+        .await
+        .unwrap();
+    write_half.write_all(&json).await.unwrap();
+    write_half.write_all(b"\r\n.\r\n").await.unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(
+        line.starts_with("552"),
+        "an over-limit DATA body must be refused with 552, got {line:?}"
+    );
+
+    let stored = server.drain_all_messages().expect("drain");
+    assert!(
+        stored.is_empty(),
+        "a refused-for-size body must never be stored: {} messages arrived",
+        stored.len()
+    );
+}
