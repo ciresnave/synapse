@@ -22,7 +22,7 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 - §5 (as narrowed by PM review): *"The protection boundary is narrower than 'accidental exposure' in general ... `SecretString` redacts `Debug`, and nothing else."* Do not write or imply broader protection than that anywhere in code comments or tests.
 - §6: `reliability_score` computed as `messages_sent / (messages_sent + send_failures)`, `1.0` when untried — QUIC's exact formula (`quic_unified.rs`), not a new one.
 - §6: *"`average_latency_ms` should be declared via `unmeasured_metrics` unless this slice actually instruments it ... measure it for real ... or declare it absent; do not estimate."*
-- §7: *"No test may depend on a live external mail provider."*
+- §7: *"The hard constraint: no test may depend on a live external mail provider (Gmail, etc.) — that is both a CI-reliability risk and, per §1a, not even the primary path this slice builds."*
 - §1a(4), CireSnave verbatim: *"IMAP ... allow[s] one server to send and receive messages on behalf of another as a sort of proxy"* — not for a human to read agent traffic. Task 3's IMAP integration must not add any human-mailbox-reading capability.
 
 **Deviations from the spec found while planning, stated here per the spec's §8 requirement (none require correcting the spec — they are implementation-level facts the spec did not anticipate at its level of detail):**
@@ -179,7 +179,7 @@ Replace `store_message` (`smtp_server.rs:379-421`) — delete the `#[allow(dead_
         let start_time = SystemTime::now();
 
         let secure_message: SecureMessage = serde_json::from_slice(&message.data).map_err(|e| {
-            SynapseError::InvalidMessage(format!(
+            SynapseError::InvalidMessageFormat(format!(
                 "SMTP DATA body did not parse as a SecureMessage: {e}"
             ))
         })?;
@@ -210,7 +210,67 @@ Replace `store_message` (`smtp_server.rs:379-421`) — delete the `#[allow(dead_
     }
 ```
 
-Check `crate::error::SynapseError` for an `InvalidMessage` variant (`grep -n "InvalidMessage\|enum SynapseError" src/error.rs`); if it doesn't exist, use whichever existing variant NAT traversal's `parse_nat_message` uses for the same "did not parse" case (`TransportError`, per this plan's research into `nat_traversal.rs`), for consistency across transports.
+`SynapseError::InvalidMessageFormat(String)` already exists (`error.rs:57`) and is the right variant for "did not parse" — used verbatim above, not a guess.
+
+**Note the deliberate divergence from NAT traversal's own convention:** `nat_traversal.rs`'s `parse_nat_message` returns `Ok(None)` on a parse failure (logs a warning, silently drops the message) rather than an `Err` — appropriate there because UDP has no synchronous response channel back to the sender. SMTP does: a `DATA` command that fails to parse should cause the transaction to be **rejected with an SMTP error response**, which requires `store_message` to return `Err`, not silently succeed-and-drop. Step 4b's handler must translate this `Err` into a `5xx` SMTP response (e.g. `"554 Transaction failed: message body did not parse\r\n"`), not swallow it.
+
+- [ ] **Step 4a: Write the two-arm test for `store_message` directly — not just the end-to-end test**
+
+**Required because of how Steps 1-4 combine: `store_message` is being fixed and wired up (made reachable) in the same task.** A passing end-to-end test (Step 2) after this change proves only that the new path works; it demonstrates nothing about the old hand-picking behavior being wrong, because that behavior was never reachable to regress. The test must assert the positive property directly, both arms, in `src/email_server/smtp_server.rs`'s own `#[cfg(test)] mod tests` (check `grep -n "mod tests" src/email_server/smtp_server.rs` for whether one exists already):
+
+```rust
+#[tokio::test]
+async fn store_message_round_trips_a_json_secure_message_byte_identical() {
+    let auth_handler: Arc<dyn AuthHandler + Send + Sync> = Arc::new(create_test_auth_handler());
+    let message_store = Arc::new(Mutex::new(HashMap::new()));
+    let server = SynapseSmtpServer::new(
+        SmtpServerConfig::default(),
+        auth_handler,
+        Arc::clone(&message_store),
+    );
+
+    let original = SecureMessage::new(
+        "bob@synapse.local",
+        "alice@synapse.local",
+        b"hello".to_vec(),
+        crate::types::SecurityLevel::Public,
+    );
+    let body = serde_json::to_vec(&original).unwrap();
+
+    server
+        .store_message(SmtpMessage {
+            from: "alice@synapse.local".to_string(),
+            to: vec!["bob@synapse.local".to_string()],
+            data: body,
+        })
+        .await
+        .expect("a valid JSON SecureMessage must be accepted");
+
+    let stored = server.drain_messages("bob@synapse.local").unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].message_id, original.message_id, "must round-trip byte-identical, not re-derived");
+    assert_eq!(stored[0].encrypted_content, original.encrypted_content);
+}
+
+#[tokio::test]
+async fn store_message_refuses_a_non_json_body() {
+    let auth_handler: Arc<dyn AuthHandler + Send + Sync> = Arc::new(create_test_auth_handler());
+    let message_store = Arc::new(Mutex::new(HashMap::new()));
+    let server = SynapseSmtpServer::new(SmtpServerConfig::default(), auth_handler, message_store);
+
+    let err = server
+        .store_message(SmtpMessage {
+            from: "alice@synapse.local".to_string(),
+            to: vec!["bob@synapse.local".to_string()],
+            data: b"not json at all".to_vec(),
+        })
+        .await
+        .expect_err("a non-JSON body must be refused, not silently wrapped as encrypted_content");
+    assert!(matches!(err, SynapseError::InvalidMessageFormat(_)));
+}
+```
+
+`SmtpMessage` and `store_message` are both private to `smtp_server.rs` today — a `#[cfg(test)] mod tests` declared inside that same file can see both without any visibility change, since a child module always sees its parent's private items. Do not make either `pub` for this. Run both new tests before Step 4's rewrite: expect `store_message_round_trips_a_json_secure_message_byte_identical` to fail (the old code wraps `message.data` directly into `encrypted_content` rather than parsing it as JSON, so `stored[0].message_id` won't equal `original.message_id`) and `store_message_refuses_a_non_json_body` to fail (the old code never validates the body at all, so it succeeds where it should error). After Step 4's rewrite, both pass.
 
 - [ ] **Step 4b: Wire `store_message` to the DATA command handler**
 
