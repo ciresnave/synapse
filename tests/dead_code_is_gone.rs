@@ -8,7 +8,10 @@ const DELETED: &[&str] = &[
     "src/transport/quic.rs",
     "src/transport/nat_traversal_clean.rs",
     "src/transport/email_enhanced.rs",
-    "src/transport/email_unified.rs",
+    // `email_unified.rs` was dead when this list was written; the 2026-09-25 email-transport plan's
+    // Task 1 recreated it as the live `EmailTransportImpl`/`EmailTransportFactory` (real SMTP
+    // send/receive, Direct mode) -- it belongs on the "still alive" side now, alongside
+    // `tcp_unified.rs`/`quic_unified.rs`/`websocket_unified.rs` below.
     "src/transport/websocket.rs",
     "src/transport/production_http.rs",
     "src/wasm/browser.rs",

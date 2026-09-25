@@ -779,33 +779,8 @@ impl TransportFactory for UdpTransportFactory {
     }
 }
 
-/// Email Transport Factory (temporarily disabled)
-pub struct EmailTransportFactory;
-
-#[async_trait]
-impl TransportFactory for EmailTransportFactory {
-    async fn create_transport(
-        &self,
-        _config: &HashMap<String, String>,
-    ) -> Result<Box<dyn Transport>> {
-        Err(crate::error::SynapseError::TransportError(
-            "Email transport not yet implemented".to_string(),
-        ))
-    }
-
-    fn transport_type(&self) -> TransportType {
-        TransportType::Email
-    }
-
-    fn default_config(&self) -> HashMap<String, String> {
-        HashMap::new()
-    }
-
-    fn validate_config(&self, _config: &HashMap<String, String>) -> Result<()> {
-        Ok(())
-    }
-}
-// }
+// Email Transport Factory: moved to `email_unified::EmailTransportFactory`, which actually sends
+// and receives (Direct mode) instead of always refusing. Registered in `transport/mod.rs`.
 
 // mDNS Transport Factory (COMMENTED OUT - TO BE FIXED)
 pub struct MdnsTransportFactory;

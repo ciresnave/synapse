@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-use crate::blockchain::serialization::DateTimeWrapper;
 /// High-performance SMTP server for EMRP
 use crate::error::{Result, SynapseError};
-use crate::synapse::blockchain::serialization::UuidWrapper;
 use crate::types::SecureMessage;
-use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
-use uuid::Uuid;
 
 /// High-performance SMTP server optimized for EMRP
 pub struct SynapseSmtpServer {
@@ -77,7 +73,6 @@ struct SmtpMessage {
     #[allow(dead_code)]
     from: String,
     to: Vec<String>,
-    #[allow(dead_code)]
     data: Vec<u8>,
 }
 
@@ -131,18 +126,27 @@ impl Default for SmtpServerConfig {
 }
 
 impl SynapseSmtpServer {
-    /// Create a new SMTP server
-    pub fn new(config: SmtpServerConfig, auth_handler: Arc<dyn AuthHandler + Send + Sync>) -> Self {
+    /// Create a new SMTP server. `message_store` is shared with whatever else needs to read
+    /// received mail (an `EmailTransportImpl`'s `receive_raw`, or a paired `SynapseImapServer` for
+    /// the relay-out/external proxy case) -- previously this server held its own private store
+    /// that nothing else could ever read (see this plan's "Deviations" section).
+    pub fn new(
+        config: SmtpServerConfig,
+        auth_handler: Arc<dyn AuthHandler + Send + Sync>,
+        message_store: Arc<Mutex<HashMap<String, Vec<SecureMessage>>>>,
+    ) -> Self {
         Self {
             config,
-            message_store: Arc::new(Mutex::new(HashMap::new())),
+            message_store,
             clients: Arc::new(Mutex::new(HashMap::new())),
             auth_handler,
             metrics: Arc::new(Mutex::new(ServerMetrics::default())),
         }
     }
 
-    /// Start the SMTP server
+    /// Start the SMTP server: bind `config.port` and serve it. Callers that need to know the port
+    /// is actually held before this returns (e.g. a `Transport::start` contract) should bind their
+    /// own listener and call [`Self::serve`] directly instead -- see `email_unified.rs`.
     pub async fn start(&self) -> Result<()> {
         let addr = self.config.bind_scope.listen_addr(self.config.port);
         let listener = TcpListener::bind(&addr).await.map_err(|e| {
@@ -151,6 +155,14 @@ impl SynapseSmtpServer {
 
         info!("EMRP SMTP Server listening on {}", addr);
 
+        self.serve(listener).await
+    }
+
+    /// Accept connections on an already-bound `listener` forever. Split out of `start` so a caller
+    /// that must guarantee the port is held before returning (matching every other transport's
+    /// bind-in-constructor convention -- see `tcp_unified.rs`'s `start_server` comment) can bind
+    /// the listener itself and hand it here.
+    pub async fn serve(&self, listener: TcpListener) -> Result<()> {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
@@ -213,6 +225,65 @@ impl SynapseSmtpServer {
             // Check if connection should close
             if response.starts_with("221") {
                 break;
+            }
+
+            // A "354" response to DATA switches the connection into message-body mode: read raw
+            // lines (not SMTP commands) until a line containing only "." (RFC 5321 §4.1.1.4),
+            // un-stuffing a leading ".." back to "." per §4.5.2. Previously nothing read this body
+            // at all: `process_smtp_command` returned 354 and the outer loop went straight back to
+            // treating the next line as a command, so `store_message` was never called (hence its
+            // `#[allow(dead_code)]`).
+            if response.starts_with("354") {
+                let mut raw_message = Vec::new();
+                let mut data_line = String::new();
+                loop {
+                    data_line.clear();
+                    let bytes_read = reader.read_line(&mut data_line).await?;
+                    if bytes_read == 0 {
+                        // Connection closed mid-DATA; nothing more to do.
+                        break;
+                    }
+                    let content = data_line.trim_end_matches(['\r', '\n']);
+                    if content == "." {
+                        break;
+                    }
+                    let unstuffed = content.strip_prefix('.').unwrap_or(content);
+                    raw_message.extend_from_slice(unstuffed.as_bytes());
+                    raw_message.extend_from_slice(b"\r\n");
+                }
+
+                // What DATA carries is the whole RFC 5322 message: MIME headers, a blank line,
+                // then the body, which `lettre` may transfer-encode (quoted-printable or base64)
+                // to keep lines within SMTP's length limit. `store_message`'s own JSON parse
+                // (and its test in `mod tests`) expects to receive the bare `SecureMessage` JSON,
+                // not this envelope, so the envelope is stripped and any transfer encoding
+                // reversed here -- once, in the wire-format layer -- via `mail_parser`, which
+                // decodes whichever encoding was actually used rather than assuming one.
+                let body = mail_parser::MessageParser::default()
+                    .parse(&raw_message)
+                    .and_then(|parsed| {
+                        parsed
+                            .body_text(0)
+                            .map(|text| text.into_owned().into_bytes())
+                    })
+                    .unwrap_or(raw_message);
+
+                let data_response = match session.current_message.take() {
+                    Some(mut msg) => {
+                        msg.data = body;
+                        match self.store_message(msg).await {
+                            Ok(()) => "250 Ok: message accepted\r\n".to_string(),
+                            Err(e) => {
+                                error!("Failed to store SMTP message: {e}");
+                                "554 Transaction failed: message body did not parse\r\n".to_string()
+                            }
+                        }
+                    }
+                    None => "503 Bad sequence of commands\r\n".to_string(),
+                };
+
+                writer.write_all(data_response.as_bytes()).await?;
+                writer.flush().await?;
             }
 
             line.clear();
@@ -377,24 +448,18 @@ impl SynapseSmtpServer {
         None
     }
 
-    /// Store message in the server
-    #[allow(dead_code)]
+    /// Store a message received over SMTP. The `DATA` command's body is the whole `SecureMessage`
+    /// as JSON (per the transport contract's wire format -- see this plan's Global Constraints),
+    /// not raw content to wrap: hand-picking fields here was the exact bug NAT traversal's PR B
+    /// fixed, and this server had the same one, just never reachable until now.
     async fn store_message(&self, message: SmtpMessage) -> Result<()> {
         let start_time = SystemTime::now();
 
-        // Convert SMTP message to EMRP SecureMessage
-        let secure_message = SecureMessage {
-            message_id: UuidWrapper::new(Uuid::new_v4()),
-            to_global_id: message.to[0].clone(), // Use first recipient
-            from_global_id: message.from,
-            encrypted_content: message.data,
-            sender_proof: crate::sender_auth::SenderProof::unsigned(),
-            timestamp: DateTimeWrapper::new(Utc::now()),
-            security_level: crate::types::SecurityLevel::Private,
-            routing_path: Vec::new(),
-            metadata: std::collections::HashMap::new(),
-            protocol_version: crate::types::PROTOCOL_VERSION,
-        };
+        let secure_message: SecureMessage = serde_json::from_slice(&message.data).map_err(|e| {
+            SynapseError::InvalidMessageFormat(format!(
+                "SMTP DATA body did not parse as a SecureMessage: {e}"
+            ))
+        })?;
 
         // Store message for each recipient
         {
@@ -424,10 +489,31 @@ impl SynapseSmtpServer {
         Ok(())
     }
 
-    /// Get messages for a recipient
+    /// Get messages for a recipient, without removing them.
     pub fn get_messages(&self, recipient: &str) -> Result<Vec<SecureMessage>> {
         let store = self.message_store.lock().unwrap();
         Ok(store.get(recipient).cloned().unwrap_or_default())
+    }
+
+    /// Take every message queued for `recipient`, removing them from the store. `receive_raw`
+    /// callers that track a specific local recipient address call this, not `get_messages` (which
+    /// is non-destructive and used elsewhere for inspection/tests).
+    pub fn drain_messages(&self, recipient: &str) -> Result<Vec<SecureMessage>> {
+        let mut store = self.message_store.lock().unwrap();
+        Ok(store.remove(recipient).unwrap_or_default())
+    }
+
+    /// Take every message queued for every recipient, removing them from the store. Used by a
+    /// single-tenant caller (an `EmailTransportImpl` running its own dedicated `SynapseSmtpServer`
+    /// in Direct mode) that has no configured local recipient address to filter by -- everything
+    /// that landed on this server's port belongs to it.
+    pub fn drain_all_messages(&self) -> Result<Vec<SecureMessage>> {
+        let mut store = self.message_store.lock().unwrap();
+        let mut all = Vec::new();
+        for (_, mut messages) in store.drain() {
+            all.append(&mut messages);
+        }
+        Ok(all)
     }
 
     /// Get server metrics
@@ -478,4 +564,71 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::email_server::auth::create_test_auth_handler;
+
+    /// A valid JSON `SecureMessage` body must round-trip byte-identical out of the store, not be
+    /// re-derived (the old code hand-picked the raw `DATA` bytes into `encrypted_content` instead
+    /// of parsing the body as a whole `SecureMessage`).
+    #[tokio::test]
+    async fn store_message_round_trips_a_json_secure_message_byte_identical() {
+        let auth_handler: Arc<dyn AuthHandler + Send + Sync> = Arc::new(create_test_auth_handler());
+        let message_store = Arc::new(Mutex::new(HashMap::new()));
+        let server = SynapseSmtpServer::new(
+            SmtpServerConfig::default(),
+            auth_handler,
+            Arc::clone(&message_store),
+        );
+
+        let original = SecureMessage::new(
+            "bob@synapse.local",
+            "alice@synapse.local",
+            b"hello".to_vec(),
+            crate::types::SecurityLevel::Public,
+        );
+        let body = serde_json::to_vec(&original).unwrap();
+
+        server
+            .store_message(SmtpMessage {
+                from: "alice@synapse.local".to_string(),
+                to: vec!["bob@synapse.local".to_string()],
+                data: body,
+            })
+            .await
+            .expect("a valid JSON SecureMessage must be accepted");
+
+        let stored = server.drain_messages("bob@synapse.local").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].message_id.0, original.message_id.0,
+            "must round-trip byte-identical, not re-derived"
+        );
+        assert_eq!(stored[0].encrypted_content, original.encrypted_content);
+    }
+
+    /// A non-JSON body must be refused with `InvalidMessageFormat`, not silently wrapped into
+    /// `encrypted_content` as the old code did.
+    #[tokio::test]
+    async fn store_message_refuses_a_non_json_body() {
+        let auth_handler: Arc<dyn AuthHandler + Send + Sync> = Arc::new(create_test_auth_handler());
+        let message_store = Arc::new(Mutex::new(HashMap::new()));
+        let server =
+            SynapseSmtpServer::new(SmtpServerConfig::default(), auth_handler, message_store);
+
+        let err = server
+            .store_message(SmtpMessage {
+                from: "alice@synapse.local".to_string(),
+                to: vec!["bob@synapse.local".to_string()],
+                data: b"not json at all".to_vec(),
+            })
+            .await
+            .expect_err(
+                "a non-JSON body must be refused, not silently wrapped as encrypted_content",
+            );
+        assert!(matches!(err, SynapseError::InvalidMessageFormat(_)));
+    }
 }

@@ -54,6 +54,8 @@ fn port_key(kind: TransportType) -> &'static str {
         TransportType::NatTraversal => "local_port",
         // quic_unified.rs reads `local_port` and binds it when the endpoint is constructed.
         TransportType::Quic => "local_port",
+        // email_unified.rs reads `local_port` and binds it in the constructor (Direct mode).
+        TransportType::Email => "local_port",
         other => panic!("no port key recorded for {other:?}; add it to port_key"),
     }
 }
@@ -66,7 +68,11 @@ enum Socket {
 
 fn socket_of(kind: TransportType) -> Socket {
     match kind {
-        TransportType::Tcp | TransportType::Http | TransportType::WebSocket => Socket::Tcp,
+        // email_unified.rs binds a `tokio::net::TcpListener` (plain SMTP, no UDP).
+        TransportType::Tcp
+        | TransportType::Http
+        | TransportType::WebSocket
+        | TransportType::Email => Socket::Tcp,
         // NAT traversal listens on a `UdpSocket` (nat_traversal.rs, `start`).
         // QUIC runs over UDP (quic_unified.rs binds a `quinn::Endpoint`, itself a UDP socket).
         TransportType::Udp | TransportType::NatTraversal | TransportType::Quic => Socket::Udp,
@@ -2683,6 +2689,32 @@ async fn nat_traversal_carries_a_verified_message_end_to_end() {
         TransportType::NatTraversal
     );
     assert_eq!(receipt.transport_used, TransportType::NatTraversal);
+    assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
+}
+
+fn email() -> Box<dyn TransportFactory> {
+    Box::new(synapse::transport::EmailTransportFactory)
+}
+
+/// `EmailTransportFactory` always refused (`SimpleEmailTransport`'s honest stub) until this task.
+/// This is the first test proving Direct mode actually sends and receives: alice's
+/// `EmailTransportImpl` relays via `lettre` to bob's own `EmailTransportImpl`, whose
+/// `EmailTransportFactory` starts a `SynapseSmtpServer` on `local_port`; bob's `receive_raw` drains
+/// that server's message store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_direct_mode_carries_a_verified_message_end_to_end() {
+    let (received, receipt) = round_trip(
+        TransportType::Email,
+        email(),
+        email(),
+        free_port(),
+        free_port(),
+        b"repaired",
+        DeliveryConfirmation::Sent,
+    )
+    .await;
+    assert_eq!(received.incoming.transport_type, TransportType::Email);
+    assert_eq!(receipt.transport_used, TransportType::Email);
     assert_eq!(received.payload, Payload::Opened(b"repaired".to_vec()));
 }
 
