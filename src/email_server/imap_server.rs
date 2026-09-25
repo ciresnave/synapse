@@ -307,7 +307,7 @@ impl SynapseImapServer {
                 for seq_num in seq_nums {
                     if let Some(message) = messages.get(seq_num - 1) {
                         if items.contains("RFC822") || items.contains("BODY[]") {
-                            let email_content = self.format_as_email(message);
+                            let email_content = self.format_as_email(message)?;
                             // IMAP literal syntax (RFC 3501 §9): after the declared byte count,
                             // the response's syntax continues immediately -- no CRLF belongs
                             // between the literal's last byte and the closing `)`. A previous
@@ -370,14 +370,22 @@ impl SynapseImapServer {
     /// `encrypted_content`, dropping `sender_proof`, `metadata`, `routing_path` and
     /// `protocol_version` entirely -- unusable by an IMAP-polling receiver that needs the whole
     /// `SecureMessage` back (`email_unified.rs`'s `poll_imap_inbox`).
-    fn format_as_email(&self, message: &SecureMessage) -> String {
-        let json = serde_json::to_vec(message).unwrap_or_default();
-        format!(
+    /// Errors rather than silently producing a truncated/empty body: the same failure mode as
+    /// the wire-format bug this function used to have (a message reaching the wire with content
+    /// missing and nothing saying so), by a different mechanism -- a serialize failure here must
+    /// not become an empty body a client reads as an empty, successfully-delivered message.
+    fn format_as_email(&self, message: &SecureMessage) -> Result<String> {
+        let json = serde_json::to_vec(message).map_err(|e| {
+            SynapseError::InvalidMessageFormat(format!(
+                "failed to serialize SecureMessage for IMAP delivery: {e}"
+            ))
+        })?;
+        Ok(format!(
             "From: {}\r\nTo: {}\r\nSubject: Synapse\r\n\r\n{}",
             message.from_global_id,
             message.to_global_id,
             String::from_utf8_lossy(&json)
-        )
+        ))
     }
 }
 
