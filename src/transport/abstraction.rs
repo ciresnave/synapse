@@ -589,8 +589,8 @@ impl TransportCapabilities {
                 "authentication".to_string(),
                 "persistent".to_string(),
             ],
-            // Unused by any live transport (`email_simple.rs` constructs its own literal): no
-            // real `metrics()` backs either field here, so both are honestly unmeasured.
+            // Unused by any live transport: no real `metrics()` backs either field here, so both
+            // are honestly unmeasured.
             unmeasured_metrics: vec![
                 UnmeasuredMetric::AverageLatency,
                 UnmeasuredMetric::ReliabilityScore,

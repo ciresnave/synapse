@@ -241,10 +241,10 @@ pub enum EmailMode {
 }
 
 /// The one address validator `can_reach`/`test_connectivity` use: exactly one `@`, a non-empty
-/// local part, and a domain containing a `.` with non-empty labels on each side of it. Ported from
-/// `email_simple.rs`'s validator of the same name (word for word) rather than reinvented, since a
-/// looser check here (e.g. "just contains `@`") would accept malformed addresses like `"invalid@"`
-/// that the old `SimpleEmailTransport` correctly refused --
+/// local part, and a domain containing a `.` with non-empty labels on each side of it. Copied
+/// verbatim from the former `email_simple` transport's validator of the same name (since removed)
+/// rather than reinvented, since a looser check here (e.g. "just contains `@`") would accept
+/// malformed addresses like `"invalid@"` that the old transport correctly refused --
 /// `tests/transport_error_handling_test.rs::test_transport_error_handling` exercises exactly this.
 fn valid_address(address: &str) -> bool {
     let mut parts = address.split('@');

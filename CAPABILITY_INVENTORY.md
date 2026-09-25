@@ -1028,6 +1028,18 @@ it delivers.**
 > field outside those two (this one doesn't have one, but the enum itself can't express one if a
 > future transport does) would still read `unmeasured_metrics: []`. This is an asserted, documented
 > limitation of the honesty-contract enum, not a silent absence.
+>
+> **`poll_imap_inbox`'s RelayOut/External receive always full-scans (`FETCH "1:*"`) rather than using
+> `SEARCH UNSEEN`, and this is correct behaviour today, not a shortcut taken.** Its trigger, stated
+> precisely rather than left as a general to-do: this slice's own `SynapseImapServer` (the loopback
+> stand-in every test in this slice runs against, per the "no live external provider" constraint) has
+> no `SEARCH`/`STORE` support at all, so there is nothing narrower to ask it for — client-side
+> dedup (`imap_seen_ids`) is the only option against that server. **The behaviour becomes wrong, not
+> merely inefficient, only when External mode is pointed at a real provider** (Gmail, Outlook, etc.)
+> that does support `SEARCH UNSEEN`/`STORE +FLAGS`: at that point this full-scan-and-dedup approach
+> should be replaced with a real `CAPABILITY` negotiation and narrower fetches. Not fixed here because
+> the trigger condition (a real external provider in the loop) does not exist yet in this slice's own
+> scope.
 
 > **Status, 2026-09-23, the QUIC slice (branch `design/quic-transport`, not yet on `main`):** QUIC
 > is now measured end-to-end too — `quic_carries_a_verified_message_end_to_end` and 12 further tests
