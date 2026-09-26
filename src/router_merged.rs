@@ -184,12 +184,28 @@ impl SynapseRouter {
     /// unsigned message by forgetting to call `sign_secure_message` itself. This is the
     /// structural fix for board item 65 (the old `EnhancedSynapseRouter::create_secure_message`
     /// hardcoded `SenderProof::unsigned()` and never signed at all).
+    /// Refuse `SecurityLevel`s this router cannot honour. Neither send nor receive in this router
+    /// seals/unseals (`src/sealing.rs` is never called here), so `Private` ("end-to-end
+    /// encrypted") and `Secure` ("both encrypted and signed") cannot be delivered as their name
+    /// promises -- accepting them would sign-and-send as if sealing had happened, silently
+    /// downgrading to unsealed delivery. Per the project owner's ruling, refuse instead of
+    /// implementing sealing here.
+    fn reject_unsupported_security_level(level: SecurityLevel) -> Result<()> {
+        match level {
+            SecurityLevel::Public | SecurityLevel::Authenticated => Ok(()),
+            SecurityLevel::Private | SecurityLevel::Secure => {
+                Err(crate::error::SynapseError::UnsupportedSecurityLevel(level))
+            }
+        }
+    }
+
     async fn sign_new_message(
         &self,
         to_global_id: &str,
         content: &[u8],
         security_level: SecurityLevel,
     ) -> Result<SecureMessage> {
+        Self::reject_unsupported_security_level(security_level.clone())?;
         let mut message = SecureMessage::new(
             to_global_id.to_string(),
             self.our_global_id.clone(),
@@ -720,6 +736,73 @@ mod tests {
             verdict.is_verified(),
             "recorded message's signature did not verify against the router's own pinned public \
              key: {verdict:?}"
+        );
+    }
+
+    /// The PM's required born-red test (Task 4b, board item 65 one layer up): `sign_new_message`
+    /// must refuse `Private`/`Secure` -- the levels this router can never honour because it does
+    /// not seal/unseal -- rather than silently signing-and-returning them as if sealing had
+    /// happened. `Public`/`Authenticated` must remain unaffected by the guard.
+    #[tokio::test]
+    async fn sign_new_message_refuses_private_and_secure_levels() {
+        let config = Config::default_for_entity("Test", "tool");
+        let router = SynapseRouter::new(config, "alice@synapse.local".to_string())
+            .await
+            .expect("router");
+        // A keypair is required for the Public/Authenticated success assertions below to actually
+        // reach `Ok` (sign_secure_message returns `KeyNotFound` without one) -- without this, the
+        // test would give a false positive: the guard rejecting Private/Secure would pass either
+        // way, but the "still honoured" assertions need real signing to succeed, not just the
+        // guard to fall through.
+        router
+            .crypto
+            .write()
+            .await
+            .generate_keypair()
+            .expect("keypair");
+
+        let private_result = router
+            .sign_new_message("bob@synapse.local", b"secret", SecurityLevel::Private)
+            .await;
+        assert!(
+            matches!(
+                private_result,
+                Err(crate::error::SynapseError::UnsupportedSecurityLevel(
+                    SecurityLevel::Private
+                ))
+            ),
+            "Private must be refused, not silently signed-and-sent as plaintext: got {private_result:?}"
+        );
+
+        let secure_result = router
+            .sign_new_message("bob@synapse.local", b"secret", SecurityLevel::Secure)
+            .await;
+        assert!(
+            matches!(
+                secure_result,
+                Err(crate::error::SynapseError::UnsupportedSecurityLevel(
+                    SecurityLevel::Secure
+                ))
+            ),
+            "Secure must be refused too: got {secure_result:?}"
+        );
+
+        // Public and Authenticated must still be honoured -- this guard must not become a router
+        // that refuses everything.
+        let public_ok = router
+            .sign_new_message("bob@synapse.local", b"hello", SecurityLevel::Public)
+            .await;
+        assert!(
+            public_ok.is_ok(),
+            "Public must still be honoured: {public_ok:?}"
+        );
+
+        let auth_ok = router
+            .sign_new_message("bob@synapse.local", b"hello", SecurityLevel::Authenticated)
+            .await;
+        assert!(
+            auth_ok.is_ok(),
+            "Authenticated must still be honoured: {auth_ok:?}"
         );
     }
 
