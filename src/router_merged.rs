@@ -20,8 +20,8 @@ use crate::{
     error::Result,
     identity::IdentityRegistry,
     router::RouterHealth,
-    transport::router::MultiTransportRouter,
-    types::{SecureMessage, SecurityLevel, SimpleMessage},
+    transport::{abstraction::MessageUrgency, router::MultiTransportRouter},
+    types::{MessageType, SecureMessage, SecurityLevel, SimpleMessage},
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -237,6 +237,54 @@ impl SynapseRouter {
         transport.send_message(&target, &message).await?;
         Ok(())
     }
+
+    /// Smart send: prefers the fast `MultiTransportRouter` path for real-time/interactive
+    /// urgency, falling back to email otherwise or on failure. Old `EnhancedSynapseRouter`'s
+    /// name and signature, ported here.
+    ///
+    /// Fixed (board item 65): the fast branch used to call the old
+    /// `EnhancedSynapseRouter::create_secure_message`, which hardcoded `SenderProof::unsigned()`
+    /// and never touched the crypto manager -- the opposite of the email path, which signs. That
+    /// helper is not ported at all; this now calls the same `sign_new_message` every other send
+    /// path uses, so no path can reach a transport unsigned.
+    pub async fn send_message_smart(
+        &self,
+        to_entity: &str,
+        content: &str,
+        message_type: MessageType,
+        security_level: SecurityLevel,
+        urgency: MessageUrgency,
+    ) -> Result<String> {
+        if let Some(ref mt_router) = self.multi_transport
+            && matches!(
+                urgency,
+                MessageUrgency::RealTime | MessageUrgency::Interactive
+            )
+        {
+            let secure_msg = self
+                .sign_new_message(to_entity, content.as_bytes(), security_level)
+                .await?;
+            match mt_router
+                .send_message(to_entity, &secure_msg, urgency)
+                .await
+            {
+                Ok(receipt) => return Ok(receipt.message_id),
+                Err(e) => {
+                    tracing::warn!("Multi-transport failed: {e}, falling back to email");
+                }
+            }
+        }
+        let simple_msg = SimpleMessage {
+            to: to_entity.to_string(),
+            from_entity: self.our_global_id.clone(),
+            content: content.to_string(),
+            message_type,
+            metadata: Default::default(),
+        };
+        self.send_message(simple_msg, to_entity.to_string())
+            .await
+            .map(|_| "email_fallback".to_string())
+    }
 }
 
 /// Enhanced router status
@@ -252,7 +300,6 @@ pub struct EnhancedRouterStatus {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::types::MessageType;
 
     #[tokio::test]
     async fn new_builds_a_router_with_both_apis_available() {
@@ -304,6 +351,261 @@ mod tests {
         assert!(
             !matches!(signed.sender_proof.alg, crate::sender_auth::ProofAlg::None),
             "a message built for sending must be signed, not left as alg \"none\""
+        );
+    }
+
+    /// A stub `Transport` that records the `SecureMessage` it is handed instead of sending it
+    /// anywhere, so a test can inspect exactly what `send_message_smart`'s fast branch built.
+    /// `MockTransport` in `transport::providers` already exists but its `send_message` ignores
+    /// the message entirely -- it cannot be reused here for that reason.
+    #[derive(Debug, Default)]
+    struct RecordingTransport {
+        sent: Arc<std::sync::Mutex<Option<SecureMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::transport::abstraction::TransportReceive for RecordingTransport {
+        async fn receive_raw(
+            &self,
+            _inbox: &mut crate::transport::abstraction::RawInbox,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::transport::abstraction::Transport for RecordingTransport {
+        fn transport_type(&self) -> crate::transport::abstraction::TransportType {
+            crate::transport::abstraction::TransportType::Email
+        }
+
+        fn capabilities(&self) -> crate::transport::abstraction::TransportCapabilities {
+            crate::transport::abstraction::TransportCapabilities {
+                max_message_size: 1024 * 1024,
+                reliable: true,
+                real_time: false,
+                broadcast: false,
+                bidirectional: true,
+                encrypted: false,
+                network_spanning: true,
+                supported_urgencies: vec![
+                    crate::transport::abstraction::MessageUrgency::Interactive,
+                ],
+                features: vec![],
+                unmeasured_metrics: vec![
+                    crate::transport::abstraction::UnmeasuredMetric::AverageLatency,
+                    crate::transport::abstraction::UnmeasuredMetric::ReliabilityScore,
+                ],
+            }
+        }
+
+        async fn can_reach(
+            &self,
+            _target: &crate::transport::abstraction::TransportTarget,
+        ) -> bool {
+            true
+        }
+
+        async fn estimate_metrics(
+            &self,
+            _target: &crate::transport::abstraction::TransportTarget,
+        ) -> Result<crate::transport::abstraction::TransportEstimate> {
+            Ok(crate::transport::abstraction::TransportEstimate {
+                latency: std::time::Duration::from_millis(1),
+                reliability: 0.99,
+                bandwidth: 1_000_000,
+                cost: 0.0,
+                available: true,
+                confidence: 1.0,
+            })
+        }
+
+        async fn send_message(
+            &self,
+            target: &crate::transport::abstraction::TransportTarget,
+            message: &SecureMessage,
+        ) -> Result<crate::transport::abstraction::DeliveryReceipt> {
+            *self.sent.lock().expect("lock") = Some(message.clone());
+            Ok(crate::transport::abstraction::DeliveryReceipt {
+                message_id: format!("recorded-for-{}", target.identifier),
+                transport_used: crate::transport::abstraction::TransportType::Email,
+                delivery_time: std::time::Duration::from_millis(1),
+                target_reached: target.identifier.clone(),
+                confirmation: crate::transport::abstraction::DeliveryConfirmation::Delivered,
+                metadata: Default::default(),
+            })
+        }
+
+        async fn test_connectivity(
+            &self,
+            _target: &crate::transport::abstraction::TransportTarget,
+        ) -> Result<crate::transport::abstraction::ConnectivityResult> {
+            Ok(crate::transport::abstraction::ConnectivityResult {
+                connected: true,
+                rtt: Some(std::time::Duration::from_millis(1)),
+                error: None,
+                quality: 1.0,
+                details: Default::default(),
+            })
+        }
+
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn status(&self) -> crate::transport::abstraction::TransportStatus {
+            crate::transport::abstraction::TransportStatus::Running
+        }
+
+        async fn metrics(&self) -> crate::transport::abstraction::TransportMetrics {
+            crate::transport::abstraction::TransportMetrics::default()
+        }
+    }
+
+    /// A `transport::router::TransportProvider` stub used only to hand `MultiTransportRouter` a
+    /// `RecordingTransport` as its email transport, via the same `new_with_provider` dependency
+    /// injection seam `ProductionTransportProvider` uses in production. Note this is
+    /// `transport::router::TransportProvider`, not the differently-scoped, identically-named
+    /// trait in `transport::providers` -- `MultiTransportRouter::new_with_provider` is defined in
+    /// `transport::router` and resolves `TransportProvider` to its own module's trait.
+    struct StubTransportProvider {
+        email_transport: Arc<dyn crate::transport::abstraction::Transport>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::transport::router::TransportProvider for StubTransportProvider {
+        async fn create_tcp_transport(
+            &self,
+            _config: &Config,
+        ) -> Result<Option<Arc<dyn crate::transport::abstraction::Transport>>> {
+            Ok(None)
+        }
+
+        async fn create_mdns_transport(
+            &self,
+            _config: &Config,
+        ) -> Result<Option<Arc<dyn crate::transport::abstraction::Transport>>> {
+            Ok(None)
+        }
+
+        async fn create_nat_transport(
+            &self,
+            _config: &Config,
+        ) -> Result<Option<Arc<dyn crate::transport::abstraction::Transport>>> {
+            Ok(None)
+        }
+
+        async fn create_email_transport(
+            &self,
+            _config: &Config,
+        ) -> Result<Option<Arc<dyn crate::transport::abstraction::Transport>>> {
+            Ok(Some(Arc::clone(&self.email_transport)))
+        }
+
+        fn create_transport_selector(
+            &self,
+        ) -> Arc<tokio::sync::RwLock<crate::transport::TransportSelector>> {
+            Arc::new(tokio::sync::RwLock::new(
+                crate::transport::TransportSelector::new(),
+            ))
+        }
+    }
+
+    /// The PM's required born-red test (board item 65): every send path this router hands a
+    /// message to a transport through must have signed it first. `send_message` (Task 2) already
+    /// provably signs; this proves `send_message_smart`'s fast (`MultiTransportRouter`) branch
+    /// does too, by inspecting the actual `SecureMessage` a stub transport received -- not just a
+    /// boolean "is it signed", but the signature verifying against the router's own pinned public
+    /// key, the same mechanism `TrustStore::verify_at` uses elsewhere in this crate.
+    ///
+    /// `to_entity` is deliberately not resolvable (no real network/DNS target): with no
+    /// TCP/UDP/mDNS/NAT route discoverable, `MultiTransportRouter`'s real transport-selection
+    /// logic (`TransportSelector::choose_optimal_transport`) fails to find a real-time-suitable
+    /// route and falls back, inside `MultiTransportRouter::send_message` itself, to its email
+    /// transport -- which is this test's `RecordingTransport`. This exercises the real selection
+    /// code, not a bypass of it.
+    #[tokio::test]
+    async fn every_send_path_signs_before_it_reaches_a_transport() {
+        let config = Config::default_for_entity("Test", "tool");
+        let mut router = SynapseRouter::new(config.clone(), "alice@synapse.local".to_string())
+            .await
+            .expect("construct");
+        router
+            .crypto
+            .write()
+            .await
+            .generate_keypair()
+            .expect("keypair");
+
+        // send_message (Task 2) already provably signs -- assert it again here for completeness.
+        let via_send_message = router
+            .sign_new_message("bob@synapse.local", b"one", SecurityLevel::Authenticated)
+            .await
+            .expect("sign");
+        assert!(!matches!(
+            via_send_message.sender_proof.alg,
+            crate::sender_auth::ProofAlg::None
+        ));
+
+        let sent: Arc<std::sync::Mutex<Option<SecureMessage>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let recording_transport = Arc::new(RecordingTransport {
+            sent: Arc::clone(&sent),
+        });
+        let provider = StubTransportProvider {
+            email_transport: recording_transport,
+        };
+        let mt_router = MultiTransportRouter::new_with_provider(
+            config,
+            "alice@synapse.local".to_string(),
+            Box::new(provider),
+        )
+        .await
+        .expect("multi-transport router");
+        router.multi_transport = Some(Arc::new(mt_router));
+
+        let message_id = router
+            .send_message_smart(
+                "bob@synapse.local",
+                "hello fast path",
+                MessageType::Direct,
+                SecurityLevel::Authenticated,
+                MessageUrgency::RealTime,
+            )
+            .await
+            .expect("send_message_smart");
+        assert!(
+            message_id.starts_with("recorded-for-"),
+            "expected the fast path to reach RecordingTransport via MultiTransportRouter's email \
+             fallback, got message id {message_id:?} instead -- check that discovery genuinely \
+             found no real-time route for the unresolvable test target"
+        );
+
+        let recorded = sent.lock().expect("lock").take().expect(
+            "RecordingTransport.send_message was never called -- the fast branch didn't reach a transport",
+        );
+        assert_eq!(recorded.from_global_id, "alice@synapse.local");
+
+        // The load-bearing assertion: the recorded message's signature actually verifies against
+        // the router's own public key, not just "alg is not None". A signature-shaped field
+        // nobody verifies is exactly board item 65's class of defect.
+        let mut trust_store = crate::sender_auth::TrustStore::new();
+        let public_key = router
+            .crypto
+            .read()
+            .await
+            .public_key_bytes()
+            .expect("public key");
+        trust_store.pin("alice@synapse.local", public_key);
+        let verdict = trust_store.verify(&recorded);
+        assert!(
+            verdict.is_verified(),
+            "recorded message's signature did not verify against the router's own pinned public \
+             key: {verdict:?}"
         );
     }
 }
