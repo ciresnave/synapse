@@ -125,6 +125,11 @@ pub enum SynapseError {
     /// transport failed or toward its circuit breaker.
     #[error("Message refused: {0}")]
     MessageRefused(String),
+
+    #[error(
+        "security level {0:?} is not supported by this router: sealing/unsealing is not implemented, so Private/Secure delivery cannot be honoured"
+    )]
+    UnsupportedSecurityLevel(crate::types::SecurityLevel),
 }
 
 // Removed From impls for auth_framework::AuthError and auto_discovery::DiscoveryError for minimal build compatibility

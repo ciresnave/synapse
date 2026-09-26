@@ -27,6 +27,11 @@ async fn main() -> Result<()> {
     let alice_router = SynapseRouter::new(alice_config, "alice".to_string()).await?;
     let bob_router = SynapseRouter::new(bob_config, "bob".to_string()).await?;
 
+    // A keypair is required before `convert_to_secure_message` (below) can sign anything --
+    // without one, that call fails with `KeyNotFound` instead of demonstrating a real signature.
+    alice_router.generate_keypair().await?;
+    bob_router.generate_keypair().await?;
+
     info!("✅ Chat participants Alice and Bob initialized");
 
     // Simulate a conversation

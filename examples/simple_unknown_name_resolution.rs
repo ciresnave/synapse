@@ -5,7 +5,7 @@
 //! It shows how to initialize the router, send messages, and handle basic communication scenarios.
 
 use synapse::{
-    Config, EnhancedSynapseRouter,
+    Config, SynapseRouter,
     error::Result as SynapseResult,
     transport::abstraction::MessageUrgency,
     types::{MessageType, SecurityLevel},
@@ -20,7 +20,11 @@ async fn main() -> SynapseResult<()> {
     let config = Config::for_testing();
 
     // Initialize the enhanced router
-    let router = EnhancedSynapseRouter::new(config, "demo-bot@company.com".to_string()).await?;
+    let router = SynapseRouter::new(config, "demo-bot@company.com".to_string()).await?;
+
+    // A keypair is required before any send below can sign anything -- without one, every send
+    // call fails with `KeyNotFound` instead of demonstrating a real signature.
+    router.generate_keypair().await?;
 
     // Start the router services
     router.start().await?;

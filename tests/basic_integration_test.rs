@@ -52,6 +52,13 @@ mod basic_integration_tests {
         let router = SynapseRouter::new(config, "test-entity".to_string())
             .await
             .expect("Router creation should succeed");
+        // convert_to_secure_message now genuinely signs (see router_merged.rs), which requires a
+        // keypair to exist; the old, deleted SynapseRouter::convert_to_secure_message hardcoded an
+        // unsigned proof and never needed one.
+        router
+            .generate_keypair()
+            .await
+            .expect("keypair generation should succeed");
 
         let simple_message = SimpleMessage {
             to: "bob".to_string(),

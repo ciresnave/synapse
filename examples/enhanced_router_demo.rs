@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 use synapse::{
-    EnhancedSynapseRouter,
+    SynapseRouter,
     config::{Config, EntityConfig, LoggingConfig, RouterConfig, SecurityConfig},
     error::Result,
     transport::abstraction::MessageUrgency,
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     // Create enhanced router with email server integration
     info!("🔧 Initializing Enhanced Synapse Router...");
-    let router = match EnhancedSynapseRouter::new(config, our_entity_id.clone()).await {
+    let router = match SynapseRouter::new(config, our_entity_id.clone()).await {
         Ok(router) => {
             info!("✅ Enhanced Synapse Router initialized successfully");
             router
@@ -42,6 +42,13 @@ async fn main() -> Result<()> {
             return Err(e);
         }
     };
+
+    // A keypair is required before `send_message_smart` (below) can sign anything -- without
+    // one, that call fails with `KeyNotFound` instead of demonstrating a real signature.
+    if let Err(e) = router.generate_keypair().await {
+        error!("❌ Failed to generate keypair: {}", e);
+        return Err(e);
+    }
 
     // Check status before starting
     let status = router.status().await;

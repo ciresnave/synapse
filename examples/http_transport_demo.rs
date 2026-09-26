@@ -26,6 +26,11 @@ async fn main() -> Result<()> {
     info!("🚀 Starting HTTP Transport Demo");
     info!("This demo shows how HTTP transport can pierce firewalls!");
 
+    // Every message this demo sends must be genuinely signed -- this crate's policy is that no
+    // message may ever be sent unsigned. Generate a real keypair up front.
+    let mut crypto = synapse::CryptoManager::new();
+    crypto.generate_keypair()?;
+
     // Create transport manager with HTTP transport
     let manager = TransportManagerBuilder::new()
         .enable_transport(TransportType::Http)
@@ -61,7 +66,7 @@ async fn main() -> Result<()> {
         .with_address("https://httpbin.org/post".to_string())
         .with_urgency(MessageUrgency::Interactive);
 
-    let web_message = create_sample_message("web-001", "Hello Web Service!");
+    let web_message = create_sample_message(&crypto, "web-001", "Hello Web Service!");
 
     info!("📤 Sending message to httpbin.org...");
     match manager.send_message(&web_target, &web_message).await {
@@ -84,7 +89,7 @@ async fn main() -> Result<()> {
         .with_address("https://localhost:8443".to_string())
         .with_urgency(MessageUrgency::Background);
 
-    let local_message = create_sample_message("local-001", "Hello Local Service!");
+    let local_message = create_sample_message(&crypto, "local-001", "Hello Local Service!");
 
     info!("📤 Sending message to local service...");
     match manager.send_message(&local_target, &local_message).await {
@@ -113,7 +118,7 @@ async fn main() -> Result<()> {
         info!("🔍 Testing connectivity to {}...", endpoint);
 
         // Test connectivity by sending a small test message
-        let test_message = create_sample_message("connectivity-test", "ping");
+        let test_message = create_sample_message(&crypto, "connectivity-test", "ping");
 
         match manager.send_message(&target, &test_message).await {
             Ok(receipt) => {
@@ -217,8 +222,12 @@ async fn main() -> Result<()> {
 }
 
 /// Helper function to create a sample message
-fn create_sample_message(id: &str, content: &str) -> SecureMessage {
-    SecureMessage {
+fn create_sample_message(
+    crypto: &synapse::CryptoManager,
+    id: &str,
+    content: &str,
+) -> SecureMessage {
+    let mut message = SecureMessage {
         message_id: synapse::blockchain::serialization::UuidWrapper(Uuid::new_v4()),
         to_global_id: "http-demo-recipient".to_string(),
         from_global_id: "http-demo-sender".to_string(),
@@ -234,5 +243,9 @@ fn create_sample_message(id: &str, content: &str) -> SecureMessage {
             metadata
         },
         protocol_version: synapse::types::PROTOCOL_VERSION,
-    }
+    };
+    crypto
+        .sign_secure_message(&mut message)
+        .expect("demo message must be signed before it is ever sent -- signing failure here is a bug in the demo's setup, not a runtime condition to swallow silently");
+    message
 }

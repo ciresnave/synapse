@@ -63,7 +63,12 @@ mod concurrent_registry_tests {
     #[tokio::test]
     async fn test_concurrent_message_processing() -> Result<()> {
         let config = Config::for_testing();
-        let router = Arc::new(SynapseRouter::new(config, "test_entity".to_string()).await?);
+        let router = SynapseRouter::new(config, "test_entity".to_string()).await?;
+        // convert_to_secure_message now genuinely signs (see router_merged.rs), which requires a
+        // keypair to exist; the old, deleted SynapseRouter::convert_to_secure_message hardcoded an
+        // unsigned proof and never needed one.
+        router.generate_keypair().await?;
+        let router = Arc::new(router);
 
         let num_messages = 20;
         let barrier = Arc::new(Barrier::new(num_messages));
@@ -174,6 +179,11 @@ mod concurrent_registry_tests {
 
                 let config = Config::for_testing();
                 let router = SynapseRouter::new(config, entity_id).await?;
+                // convert_to_secure_message now genuinely signs (see router_merged.rs), which
+                // requires a keypair to exist; the old, deleted
+                // SynapseRouter::convert_to_secure_message hardcoded an unsigned proof and never
+                // needed one.
+                router.generate_keypair().await?;
 
                 // Also process a message
                 let message = SimpleMessage {

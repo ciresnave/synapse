@@ -18,6 +18,10 @@ mod edge_case_tests {
     async fn test_message_size_boundaries() -> Result<()> {
         let config = Config::for_testing();
         let router = SynapseRouter::new(config, "test_entity".to_string()).await?;
+        // convert_to_secure_message now genuinely signs (see router_merged.rs), which requires a
+        // keypair to exist; the old, deleted SynapseRouter::convert_to_secure_message hardcoded an
+        // unsigned proof and never needed one.
+        router.generate_keypair().await?;
 
         // Test minimum message (empty content)
         let min_msg = SimpleMessage {
@@ -61,6 +65,8 @@ mod edge_case_tests {
     async fn test_special_content_cases() -> Result<()> {
         let config = Config::for_testing();
         let router = SynapseRouter::new(config, "test_entity".to_string()).await?;
+        // See test_message_size_boundaries above for why this is now required.
+        router.generate_keypair().await?;
 
         let test_cases = vec![
             ("unicode", "🚀🎉✨🌟💫🔥💡⚡🌈🎯"),
@@ -125,6 +131,12 @@ mod edge_case_tests {
     async fn test_timeout_handling() -> Result<()> {
         let config = Config::for_testing();
         let router = SynapseRouter::new(config, "timeout_tester".to_string()).await?;
+        // See test_message_size_boundaries above for why this is now required. Without it, the
+        // first `assert!(result.is_ok(), ...)` below would still pass even though the inner
+        // conversion fails with KeyNotFound -- `timeout(...)` only asserts the future completed in
+        // time, not that it completed successfully, so this test would silently stop verifying
+        // conversion and start verifying only that a fast failure looks like a fast success.
+        router.generate_keypair().await?;
 
         let msg = SimpleMessage {
             to: "TimeoutTarget".to_string(),
@@ -164,6 +176,8 @@ mod edge_case_tests {
     async fn test_rapid_message_creation() -> Result<()> {
         let config = Config::for_testing();
         let router = SynapseRouter::new(config, "rapid_tester".to_string()).await?;
+        // See test_message_size_boundaries above for why this is now required.
+        router.generate_keypair().await?;
 
         let message_count = 100;
         let mut tasks = Vec::new();
@@ -230,6 +244,8 @@ mod edge_case_tests {
     async fn test_message_type_variations() -> Result<()> {
         let config = Config::for_testing();
         let router = SynapseRouter::new(config, "type_tester".to_string()).await?;
+        // See test_message_size_boundaries above for why this is now required.
+        router.generate_keypair().await?;
 
         let message_types = vec![MessageType::Direct, MessageType::Broadcast];
 
@@ -257,6 +273,8 @@ mod edge_case_tests {
     async fn test_metadata_edge_cases() -> Result<()> {
         let config = Config::for_testing();
         let router = SynapseRouter::new(config, "metadata_tester".to_string()).await?;
+        // See test_message_size_boundaries above for why this is now required.
+        router.generate_keypair().await?;
 
         // Test empty metadata
         let metadata = HashMap::new();
@@ -296,6 +314,8 @@ mod edge_case_tests {
     async fn test_error_recovery() -> Result<()> {
         let config = Config::for_testing();
         let router = SynapseRouter::new(config, "recovery_tester".to_string()).await?;
+        // See test_message_size_boundaries above for why this is now required.
+        router.generate_keypair().await?;
 
         // Test recovery after processing various message scenarios
         let long_content = "X".repeat(1000);

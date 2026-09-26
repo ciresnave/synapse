@@ -239,6 +239,10 @@ async fn the_router_converts_to_a_plain_authenticated_message() {
     let router = synapse::SynapseRouter::new(config, ALICE.to_string())
         .await
         .expect("router");
+    // convert_to_secure_message now genuinely signs (see router_merged.rs), which requires a
+    // keypair to exist; the old, deleted SynapseRouter::convert_to_secure_message hardcoded an
+    // unsigned proof and never needed one.
+    router.generate_keypair().await.expect("keypair");
     let simple = synapse::types::SimpleMessage {
         to: BOB.to_string(),
         from_entity: ALICE.to_string(),

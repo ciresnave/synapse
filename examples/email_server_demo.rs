@@ -19,6 +19,11 @@ async fn main() -> Result<()> {
 
     info!("🚀 Starting EMRP Email Server Demo");
 
+    // Every message this demo constructs must be genuinely signed -- this crate's policy is
+    // that no message may ever exist unsigned, sent or not. Generate a real keypair up front.
+    let mut crypto = synapse::CryptoManager::new();
+    crypto.generate_keypair()?;
+
     // Step 1: Test connectivity detection
     info!("📡 Testing connectivity detection...");
     let detector = ConnectivityDetector::default();
@@ -74,7 +79,7 @@ async fn main() -> Result<()> {
 
     // Step 4: Create a test message to demonstrate the system
     info!("📨 Creating test EMRP message...");
-    let test_message = SecureMessage {
+    let mut test_message = SecureMessage {
         message_id: UuidWrapper(Uuid::new_v4()),
         to_global_id: "test@example.com".to_string(),
         from_global_id: "sender@synapse.local".to_string(),
@@ -86,6 +91,7 @@ async fn main() -> Result<()> {
         metadata: HashMap::new(),
         protocol_version: synapse::types::PROTOCOL_VERSION,
     };
+    crypto.sign_secure_message(&mut test_message)?;
 
     info!("✅ Test message created: {}", test_message.message_id);
     info!("  From: {}", test_message.from_global_id);

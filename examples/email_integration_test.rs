@@ -6,7 +6,7 @@
 use synapse::{
     config::{Config, EntityConfig, LoggingConfig, RouterConfig, SecurityConfig},
     error::Result,
-    router_enhanced::EnhancedSynapseRouter,
+    router_merged::SynapseRouter,
     types::{EmailConfig, ImapConfig, SecretString, SmtpConfig},
 };
 
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
 
     // Initialize router
     let config = create_test_config();
-    let router = EnhancedSynapseRouter::new(config, "test@test.local".to_string()).await?;
+    let router = SynapseRouter::new(config, "test@test.local".to_string()).await?;
 
     // Check status
     let status = router.status().await;

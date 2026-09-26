@@ -369,10 +369,13 @@ while let Some(alert) = alerts.recv().await {
 
 ### 8. Security by Default
 
-- **🔐 PGP Encryption**: All messages encrypted with recipient's public key
+- **🔒 Content Confidentiality**: Not implemented -- `SecurityLevel::Private`/`Secure` are refused
+  (see `SynapseError::UnsupportedSecurityLevel`); messages are signed, not encrypted
 - **✍️ Digital Signatures**: Verify sender authenticity
-- **🛡️ TLS Transport**: Encrypted connections for real-time transports
-- **🔑 Key Management**: Automatic key generation and distribution
+- **🛡️ TLS Transport**: Encrypted connections on transports that support it (QUIC, HTTPS); TCP,
+  UDP and WebSocket transports in this build are unencrypted
+- **🔑 Explicit Key Management**: Keys must be generated via `generate_keypair()`; there is no
+  automatic key distribution
 - **🚪 Access Control**: Domain-based and user-based permissions
 
 ### 9. Federation & Interoperability

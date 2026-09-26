@@ -13,7 +13,7 @@ pub struct StreamSession {
     pub stream_id: String,
     pub chunk_counter: u64,
 }
-use crate::router::SynapseRouter;
+use crate::router_merged::SynapseRouter;
 use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 use crate::types::{MessageType, SimpleMessage, StreamChunk};
 use base64::Engine;
@@ -23,6 +23,12 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 impl StreamManager {
+    /// Create a new stream manager.
+    ///
+    /// `router` MUST already have a keypair loaded (via `SynapseRouter::generate_keypair()`)
+    /// before this manager's send-capable methods (`send_chunk`, `finish_stream`) are used --
+    /// `SynapseRouter::new` does not auto-generate one. Without a loaded keypair, those methods
+    /// will return `Err(SynapseError::KeyNotFound(...))`.
     pub fn new(router: Arc<SynapseRouter>) -> Self {
         Self { router }
     }
