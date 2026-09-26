@@ -461,12 +461,19 @@ git add src/router_merged.rs
 git commit -m "feat: real receive-path verification, replacing the deleted unverified process_email_message"
 ```
 
-## Task 5: Demote `MultiTransportRouter`'s export; finalize `lib.rs`
+## Task 5: Demote `MultiTransportRouter`'s export; delete the duplicate `TransportProvider` trap; finalize `lib.rs`
 
 **Files:**
 - Modify: `src/lib.rs`
+- Modify/Delete: `src/transport/router.rs` (the duplicate trait + stub struct, per Step 0 below)
 
-**Interfaces:** none new — this task only changes what's re-exported, not what exists.
+**Interfaces:** none new — this task only changes what's re-exported and removes a duplicate abstraction, not what the real `TransportProvider`/`ProductionTransportProvider` (in `src/transport/providers.rs`) do.
+
+**This task owns a real, named hazard found during Task 3's review, and it must not be left unowned:** `src/transport/router.rs` defines its OWN, separate `pub trait TransportProvider` and its OWN `pub struct ProductionTransportProvider` — same names as `src/transport/providers.rs`'s real ones, but not a re-export; two genuinely independent definitions (confirmed by `git grep -l 'trait TransportProvider'` returning both files). `router.rs`'s own `ProductionTransportProvider::create_email_transport` is a stub that unconditionally returns `Ok(None)` with `warn!("Email transport not available in minimal build")` — a silent, log-only absence of the email transport, the same "looks like it works, quietly does nothing" failure class Task 3 just fixed elsewhere. Because the two traits share every name, importing the wrong one compiles cleanly with no error — the compiler cannot catch a wrong import here.
+
+- [ ] **Step 0 (new, this hazard's fix): delete `router.rs`'s duplicate `TransportProvider` trait and stub `ProductionTransportProvider`, repoint at `providers.rs`'s real ones.**
+
+Read `src/transport/router.rs`'s `TransportProvider` trait and `ProductionTransportProvider` struct in full, and every place inside that file (and anywhere else, via `grep -rn "transport::router::TransportProvider\|transport::router::ProductionTransportProvider" src/ tests/`) that references them. Replace those references with `crate::transport::providers::{TransportProvider, ProductionTransportProvider}` (the real, non-stub versions) and delete `router.rs`'s own definitions entirely. If deletion turns out to be non-trivial because `MultiTransportRouter::new_with_provider`'s parameter type is genuinely `router.rs`'s `TransportProvider` (confirmed by Task 3's review to be the one it currently resolves to) and changing that parameter type has wider ripple effects than this task budgets for, the fallback (not the first choice) is to **rename** `router.rs`'s stub to something unmistakable — `MinimalBuildTransportProvider`/`NullTransportProvider`, not `ProductionTransportProvider` — so a wrong import becomes a compile error instead of a silent no-op. Prefer deletion; only rename if deletion is genuinely blocked, and say which you did and why in this task's report.
 
 - [ ] **Step 1:** In `src/lib.rs`, remove `pub use router::SynapseRouter;` and `pub use router_enhanced::EnhancedSynapseRouter;` (or whatever the exact current lines are — re-check, since Task 1-4 haven't touched `lib.rs` yet), replace with `pub use router_merged::SynapseRouter;`. Remove `MultiTransportRouter` from the top-level re-export list entirely (it remains `pub` inside `src/transport/`, reachable as `crate::transport::router::MultiTransportRouter` for anything that genuinely needs direct access).
 
@@ -475,8 +482,8 @@ git commit -m "feat: real receive-path verification, replacing the deleted unver
 - [ ] **Step 3: Commit**
 
 ```bash
-git add src/lib.rs
-git commit -m "refactor: export the merged SynapseRouter; demote MultiTransportRouter from the crate root"
+git add -A
+git commit -m "refactor: export the merged SynapseRouter, demote MultiTransportRouter, delete the duplicate TransportProvider trap"
 ```
 
 ## Task 6: Migrate every named consumer; delete the old files
