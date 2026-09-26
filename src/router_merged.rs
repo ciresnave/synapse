@@ -275,6 +275,18 @@ impl SynapseRouter {
     /// and never touched the crypto manager -- the opposite of the email path, which signs. That
     /// helper is not ported at all; this now calls the same `sign_new_message` every other send
     /// path uses, so no path can reach a transport unsigned.
+    ///
+    /// Fixed (Task 4b follow-up): this method's fallback branch calls `send_message`, which
+    /// hardcodes `SecurityLevel::Authenticated` and never consults the caller's requested level
+    /// at all -- so for any urgency other than `RealTime`/`Interactive`, or whenever
+    /// `multi_transport` is unconfigured (the common case: `new()` always leaves it `None`), a
+    /// caller's `Private`/`Secure` request used to reach the fallback and be silently downgraded
+    /// to `Authenticated` with no error. `sign_new_message`'s own guard does not see this at all,
+    /// since the fallback never calls it with the caller's real level. Rejecting here, at the top
+    /// of this method, closes that gap for every branch below regardless of urgency or
+    /// `multi_transport` state -- the same structural argument as `sign_new_message`'s guard, one
+    /// level up. `sign_new_message`'s guard is kept too (defense in depth for its other callers,
+    /// `send_message` and `send_message_with_transport`).
     pub async fn send_message_smart(
         &self,
         to_entity: &str,
@@ -283,6 +295,7 @@ impl SynapseRouter {
         security_level: SecurityLevel,
         urgency: MessageUrgency,
     ) -> Result<String> {
+        Self::reject_unsupported_security_level(security_level.clone())?;
         if let Some(ref mt_router) = self.multi_transport
             && matches!(
                 urgency,
@@ -803,6 +816,59 @@ mod tests {
         assert!(
             auth_ok.is_ok(),
             "Authenticated must still be honoured: {auth_ok:?}"
+        );
+    }
+
+    /// Task 4b follow-up (reviewer-found gap): `sign_new_message`'s guard alone does NOT close
+    /// this hole, because `send_message_smart`'s fallback branch (`self.send_message(...)`) never
+    /// calls `sign_new_message` with the caller's real level -- `send_message` hardcodes
+    /// `SecurityLevel::Authenticated` itself. That fallback is the ONLY path taken whenever
+    /// `multi_transport` is `None` (the common case: `SynapseRouter::new` always leaves it `None`)
+    /// or whenever `urgency` is anything other than `RealTime`/`Interactive`
+    /// (`Critical`/`Background`/`Batch`) -- i.e. most of this method's real call surface. This
+    /// proves the NEW checkpoint added at the top of `send_message_smart` itself closes that gap:
+    /// a `Private` request with no `multi_transport` configured and `Background` urgency (which
+    /// previously sailed straight through to the hardcoded-`Authenticated` fallback with no error
+    /// at all) must now be refused before either branch is even considered.
+    #[tokio::test]
+    async fn send_message_smart_refuses_private_even_on_the_fallback_only_path() {
+        let config = Config::default_for_entity("Test", "tool");
+        let router = SynapseRouter::new(config, "alice@synapse.local".to_string())
+            .await
+            .expect("router");
+        router
+            .crypto
+            .write()
+            .await
+            .generate_keypair()
+            .expect("keypair");
+        // No multi_transport configured (matches SynapseRouter::new's real default), and an
+        // urgency that never qualifies for the fast branch -- this exercises the fallback-only
+        // path exclusively.
+        assert!(
+            router.multi_transport.is_none(),
+            "this test relies on multi_transport being unconfigured, matching new()'s default"
+        );
+
+        let result = router
+            .send_message_smart(
+                "bob@synapse.local",
+                "secret",
+                MessageType::Direct,
+                SecurityLevel::Private,
+                MessageUrgency::Background,
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::SynapseError::UnsupportedSecurityLevel(
+                    SecurityLevel::Private
+                ))
+            ),
+            "send_message_smart must refuse Private on the fallback-only path (no multi_transport, \
+             Background urgency), not silently downgrade it to Authenticated via send_message: \
+             got {result:?}"
         );
     }
 
