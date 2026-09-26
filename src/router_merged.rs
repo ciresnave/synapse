@@ -38,11 +38,15 @@ pub struct SynapseRouter {
     /// (`src/transport/email_unified.rs`), reached through the same
     /// `TransportProvider::create_email_transport` bridge `MultiTransportRouter` uses.
     email: Arc<RwLock<Option<Arc<dyn crate::transport::abstraction::Transport>>>>,
-    /// Pinned sender keys for receive-side verification (`receive_messages`, Task 4). This is the
-    /// SAME mechanism `TransportManager` uses for every other transport in this crate
-    /// (`transport::manager::TransportManager::receive_messages` gates on
-    /// `TrustStore::verify_at`), not a second, weaker, router-specific check -- see
-    /// `receive_messages`'s doc comment for why `IdentityRegistry` (below) was not used for this.
+    /// Pinned sender keys for receive-side verification (`receive_messages`, Task 4). The
+    /// authenticity check itself is the SAME mechanism `TransportManager` uses for every other
+    /// transport in this crate (`transport::manager::TransportManager::receive_messages` gates on
+    /// `TrustStore::verify_at`), not a second, weaker, router-specific re-implementation of that
+    /// check -- see `receive_messages`'s doc comment for why `IdentityRegistry` (below) was not
+    /// used for this. That said, `verify_at` is only one of the two gates
+    /// `TransportManager::receive_messages` runs a message through; this router's overall receive
+    /// guarantee is narrower than `TransportManager`'s -- see `receive_messages`'s doc comment for
+    /// the gap (no anti-replay check, no unsealing).
     trust_store: Arc<RwLock<TrustStore>>,
     /// Multi-transport router for fast communication
     multi_transport: Option<Arc<MultiTransportRouter>>,
@@ -298,7 +302,9 @@ impl SynapseRouter {
     /// at least one pinned key, `receive_messages` verifies nothing as `Verified` and drops every
     /// message it reads -- this is the router's minimal surface for populating the trust store
     /// that guards it, mirroring `TransportManager::trust_store`/`set_trust_store`'s pinning role
-    /// at the single-key scale this router needs.
+    /// at the single-key scale this router needs. Pinning a key only enables the authenticity
+    /// check -- it does not add anti-replay protection or unsealing; see `receive_messages`'s doc
+    /// comment.
     pub async fn pin_sender_key(&self, global_id: impl Into<String>, key: [u8; 32]) {
         self.trust_store.write().await.pin(global_id, key);
     }
@@ -332,15 +338,36 @@ impl SynapseRouter {
     /// `TrustStore`, so this uses the store that already speaks the signer's language rather than
     /// building a second one for the receiver.
     ///
-    /// Required finding: this gives the router the SAME guarantee `TransportManager`'s
-    /// `TrustStore`-based verification gives every other transport in this crate, not a weaker
-    /// one -- it is the identical `TrustStore::verify_at` call, not a re-implementation. The
-    /// narrower surface actually used here (`self.trust_store`, populated only by
-    /// [`Self::pin_sender_key`]) omits the certificate-chain/account-key route and revocation --
-    /// this router has no equivalent of `TransportManager::add_revocations` or
-    /// `pin_account_key`/certificate ingestion yet -- but the direct-pin route itself, the one this
-    /// method exercises, is byte-for-byte the same check `TransportManager` performs for a directly
-    /// pinned sender.
+    /// Required finding: the AUTHENTICITY check here is the identical `TrustStore::verify_at`
+    /// call `TransportManager::receive_messages` performs for a directly pinned sender --
+    /// byte-for-byte the same check, not a re-implementation. The narrower surface actually used
+    /// here (`self.trust_store`, populated only by [`Self::pin_sender_key`]) omits the
+    /// certificate-chain/account-key route and revocation -- this router has no equivalent of
+    /// `TransportManager::add_revocations` or `pin_account_key`/certificate ingestion yet -- but
+    /// that gap alone would still leave this router at parity for the direct-pin case.
+    ///
+    /// The OVERALL guarantee is narrower than `TransportManager`'s, not the same, because of two
+    /// gaps `verify_at` alone does not close:
+    ///
+    /// 1. **No anti-replay protection.** `TransportManager::receive_messages` also runs every
+    ///    message through `src/replay.rs`'s `inbound.admit(...)`/`.check(...)` gate, keyed on
+    ///    `(key_id, message_id, timestamp)`, which rejects a message it has already seen. This
+    ///    method has no equivalent call. A captured, genuinely-signed message can be replayed
+    ///    against this method indefinitely and it will be delivered every time, where
+    ///    `TransportManager` would reject it after the first delivery.
+    /// 2. **No unsealing of `Private`/`Secure`-level content.** This method never calls
+    ///    `sealing::open` (`src/sealing.rs`). If a message was sent at `SecurityLevel::Private` or
+    ///    `SecurityLevel::Secure` (reachable via `send_message_smart`'s caller-supplied
+    ///    `security_level`), its content is still sealed/encrypted ciphertext on receipt, but this
+    ///    method hands it back as `SimpleMessage.content` via
+    ///    `String::from_utf8_lossy(&message.encrypted_content)` -- i.e. it silently returns raw
+    ///    ciphertext as if it were plaintext, with no error and no indication anything is wrong.
+    ///    This gap predates Task 4 (the send side doesn't seal either, going back to Task 2/3), but
+    ///    it directly bears on this method's guarantee and must be disclosed here.
+    ///
+    /// In short: identical authenticity check, but missing anti-replay and missing unsealing --
+    /// callers should not treat this method as a drop-in equivalent of
+    /// `TransportManager::receive_messages`.
     pub async fn receive_messages(&self) -> Result<Vec<SimpleMessage>> {
         let transport = self.ensure_email_transport().await?;
         let mut inbox = crate::transport::abstraction::RawInbox::new();
