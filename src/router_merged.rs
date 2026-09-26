@@ -579,18 +579,19 @@ mod tests {
         }
     }
 
-    /// A `transport::router::TransportProvider` stub used only to hand `MultiTransportRouter` a
+    /// A `transport::providers::TransportProvider` stub used only to hand `MultiTransportRouter` a
     /// `RecordingTransport` as its email transport, via the same `new_with_provider` dependency
-    /// injection seam `ProductionTransportProvider` uses in production. Note this is
-    /// `transport::router::TransportProvider`, not the differently-scoped, identically-named
-    /// trait in `transport::providers` -- `MultiTransportRouter::new_with_provider` is defined in
-    /// `transport::router` and resolves `TransportProvider` to its own module's trait.
+    /// injection seam `ProductionTransportProvider` uses in production. `router.rs` used to define
+    /// its own, separate `TransportProvider` trait/`ProductionTransportProvider` stub with the same
+    /// names but a silently-stubbed email transport; that duplicate was deleted in the router-merge
+    /// work, and `MultiTransportRouter::new_with_provider` now resolves `TransportProvider` to the
+    /// real trait in `transport::providers`, which this impl targets.
     struct StubTransportProvider {
         email_transport: Arc<dyn crate::transport::abstraction::Transport>,
     }
 
     #[async_trait::async_trait]
-    impl crate::transport::router::TransportProvider for StubTransportProvider {
+    impl crate::transport::providers::TransportProvider for StubTransportProvider {
         async fn create_tcp_transport(
             &self,
             _config: &Config,

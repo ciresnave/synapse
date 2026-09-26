@@ -242,10 +242,10 @@ pub use error::SynapseError;
 pub use transport::TransportRoute;
 pub use transport::abstraction::MessageUrgency;
 
-// Re-export router types for tests and external usage
-pub use router::SynapseRouter;
-pub use router_enhanced::EnhancedSynapseRouter;
-pub use transport::router::MultiTransportRouter;
+// Re-export the merged router type for tests and external usage.
+// MultiTransportRouter stays reachable as crate::transport::router::MultiTransportRouter for
+// anything that needs direct access, but is no longer part of the top-level surface.
+pub use router_merged::SynapseRouter;
 
 // Re-export Synapse key types (only on non-WASM platforms)
 pub use synapse::models::{DiscoverabilityLevel, EntityType, ParticipantProfile};

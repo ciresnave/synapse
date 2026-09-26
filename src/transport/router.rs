@@ -8,8 +8,12 @@ use super::{
         TransportType,
     },
 };
-use crate::{config::Config, error::Result, types::SecureMessage};
-use async_trait::async_trait;
+use crate::{
+    config::Config,
+    error::Result,
+    transport::providers::{ProductionTransportProvider, TransportProvider},
+    types::SecureMessage,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -36,70 +40,6 @@ pub struct HybridConnection {
     pub fallback_transports: Vec<TransportType>,
     pub target: TransportTarget,
     pub established_at: Instant,
-}
-
-/// Transport provider trait for dependency injection
-#[async_trait]
-pub trait TransportProvider: Send + Sync {
-    async fn create_tcp_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>>;
-    async fn create_mdns_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>>;
-    async fn create_nat_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>>;
-    async fn create_email_transport(&self, config: &Config) -> Result<Option<Arc<dyn Transport>>>;
-    fn create_transport_selector(&self) -> Arc<RwLock<TransportSelector>>;
-}
-
-/// Production transport provider
-pub struct ProductionTransportProvider;
-
-#[async_trait]
-impl TransportProvider for ProductionTransportProvider {
-    async fn create_tcp_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        // Create TCP transport using enhanced implementation
-        use crate::transport::tcp_unified::TcpTransportImpl;
-        use std::collections::HashMap;
-
-        let mut tcp_config = HashMap::new();
-        tcp_config.insert("listen_port".to_string(), "8080".to_string());
-
-        match TcpTransportImpl::new(&tcp_config).await {
-            Ok(transport) => Ok(Some(Arc::new(transport))),
-            Err(e) => {
-                warn!("Failed to create TCP transport: {}", e);
-                Ok(None)
-            }
-        }
-    }
-
-    async fn create_mdns_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        use crate::transport::mdns_enhanced::{EnhancedMdnsTransport, MdnsConfig};
-        let entity_id = "router-instance".to_string();
-        let local_port = 8080;
-        let config = Some(MdnsConfig::default());
-        match EnhancedMdnsTransport::new(entity_id, local_port, config).await {
-            Ok(transport) => Ok(Some(Arc::new(transport) as Arc<dyn Transport>)),
-            Err(e) => {
-                warn!("Failed to create mDNS transport: {}", e);
-                Ok(None)
-            }
-        }
-    }
-
-    async fn create_nat_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        // NAT transport not implemented in current version
-        // This would require STUN/TURN servers and NAT traversal logic
-        info!("NAT transport not available in current version");
-        Ok(None)
-    }
-
-    async fn create_email_transport(&self, _config: &Config) -> Result<Option<Arc<dyn Transport>>> {
-        // Email transport not available in minimal build
-        warn!("Email transport not available in minimal build");
-        Ok(None)
-    }
-
-    fn create_transport_selector(&self) -> Arc<RwLock<TransportSelector>> {
-        Arc::new(RwLock::new(TransportSelector::new()))
-    }
 }
 
 /// Multi-transport router for Synapse
