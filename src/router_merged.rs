@@ -20,6 +20,7 @@ use crate::{
     error::Result,
     identity::IdentityRegistry,
     router::RouterHealth,
+    sender_auth::TrustStore,
     transport::{abstraction::MessageUrgency, router::MultiTransportRouter},
     types::{MessageType, SecureMessage, SecurityLevel, SimpleMessage},
 };
@@ -37,6 +38,12 @@ pub struct SynapseRouter {
     /// (`src/transport/email_unified.rs`), reached through the same
     /// `TransportProvider::create_email_transport` bridge `MultiTransportRouter` uses.
     email: Arc<RwLock<Option<Arc<dyn crate::transport::abstraction::Transport>>>>,
+    /// Pinned sender keys for receive-side verification (`receive_messages`, Task 4). This is the
+    /// SAME mechanism `TransportManager` uses for every other transport in this crate
+    /// (`transport::manager::TransportManager::receive_messages` gates on
+    /// `TrustStore::verify_at`), not a second, weaker, router-specific check -- see
+    /// `receive_messages`'s doc comment for why `IdentityRegistry` (below) was not used for this.
+    trust_store: Arc<RwLock<TrustStore>>,
     /// Multi-transport router for fast communication
     multi_transport: Option<Arc<MultiTransportRouter>>,
     /// Local email server (SMTP/IMAP) for when we're externally accessible
@@ -64,6 +71,7 @@ impl SynapseRouter {
             crypto,
             identity,
             email: Arc::new(RwLock::new(None)),
+            trust_store: Arc::new(RwLock::new(TrustStore::new())),
             multi_transport: None,
             email_server: None,
             config,
@@ -284,6 +292,84 @@ impl SynapseRouter {
         self.send_message(simple_msg, to_entity.to_string())
             .await
             .map(|_| "email_fallback".to_string())
+    }
+
+    /// Pin `global_id`'s Ed25519 public key for `receive_messages`'s sender verification. Without
+    /// at least one pinned key, `receive_messages` verifies nothing as `Verified` and drops every
+    /// message it reads -- this is the router's minimal surface for populating the trust store
+    /// that guards it, mirroring `TransportManager::trust_store`/`set_trust_store`'s pinning role
+    /// at the single-key scale this router needs.
+    pub async fn pin_sender_key(&self, global_id: impl Into<String>, key: [u8; 32]) {
+        self.trust_store.write().await.pin(global_id, key);
+    }
+
+    /// Receive messages from the email transport, verifying every sender before it is delivered.
+    ///
+    /// This REPLACES old `SynapseRouter::receive_messages`/`process_email_message`
+    /// (`src/router.rs`, deleted in Task 6) entirely -- it is not a fix-in-place of that code, and
+    /// none of its body is ported here (design note §4: "Do not let it survive the merge by simply
+    /// relocating it onto the merged type's namespace"). The old path parsed a `SecureMessage` out
+    /// of a JSON-wrapped `SimpleMessage.content` and handed it to the caller regardless of
+    /// `sender_proof` -- self-documented in its own doc comment as "⚠️ Unverified: senders are not
+    /// authenticated here" and "this path has no trust store, so it remains unauthenticated." A
+    /// message that fails verification here is dropped, never returned -- the old code returned
+    /// everything unconditionally, which is exactly the defect this replaces.
+    ///
+    /// Identity-model decision (Task 4 brief, Step 1): this router's receive-side verification uses
+    /// [`TrustStore::verify_at`] -- the SAME mechanism `TransportManager::receive_messages` already
+    /// uses for every other transport in this crate (TCP, UDP, WebSocket, QUIC, NAT traversal) --
+    /// not `IdentityRegistry::get_public_key`. `IdentityRegistry` (`src/identity.rs`) stores a
+    /// public key as an opaque, undefined-format `String` (`GlobalIdentity::public_key`), performs
+    /// no signature check anywhere in this crate, and `register_entity` -- its own normal
+    /// registration path -- sets that field to `""` by default. There is no existing convention
+    /// for what encoding that string would even be in for an Ed25519 key. Verifying against it
+    /// would mean inventing a brand-new key encoding and a brand-new, hand-rolled signature-check
+    /// routine that duplicates `TrustStore::verify_against_pinned_key`/`canonical_input` without
+    /// their review history or test coverage -- itself a second, divergent verification path, the
+    /// same defect class board item 65 was on the send side (`sign_new_message`'s doc comment).
+    /// `SenderProof`/`canonical_input` (`sender_auth.rs`) are already `TrustStore`'s vocabulary, and
+    /// `sign_new_message` (this file) already produces proofs meant to be checked against a
+    /// `TrustStore`, so this uses the store that already speaks the signer's language rather than
+    /// building a second one for the receiver.
+    ///
+    /// Required finding: this gives the router the SAME guarantee `TransportManager`'s
+    /// `TrustStore`-based verification gives every other transport in this crate, not a weaker
+    /// one -- it is the identical `TrustStore::verify_at` call, not a re-implementation. The
+    /// narrower surface actually used here (`self.trust_store`, populated only by
+    /// [`Self::pin_sender_key`]) omits the certificate-chain/account-key route and revocation --
+    /// this router has no equivalent of `TransportManager::add_revocations` or
+    /// `pin_account_key`/certificate ingestion yet -- but the direct-pin route itself, the one this
+    /// method exercises, is byte-for-byte the same check `TransportManager` performs for a directly
+    /// pinned sender.
+    pub async fn receive_messages(&self) -> Result<Vec<SimpleMessage>> {
+        let transport = self.ensure_email_transport().await?;
+        let mut inbox = crate::transport::abstraction::RawInbox::new();
+        transport.receive_raw(&mut inbox).await?;
+        let incoming = inbox.drain();
+
+        let store = self.trust_store.read().await;
+        let now = chrono::Utc::now();
+        let mut delivered = Vec::with_capacity(incoming.len());
+        for item in incoming {
+            let message = item.message;
+            let verdict = store.verify_at(&message, now);
+            if !verdict.is_verified() {
+                tracing::debug!(
+                    from = %message.from_global_id,
+                    verdict = ?verdict,
+                    "dropping a received message whose sender did not verify"
+                );
+                continue;
+            }
+            delivered.push(SimpleMessage {
+                to: message.to_global_id,
+                from_entity: message.from_global_id,
+                content: String::from_utf8_lossy(&message.encrypted_content).into_owned(),
+                message_type: MessageType::Direct,
+                metadata: message.metadata,
+            });
+        }
+        Ok(delivered)
     }
 }
 
@@ -606,6 +692,150 @@ mod tests {
             verdict.is_verified(),
             "recorded message's signature did not verify against the router's own pinned public \
              key: {verdict:?}"
+        );
+    }
+
+    /// A free loopback port, bound and released immediately -- another process could take it
+    /// before the transport binds it, in which case the transport's own bind fails with a clear
+    /// error rather than this test silently colliding with something else.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral")
+            .local_addr()
+            .expect("local_addr")
+            .port()
+    }
+
+    /// A Direct-mode `EmailTransportImpl` on loopback at `port`, started (its SMTP accept loop
+    /// running), wrapped for injection into a router's private `email` field. Bypasses
+    /// `ensure_email_transport`'s `ProductionTransportProvider` bridge entirely, which hardcodes
+    /// `local_port = "2525"` (`transport::providers::ProductionTransportProvider::create_email_transport`)
+    /// -- two routers in one test process cannot both bind that port, so each gets its own real
+    /// `EmailTransportImpl` on a distinct free port instead, exactly the same transport type
+    /// `ensure_email_transport` would have built.
+    async fn direct_email_transport_on(
+        port: u16,
+    ) -> Arc<dyn crate::transport::abstraction::Transport> {
+        let mut config = std::collections::HashMap::new();
+        config.insert("local_port".to_string(), port.to_string());
+        config.insert(
+            crate::network_scope::BIND_SCOPE_KEY.to_string(),
+            crate::network_scope::BindScope::Loopback
+                .config_value()
+                .to_string(),
+        );
+        use crate::transport::abstraction::Transport as _;
+        let transport = crate::transport::email_unified::EmailTransportImpl::new(&config)
+            .await
+            .expect("construct email transport");
+        transport.start().await.expect("start email transport");
+        Arc::new(transport)
+    }
+
+    /// The PM's required born-red test (Task 4): a message claiming to be from a sender whose real
+    /// key IS pinned in the receiver's trust store, but signed by a DIFFERENT, unregistered
+    /// keypair, must be dropped by `receive_messages` -- not merely unsigned (the old
+    /// `SenderProof::unsigned()`/board-item-65 case) but an active impersonation attempt with a
+    /// real, well-formed, verifiable-looking signature that simply does not match the pinned key.
+    ///
+    /// The old `SynapseRouter::receive_messages`/`process_email_message` (`src/router.rs`) had no
+    /// trust store at all and returned every parsed message unconditionally, so this exact scenario
+    /// would have been delivered under the old code -- a happy-path-only test could not distinguish
+    /// the two. This asserts the refusal directly: the impostor's message must NOT appear in
+    /// `receive_messages`'s result, while a genuinely-signed message from the same claimed sender
+    /// (the positive control) DOES arrive -- proving the drop is really about the bad signature, not
+    /// about the whole pipeline being broken or the message never having reached the transport at
+    /// all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn receive_messages_rejects_an_unverifiable_sender() {
+        const ALICE: &str = "alice@synapse.local";
+        const BOB: &str = "bob@synapse.local";
+
+        let bob_config = Config::default_for_entity("Bob", "tool");
+        let bob_router = SynapseRouter::new(bob_config, BOB.to_string())
+            .await
+            .expect("construct bob");
+
+        // Alice's real keypair -- this is the one Bob pins, i.e. "the one registered".
+        let alice_crypto = {
+            let mut c = CryptoManager::new();
+            c.generate_keypair().expect("alice keypair");
+            c
+        };
+        let alice_public_key = alice_crypto.public_key_bytes().expect("alice public key");
+        bob_router.pin_sender_key(ALICE, alice_public_key).await;
+
+        // An impostor's keypair -- deliberately NOT the one Bob pinned for ALICE.
+        let mut impostor_crypto = CryptoManager::new();
+        impostor_crypto
+            .generate_keypair()
+            .expect("impostor keypair");
+
+        let bob_port = free_port();
+        let alice_port = free_port();
+        let bob_transport = direct_email_transport_on(bob_port).await;
+        let alice_transport = direct_email_transport_on(alice_port).await;
+        *bob_router.email.write().await = Some(Arc::clone(&bob_transport));
+
+        let bob_target = crate::transport::abstraction::TransportTarget::new(BOB.to_string())
+            .with_address(format!("127.0.0.1:{bob_port}"));
+
+        // Positive control: a message genuinely signed by Alice's real (pinned) key.
+        let mut genuine = SecureMessage::new(
+            BOB.to_string(),
+            ALICE.to_string(),
+            b"hello from the real alice".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        alice_crypto
+            .sign_secure_message(&mut genuine)
+            .expect("sign genuine");
+        alice_transport
+            .send_message(&bob_target, &genuine)
+            .await
+            .expect("send genuine");
+
+        // The attack: claims to be ALICE in `from_global_id`, but signed by the impostor's key,
+        // which Bob never pinned for ALICE (or for anyone).
+        let mut forged = SecureMessage::new(
+            BOB.to_string(),
+            ALICE.to_string(),
+            b"hello from an impostor".to_vec(),
+            SecurityLevel::Authenticated,
+        );
+        impostor_crypto
+            .sign_secure_message(&mut forged)
+            .expect("sign forged");
+        alice_transport
+            .send_message(&bob_target, &forged)
+            .await
+            .expect("send forged");
+
+        // Poll until both have had a chance to arrive at the transport layer.
+        let mut delivered: Vec<SimpleMessage> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while delivered.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            delivered.extend(bob_router.receive_messages().await.expect("receive"));
+        }
+        // One more poll, generous, to give the forged message every chance to show up too, if the
+        // verification gate were not actually dropping it.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        delivered.extend(bob_router.receive_messages().await.expect("receive"));
+
+        assert!(
+            delivered
+                .iter()
+                .any(|m| m.content == "hello from the real alice"),
+            "the genuinely-signed control message never arrived: {delivered:?}"
+        );
+        assert!(
+            !delivered
+                .iter()
+                .any(|m| m.content == "hello from an impostor"),
+            "a message signed by an unpinned, unrelated key was delivered anyway -- \
+             receive_messages must drop an unverifiable sender, not just an unsigned one: \
+             {delivered:?}"
         );
     }
 }
