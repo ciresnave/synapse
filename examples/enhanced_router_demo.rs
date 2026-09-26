@@ -43,6 +43,13 @@ async fn main() -> Result<()> {
         }
     };
 
+    // A keypair is required before `send_message_smart` (below) can sign anything -- without
+    // one, that call fails with `KeyNotFound` instead of demonstrating a real signature.
+    if let Err(e) = router.generate_keypair().await {
+        error!("❌ Failed to generate keypair: {}", e);
+        return Err(e);
+    }
+
     // Check status before starting
     let status = router.status().await;
     info!("📊 Router Status:");

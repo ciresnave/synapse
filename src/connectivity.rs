@@ -39,7 +39,12 @@ pub struct EmailProviderConfig {
 }
 
 impl ConnectivityManager {
-    /// Create a new connectivity manager
+    /// Create a new connectivity manager.
+    ///
+    /// `router` MUST already have a keypair loaded (via `SynapseRouter::generate_keypair()`)
+    /// before any send-capable method on this manager (for example `send_with_fallback`) is
+    /// used -- `SynapseRouter::new` does not auto-generate one. Without a loaded keypair, those
+    /// methods will return `Err(SynapseError::KeyNotFound(...))`.
     pub fn new(router: SynapseRouter) -> Self {
         Self {
             router,

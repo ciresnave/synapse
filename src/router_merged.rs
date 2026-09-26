@@ -406,6 +406,57 @@ impl SynapseRouter {
             .map(|_| "email_fallback".to_string())
     }
 
+    /// Send message with explicit transport preference. Old `EnhancedSynapseRouter`'s name and
+    /// signature, ported here.
+    ///
+    /// Fixed (board item 65): the old body called the old
+    /// `EnhancedSynapseRouter::create_secure_message`, which hardcoded `SenderProof::unsigned()`
+    /// -- a fifth instance of the same defect class this router has been fixing throughout. This
+    /// now calls the same `sign_new_message` every other send path uses, so no path in this
+    /// router can reach a transport unsigned.
+    ///
+    /// Follows `send_message_smart`'s fast/fallback structure exactly: reject an unsupported
+    /// `security_level` up front (this method accepts a caller-supplied level just like that one
+    /// does), sign once via `sign_new_message`, try `multi_transport` with the caller's preferred
+    /// routes, and fall back to `send_message` (email) when `multi_transport` is unconfigured.
+    pub async fn send_message_with_transport(
+        &self,
+        to_entity: &str,
+        content: &str,
+        message_type: MessageType,
+        security_level: SecurityLevel,
+        preferred_routes: &[TransportRoute],
+    ) -> Result<String> {
+        Self::reject_unsupported_security_level(security_level.clone())?;
+        if let Some(ref mt_router) = self.multi_transport {
+            let secure_msg = self
+                .sign_new_message(
+                    to_entity,
+                    content.as_bytes(),
+                    security_level,
+                    Default::default(),
+                )
+                .await?;
+
+            return mt_router
+                .send_with_fallback_priority(to_entity, &secure_msg, preferred_routes)
+                .await
+                .map(|receipt| receipt.message_id);
+        }
+
+        // Fallback to email
+        let simple_msg = SimpleMessage {
+            to: to_entity.to_string(),
+            from_entity: self.our_global_id.clone(),
+            content: content.to_string(),
+            message_type,
+            metadata: std::collections::HashMap::new(),
+        };
+        self.send_message(simple_msg, to_entity.to_string())
+            .await
+            .map(|_| "email_fallback".to_string())
+    }
+
     /// Pin `global_id`'s Ed25519 public key for `receive_messages`'s sender verification. Without
     /// at least one pinned key, `receive_messages` verifies nothing as `Verified` and drops every
     /// message it reads -- this is the router's minimal surface for populating the trust store
@@ -1137,6 +1188,118 @@ mod tests {
             "send_message_smart must refuse Private on the fallback-only path (no multi_transport, \
              Background urgency), not silently downgrade it to Authenticated via send_message: \
              got {result:?}"
+        );
+    }
+
+    /// Proves `send_message_with_transport` signs before handing anything to a transport, using
+    /// the same `RecordingTransport`/`StubTransportProvider` stub pattern
+    /// `every_send_path_signs_before_it_reaches_a_transport` uses for `send_message_smart`'s fast
+    /// branch. `preferred_routes` is empty, so `MultiTransportRouter::send_with_fallback_priority`
+    /// goes straight to its email fallback -- this test's `RecordingTransport` -- without needing
+    /// real transport discovery to fail first.
+    #[tokio::test]
+    async fn send_message_with_transport_signs_before_it_reaches_a_transport() {
+        let config = Config::default_for_entity("Test", "tool");
+        let mut router = SynapseRouter::new(config.clone(), "alice@synapse.local".to_string())
+            .await
+            .expect("construct");
+        router
+            .crypto
+            .write()
+            .await
+            .generate_keypair()
+            .expect("keypair");
+
+        let sent: Arc<std::sync::Mutex<Option<SecureMessage>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let recording_transport = Arc::new(RecordingTransport {
+            sent: Arc::clone(&sent),
+        });
+        let provider = StubTransportProvider {
+            email_transport: recording_transport,
+        };
+        let mt_router = MultiTransportRouter::new_with_provider(
+            config,
+            "alice@synapse.local".to_string(),
+            Box::new(provider),
+        )
+        .await
+        .expect("multi-transport router");
+        router.multi_transport = Some(Arc::new(mt_router));
+
+        let message_id = router
+            .send_message_with_transport(
+                "bob@synapse.local",
+                "hello",
+                MessageType::Direct,
+                SecurityLevel::Authenticated,
+                &[],
+            )
+            .await
+            .expect("send_message_with_transport");
+        assert!(
+            message_id.starts_with("recorded-for-"),
+            "expected the empty preferred_routes to fall through to RecordingTransport via \
+             MultiTransportRouter's email fallback, got message id {message_id:?} instead"
+        );
+
+        let recorded = sent.lock().expect("lock").take().expect(
+            "RecordingTransport.send_message was never called -- send_message_with_transport \
+             didn't reach a transport",
+        );
+        assert_eq!(recorded.from_global_id, "alice@synapse.local");
+
+        // The load-bearing assertion, matching every_send_path_signs_before_it_reaches_a_transport:
+        // the recorded message's signature actually verifies against the router's own public key.
+        let mut trust_store = crate::sender_auth::TrustStore::new();
+        let public_key = router
+            .crypto
+            .read()
+            .await
+            .public_key_bytes()
+            .expect("public key");
+        trust_store.pin("alice@synapse.local", public_key);
+        let verdict = trust_store.verify(&recorded);
+        assert!(
+            verdict.is_verified(),
+            "recorded message's signature did not verify against the router's own pinned public \
+             key: {verdict:?}"
+        );
+    }
+
+    /// `send_message_with_transport` must refuse `Private`/`Secure` too, the same guard
+    /// `sign_new_message`/`send_message_smart` already enforce -- this is the same defect class
+    /// (board item 65 one layer up) applied to the newly-ported method.
+    #[tokio::test]
+    async fn send_message_with_transport_refuses_private_and_secure_levels() {
+        let config = Config::default_for_entity("Test", "tool");
+        let router = SynapseRouter::new(config, "alice@synapse.local".to_string())
+            .await
+            .expect("router");
+        router
+            .crypto
+            .write()
+            .await
+            .generate_keypair()
+            .expect("keypair");
+
+        let private_result = router
+            .send_message_with_transport(
+                "bob@synapse.local",
+                "secret",
+                MessageType::Direct,
+                SecurityLevel::Private,
+                &[],
+            )
+            .await;
+        assert!(
+            matches!(
+                private_result,
+                Err(crate::error::SynapseError::UnsupportedSecurityLevel(
+                    SecurityLevel::Private
+                ))
+            ),
+            "Private must be refused: got {private_result:?}"
         );
     }
 

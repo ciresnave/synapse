@@ -22,6 +22,10 @@ async fn main() -> SynapseResult<()> {
     // Initialize the enhanced router
     let router = SynapseRouter::new(config, "demo-bot@company.com".to_string()).await?;
 
+    // A keypair is required before any send below can sign anything -- without one, every send
+    // call fails with `KeyNotFound` instead of demonstrating a real signature.
+    router.generate_keypair().await?;
+
     // Start the router services
     router.start().await?;
     println!("🚀 Enhanced Synapse Router started successfully");
