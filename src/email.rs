@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use crate::error::EmailError;
-use crate::types::{MessageType, SecureMessage, SecurityLevel};
+use crate::types::MessageType;
 /// Email transport layer for EMRP
 use crate::{
     error::Result,
     types::{EmailConfig, SimpleMessage},
 };
-use base64::Engine;
 use std::collections::HashMap;
 use std::string::ToString;
 
-use lettre::{
-    SmtpTransport, Transport,
-    message::{Mailbox, Message, SinglePart, header},
-    transport::smtp::authentication::Credentials,
-};
+use lettre::{SmtpTransport, transport::smtp::authentication::Credentials};
 
 /// Email transport for sending and receiving EMRP messages
 #[derive(Debug, Clone)]
 pub struct EmailTransport {
     config: EmailConfig,
+    // No longer read: `send_message` now refuses unconditionally rather than ever sending an
+    // unsigned message (see its doc comment), so this crate has no code path left that hands a
+    // message to it. Kept on the struct rather than removed -- dropping it is the kind of
+    // larger, unrelated restructuring this fix explicitly stays out of.
+    #[allow(dead_code)]
     smtp_transport: SmtpTransport,
 }
 
@@ -55,73 +55,33 @@ impl EmailTransport {
     }
 
     /// Send an EMRP message via email
-    pub async fn send_message(&self, simple_msg: &SimpleMessage) -> Result<()> {
-        // Use simple_msg to construct the email message
-        let from_email = &simple_msg.from_entity;
-        let to_email = &simple_msg.to;
-        let secure_msg = SecureMessage {
-            message_id: Default::default(),
-            to_global_id: to_email.clone(),
-            from_global_id: from_email.clone(),
-            encrypted_content: simple_msg.content.as_bytes().to_vec(),
-            sender_proof: crate::sender_auth::SenderProof::unsigned(),
-            timestamp: Default::default(),
-            security_level: SecurityLevel::Authenticated,
-            routing_path: vec![],
-            metadata: simple_msg.metadata.clone(),
-            protocol_version: crate::types::PROTOCOL_VERSION,
-        };
-        let email_message =
-            self.create_email_message(&secure_msg, from_email, to_email, simple_msg)?;
-        let _response = self
-            .smtp_transport
-            .send(&email_message)
-            .map_err(|e| EmailError::SendFailed(e.to_string()))?;
-        tracing::debug!("Email sent successfully");
-        Ok(())
-    }
-
-    /// Create an email message with EMRP headers
-    fn create_email_message(
-        &self,
-        secure_msg: &SecureMessage,
-        from_email: &str,
-        to_email: &str,
-        simple_msg: &SimpleMessage,
-    ) -> Result<Message> {
-        let from_mailbox = from_email
-            .parse::<Mailbox>()
-            .map_err(|e| EmailError::InvalidFormat(format!("Invalid from address: {e}")))?;
-
-        let to_mailbox = to_email
-            .parse::<Mailbox>()
-            .map_err(|e| EmailError::InvalidFormat(format!("Invalid to address: {e}")))?;
-
-        let subject = self.generate_subject(simple_msg);
-
-        // Create message without custom headers first (lettre doesn't support arbitrary headers well)
-        let body_content = if secure_msg.encrypted_content.is_empty() {
-            simple_msg.content.clone()
-        } else {
-            // For encrypted content, use base64 encoding
-            base64::engine::general_purpose::STANDARD.encode(&secure_msg.encrypted_content)
-        };
-
-        let message = Message::builder()
-            .from(from_mailbox)
-            .to(to_mailbox)
-            .subject(subject)
-            .singlepart(
-                SinglePart::builder()
-                    .header(header::ContentType::TEXT_PLAIN)
-                    .body(body_content),
-            )
-            .map_err(|e| EmailError::InvalidFormat(e.to_string()))?;
-
-        Ok(message)
+    ///
+    /// `EmailTransport` holds no `CryptoManager` or keypair, so it has no way to produce a real
+    /// signature. The project owner's ruling is absolute -- "no messages should ever be sent
+    /// unsigned" / "messages must never be sent unsigned" -- and explicitly rejects "it has no
+    /// live caller" as a defense. Per the owner's own fallback instruction for exactly this case
+    /// (signing genuinely out of reach for this type), this function refuses to send rather than
+    /// ever construct or transmit an unsigned `SecureMessage`. Callers that need to send email
+    /// should go through `SynapseRouter` (`src/router_merged.rs`), which routes sending through
+    /// `EmailTransportImpl` and signs via `sign_new_message` before any transport is touched.
+    pub async fn send_message(&self, _simple_msg: &SimpleMessage) -> Result<()> {
+        Err(EmailError::SendFailed(
+            "EmailTransport::send_message cannot produce a signed message -- this type holds no \
+             CryptoManager or keypair, and this crate's policy is that no message may ever be \
+             sent unsigned. Use SynapseRouter (src/router_merged.rs), which routes all sending \
+             through EmailTransportImpl and signs via sign_new_message before any transport is \
+             touched."
+                .to_string(),
+        ))
     }
 
     /// Generate appropriate email subject
+    ///
+    /// No longer called in production code: its only caller, `create_email_message`, was removed
+    /// along with the unsigned-send path in `send_message` (see that function's doc comment).
+    /// Kept and still covered by `test_subject_generation` since this crate's future signed email
+    /// path (via `SynapseRouter`) is expected to want the same subject formatting.
+    #[allow(dead_code)]
     fn generate_subject(&self, simple_msg: &SimpleMessage) -> String {
         match simple_msg.message_type {
             MessageType::ToolCall => format!(
@@ -315,6 +275,45 @@ mod tests {
 
         let subject = transport.generate_subject(&direct_msg);
         assert_eq!(subject, "[Synapse] Hello! How can I help...");
+    }
+
+    #[tokio::test]
+    async fn send_message_refuses_rather_than_send_unsigned() {
+        // Per the project owner's ruling ("no messages should ever be sent unsigned" /
+        // "messages must never be sent unsigned"), EmailTransport::send_message must never
+        // construct or transmit a SecureMessage carrying SenderProof::unsigned(). This type has
+        // no CryptoManager/keypair, so it cannot sign -- it must refuse instead.
+        //
+        // The old (pre-fix) body built the unsigned SecureMessage regardless, then tried to
+        // hand it to lettre's SmtpTransport, which -- pointed at an address nothing is
+        // listening on -- fails with a *connection* error whose text never mentions signing.
+        // That's the born-red signal: it's an Err either way, but for the wrong reason. The
+        // fixed body must fail for the *right* reason, before ever touching the network or
+        // building a SecureMessage.
+        let transport = create_test_transport();
+
+        let msg = SimpleMessage {
+            to: "bob@example.com".to_string(),
+            from_entity: "alice@example.com".to_string(),
+            content: "hello".to_string(),
+            message_type: MessageType::Direct,
+            metadata: HashMap::new(),
+        };
+
+        let err = transport
+            .send_message(&msg)
+            .await
+            .expect_err("send_message must refuse rather than ever send unsigned");
+
+        let text = err.to_string();
+        assert!(
+            text.contains("cannot produce a signed message"),
+            "expected the refusal reason (no signing capability), got: {text}"
+        );
+        assert!(
+            !text.contains("Send failed") || text.contains("cannot produce a signed message"),
+            "must not be the generic SMTP send-failure path: {text}"
+        );
     }
 
     fn create_test_transport() -> EmailTransport {
