@@ -147,7 +147,8 @@
 //! ### Security by Design
 //!
 //! All messages are automatically secured:
-//! - **🔐 PGP Encryption**: Messages encrypted with recipient's public key
+//! - **🔒 Content Confidentiality**: Not implemented -- `SecurityLevel::Private`/`Secure` are
+//!   refused (see `SynapseError::UnsupportedSecurityLevel`); messages are signed, not encrypted
 //! - **✍️ Digital Signatures**: Verify sender authenticity
 //! - **🛡️ TLS Transport**: Encrypted connections for real-time transports
 //! - **🔑 Automatic Key Management**: Keys generated and distributed automatically
