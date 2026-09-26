@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 use synapse::{
-    EnhancedSynapseRouter,
+    SynapseRouter,
     config::{Config, EntityConfig, LoggingConfig, RouterConfig, SecurityConfig},
     error::Result,
     transport::abstraction::MessageUrgency,
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     // Create enhanced router with email server integration
     info!("🔧 Initializing Enhanced Synapse Router...");
-    let router = match EnhancedSynapseRouter::new(config, our_entity_id.clone()).await {
+    let router = match SynapseRouter::new(config, our_entity_id.clone()).await {
         Ok(router) => {
             info!("✅ Enhanced Synapse Router initialized successfully");
             router

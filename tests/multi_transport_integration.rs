@@ -21,6 +21,10 @@ async fn test_transport_message_routing() -> Result<()> {
     // Create a configuration for testing
     let config = Config::for_testing();
     let router = SynapseRouter::new(config, "test_entity".to_string()).await?;
+    // convert_to_secure_message now genuinely signs (see router_merged.rs), which requires a
+    // keypair to exist; the old, deleted SynapseRouter::convert_to_secure_message hardcoded an
+    // unsigned proof and never needed one.
+    router.generate_keypair().await?;
 
     // Create test messages for different types
     let text_message = SimpleMessage::new(
@@ -49,6 +53,8 @@ async fn test_transport_fallback() -> Result<()> {
     // Create a configuration for testing
     let config = Config::for_testing();
     let router = SynapseRouter::new(config, "test_entity".to_string()).await?;
+    // See test_transport_message_routing above for why this is now required.
+    router.generate_keypair().await?;
 
     // Test message that would trigger transport fallback
     let message = SimpleMessage::new(
@@ -69,7 +75,10 @@ async fn test_transport_fallback() -> Result<()> {
 async fn test_concurrent_transport_operations() -> Result<()> {
     // Create a configuration for testing
     let config = Config::for_testing();
-    let router = Arc::new(SynapseRouter::new(config, "test_entity".to_string()).await?);
+    let router = SynapseRouter::new(config, "test_entity".to_string()).await?;
+    // See test_transport_message_routing above for why this is now required.
+    router.generate_keypair().await?;
+    let router = Arc::new(router);
 
     const NUM_OPERATIONS: usize = 10;
     let mut tasks = Vec::new();

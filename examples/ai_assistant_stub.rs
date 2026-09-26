@@ -24,6 +24,9 @@ async fn main() -> Result<()> {
 
     // Initialize the router
     let router = SynapseRouter::new(config, "assistant_stub".to_string()).await?;
+    // A keypair is required before `convert_to_secure_message` (below) can sign anything --
+    // without one, that call fails with `KeyNotFound` instead of demonstrating a real signature.
+    router.generate_keypair().await?;
     info!("✅ AI Assistant stub initialized successfully");
 
     // Simulate receiving a query

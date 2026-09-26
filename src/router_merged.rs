@@ -19,15 +19,20 @@ use crate::{
     email_server::SynapseEmailServer,
     error::Result,
     identity::IdentityRegistry,
-    router::RouterHealth,
     sender_auth::TrustStore,
-    transport::{abstraction::MessageUrgency, router::MultiTransportRouter},
+    transport::{TransportRoute, abstraction::MessageUrgency, router::MultiTransportRouter},
     types::{MessageType, SecureMessage, SecurityLevel, SimpleMessage},
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
+/// Old `SynapseRouter` (`src/router.rs`, deleted by this task) derived `Clone` -- every field was
+/// already `Arc`-wrapped or plain data, so cloning only shares the same underlying state across
+/// clones, never duplicates it. This struct's fields have the same shape, so the same derive is
+/// preserved for consumers (`src/bin/router.rs`, `tests/edge_case_test.rs`) that clone a router to
+/// hand a handle to a spawned task.
+#[derive(Clone)]
 pub struct SynapseRouter {
     /// Cryptographic manager
     crypto: Arc<RwLock<CryptoManager>>,
@@ -116,15 +121,51 @@ impl SynapseRouter {
         Ok(())
     }
 
+    /// Stop the router gracefully. Old `SynapseRouter::stop()`, ported unchanged (a log line only
+    /// -- the old body never stopped the email transport either).
+    pub async fn stop(&self) -> Result<()> {
+        info!("Stopping Synapse router");
+        Ok(())
+    }
+
+    /// Register a peer's public key. Old `SynapseRouter::register_peer_key()`, ported unchanged.
+    pub async fn register_peer_key(&self, global_id: &str, public_key_pem: &str) -> Result<()> {
+        let mut crypto_manager = self.crypto.write().await;
+        crypto_manager.import_public_key(global_id, public_key_pem)
+    }
+
+    /// Generate our own keypair. Old `SynapseRouter::generate_keypair()`, ported unchanged.
+    pub async fn generate_keypair(&self) -> Result<(String, String)> {
+        let mut crypto_manager = self.crypto.write().await;
+        crypto_manager.generate_keypair()
+    }
+
+    /// Register a new entity. Old `SynapseRouter::register_entity()`, ported unchanged.
+    pub async fn register_entity(
+        &self,
+        global_id: &str,
+        name: &str,
+        profile: Option<String>,
+    ) -> Result<()> {
+        let identity = self.identity.write().await;
+        identity.register_entity(global_id, name, profile)
+    }
+
+    /// Add an entity's key. Old `SynapseRouter::add_entity_key()`, ported unchanged.
+    pub async fn add_entity_key(&self, global_id: &str, public_key: &str) -> Result<()> {
+        let mut crypto = self.crypto.write().await;
+        crypto.import_public_key(global_id, public_key)?;
+        Ok(())
+    }
+
     /// Get our global identity
     pub fn get_our_global_id(&self) -> &str {
         &self.our_global_id
     }
 
-    /// Get enhanced router status including email server.
-    pub async fn status(&self) -> EnhancedRouterStatus {
-        // Mirrors old `SynapseRouter::get_health()`'s body.
-        let synapse_status = RouterHealth {
+    /// Get router health status. Old `SynapseRouter::get_health()`, ported unchanged.
+    pub async fn get_health(&self) -> RouterHealth {
+        RouterHealth {
             status: "healthy".to_string(),
             crypto_available: true,
             email_available: true,
@@ -137,7 +178,12 @@ impl SynapseRouter {
                 crypto_manager.known_entities().len()
             },
             our_global_id: self.our_global_id.clone(),
-        };
+        }
+    }
+
+    /// Get enhanced router status including email server.
+    pub async fn status(&self) -> EnhancedRouterStatus {
+        let synapse_status = self.get_health().await;
 
         let mut capabilities = vec!["email".to_string()];
 
@@ -199,11 +245,18 @@ impl SynapseRouter {
         }
     }
 
+    /// `metadata` MUST be supplied here, before signing, and never set on the returned message
+    /// afterward: `sender_auth::canonical_input` (the function whose output gets signed, see
+    /// `src/sender_auth.rs:109-134`) includes `message.metadata` in the signed bytes. Signing first
+    /// and then mutating `metadata` would silently produce a `SecureMessage` whose signature no
+    /// longer covers its own metadata -- i.e. an invalid signature that still verifies against the
+    /// content it was originally computed over. Do not "simplify" this back to sign-then-set.
     async fn sign_new_message(
         &self,
         to_global_id: &str,
         content: &[u8],
         security_level: SecurityLevel,
+        metadata: std::collections::HashMap<String, String>,
     ) -> Result<SecureMessage> {
         Self::reject_unsupported_security_level(security_level.clone())?;
         let mut message = SecureMessage::new(
@@ -212,9 +265,28 @@ impl SynapseRouter {
             content.to_vec(),
             security_level,
         );
+        message.metadata = metadata;
         let crypto = self.crypto.read().await;
         crypto.sign_secure_message(&mut message)?;
         Ok(message)
+    }
+
+    /// Signs and returns a `SecureMessage` built from `simple_msg`, without sending it anywhere.
+    /// Old `SynapseRouter::convert_to_secure_message` (`src/router.rs`, deleted by this task)
+    /// hardcoded `SenderProof::unsigned()` -- the same defect class as board item 65. This version
+    /// routes through the one shared `sign_new_message` helper, so the returned message is always
+    /// genuinely signed.
+    pub async fn convert_to_secure_message(
+        &self,
+        simple_msg: &SimpleMessage,
+    ) -> Result<SecureMessage> {
+        self.sign_new_message(
+            &simple_msg.to,
+            simple_msg.content.as_bytes(),
+            SecurityLevel::Authenticated,
+            simple_msg.metadata.clone(),
+        )
+        .await
     }
 
     /// Constructs this router's `EmailTransportImpl` on first use, via the same
@@ -258,6 +330,7 @@ impl SynapseRouter {
                 &destination_global_id,
                 simple_msg.content.as_bytes(),
                 SecurityLevel::Authenticated,
+                Default::default(),
             )
             .await?;
         let transport = self.ensure_email_transport().await?;
@@ -303,7 +376,12 @@ impl SynapseRouter {
             )
         {
             let secure_msg = self
-                .sign_new_message(to_entity, content.as_bytes(), security_level)
+                .sign_new_message(
+                    to_entity,
+                    content.as_bytes(),
+                    security_level,
+                    Default::default(),
+                )
                 .await?;
             match mt_router
                 .send_message(to_entity, &secure_msg, urgency)
@@ -427,6 +505,165 @@ impl SynapseRouter {
         }
         Ok(delivered)
     }
+
+    /// Test connection to an entity. Old `EnhancedSynapseRouter::test_connection()`, ported
+    /// unchanged.
+    pub async fn test_connection(&self, target: &str) -> ConnectionCapabilities {
+        let mut capabilities = ConnectionCapabilities {
+            email: true, // Email is always available via Synapse
+            direct_tcp: false,
+            direct_udp: false,
+            mdns_local: false,
+            nat_traversal: false,
+            estimated_latency_ms: 60_000, // Default to 1-minute email latency
+        };
+
+        if let Some(ref mt_router) = self.multi_transport {
+            // Test direct connections
+            capabilities.direct_tcp = mt_router.can_connect_directly(target).await;
+
+            // Test local discovery
+            if mt_router.discover_local_peer(target).await.is_ok() {
+                capabilities.mdns_local = true;
+                capabilities.estimated_latency_ms = 50; // Local network latency
+            }
+
+            // Test NAT traversal
+            if mt_router.establish_nat_traversal(target).await.is_ok() {
+                capabilities.nat_traversal = true;
+                capabilities.estimated_latency_ms = capabilities.estimated_latency_ms.min(200);
+            }
+
+            // If we can connect directly, estimate much lower latency
+            if capabilities.direct_tcp || capabilities.direct_udp {
+                capabilities.estimated_latency_ms = capabilities.estimated_latency_ms.min(100);
+            }
+        }
+
+        capabilities
+    }
+
+    /// Benchmark transport performance to a target. Old `EnhancedSynapseRouter::benchmark_transport()`,
+    /// ported with one change: the old body built its probe `SecureMessage` with a hardcoded
+    /// `SenderProof::unsigned()` -- the same defect class as board item 65 (see
+    /// `sign_new_message`'s doc comment). This version routes the probe through the shared
+    /// `sign_new_message` helper instead, so no path in this router still constructs an unsigned
+    /// message. If signing fails (for example, no keypair has been generated yet), this returns
+    /// the default email-only benchmarks rather than probing further transports.
+    pub async fn benchmark_transport(&self, target: &str) -> TransportBenchmarks {
+        let mut benchmarks = TransportBenchmarks {
+            email_latency_ms: 60_000,
+            tcp_latency_ms: None,
+            udp_latency_ms: None,
+            mdns_latency_ms: None,
+            nat_traversal_latency_ms: None,
+        };
+
+        let Some(ref mt_router) = self.multi_transport else {
+            return benchmarks;
+        };
+
+        let test_message = match self
+            .sign_new_message(
+                target,
+                b"benchmark test",
+                SecurityLevel::Public,
+                Default::default(),
+            )
+            .await
+        {
+            Ok(message) => message,
+            Err(e) => {
+                tracing::warn!("benchmark_transport: could not sign probe message: {e}");
+                return benchmarks;
+            }
+        };
+
+        // Test different transport routes
+        let test_routes = vec![
+            TransportRoute::DirectTcp {
+                address: target.to_string(),
+                port: 8080,
+                latency_ms: 0,
+                established_at: std::time::Instant::now(),
+            },
+            TransportRoute::DirectUdp {
+                address: target.to_string(),
+                port: 8080,
+                latency_ms: 0,
+                established_at: std::time::Instant::now(),
+            },
+            TransportRoute::LocalMdns {
+                service_name: target.to_string(),
+                address: target.to_string(),
+                port: 5353,
+                latency_ms: 0,
+                discovered_at: std::time::Instant::now(),
+            },
+        ];
+
+        for route in test_routes {
+            let start = std::time::Instant::now();
+            match mt_router
+                .send_with_fallback_priority(target, &test_message, std::slice::from_ref(&route))
+                .await
+            {
+                Ok(_) => {
+                    let latency = start.elapsed().as_millis() as u32;
+                    match route {
+                        TransportRoute::DirectTcp { .. } => {
+                            benchmarks.tcp_latency_ms = Some(latency)
+                        }
+                        TransportRoute::DirectUdp { .. } => {
+                            benchmarks.udp_latency_ms = Some(latency)
+                        }
+                        TransportRoute::LocalMdns { .. } => {
+                            benchmarks.mdns_latency_ms = Some(latency)
+                        }
+                        _ => {}
+                    }
+                }
+                Err(_) => {
+                    // Transport not available or failed
+                }
+            }
+        }
+
+        benchmarks
+    }
+}
+
+/// Router health information. Old `router::RouterHealth`, ported unchanged.
+#[derive(Debug, Clone)]
+pub struct RouterHealth {
+    pub status: String,
+    pub crypto_available: bool,
+    pub email_available: bool,
+    pub known_peers: usize,
+    pub known_keys: usize,
+    pub our_global_id: String,
+}
+
+/// Connection capabilities for a target. Old `router_enhanced::ConnectionCapabilities`, ported
+/// unchanged.
+#[derive(Debug, Clone)]
+pub struct ConnectionCapabilities {
+    pub email: bool,
+    pub direct_tcp: bool,
+    pub direct_udp: bool,
+    pub mdns_local: bool,
+    pub nat_traversal: bool,
+    pub estimated_latency_ms: u32,
+}
+
+/// Transport performance benchmarks. Old `router_enhanced::TransportBenchmarks`, ported unchanged.
+#[derive(Debug, Clone)]
+pub struct TransportBenchmarks {
+    pub email_latency_ms: u32,
+    pub tcp_latency_ms: Option<u32>,
+    pub udp_latency_ms: Option<u32>,
+    pub mdns_latency_ms: Option<u32>,
+    pub nat_traversal_latency_ms: Option<u32>,
 }
 
 /// Enhanced router status
@@ -487,7 +724,12 @@ mod tests {
         // asserting on send_message's overall Ok/Err, since a network failure and a signing
         // failure would otherwise look the same from outside.
         let signed = router
-            .sign_new_message("bob@synapse.local", b"hello", SecurityLevel::Authenticated)
+            .sign_new_message(
+                "bob@synapse.local",
+                b"hello",
+                SecurityLevel::Authenticated,
+                Default::default(),
+            )
             .await
             .expect("sign");
         assert!(
@@ -686,7 +928,12 @@ mod tests {
 
         // send_message (Task 2) already provably signs -- assert it again here for completeness.
         let via_send_message = router
-            .sign_new_message("bob@synapse.local", b"one", SecurityLevel::Authenticated)
+            .sign_new_message(
+                "bob@synapse.local",
+                b"one",
+                SecurityLevel::Authenticated,
+                Default::default(),
+            )
             .await
             .expect("sign");
         assert!(!matches!(
@@ -775,7 +1022,12 @@ mod tests {
             .expect("keypair");
 
         let private_result = router
-            .sign_new_message("bob@synapse.local", b"secret", SecurityLevel::Private)
+            .sign_new_message(
+                "bob@synapse.local",
+                b"secret",
+                SecurityLevel::Private,
+                Default::default(),
+            )
             .await;
         assert!(
             matches!(
@@ -788,7 +1040,12 @@ mod tests {
         );
 
         let secure_result = router
-            .sign_new_message("bob@synapse.local", b"secret", SecurityLevel::Secure)
+            .sign_new_message(
+                "bob@synapse.local",
+                b"secret",
+                SecurityLevel::Secure,
+                Default::default(),
+            )
             .await;
         assert!(
             matches!(
@@ -803,7 +1060,12 @@ mod tests {
         // Public and Authenticated must still be honoured -- this guard must not become a router
         // that refuses everything.
         let public_ok = router
-            .sign_new_message("bob@synapse.local", b"hello", SecurityLevel::Public)
+            .sign_new_message(
+                "bob@synapse.local",
+                b"hello",
+                SecurityLevel::Public,
+                Default::default(),
+            )
             .await;
         assert!(
             public_ok.is_ok(),
@@ -811,7 +1073,12 @@ mod tests {
         );
 
         let auth_ok = router
-            .sign_new_message("bob@synapse.local", b"hello", SecurityLevel::Authenticated)
+            .sign_new_message(
+                "bob@synapse.local",
+                b"hello",
+                SecurityLevel::Authenticated,
+                Default::default(),
+            )
             .await;
         assert!(
             auth_ok.is_ok(),

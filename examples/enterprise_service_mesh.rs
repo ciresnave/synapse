@@ -41,6 +41,16 @@ async fn main() -> Result<()> {
 
         match SynapseRouter::new(config, service_name.to_string()).await {
             Ok(router) => {
+                // A keypair is required before `convert_to_secure_message` (below) can sign
+                // anything -- without one, that call fails with `KeyNotFound` instead of
+                // demonstrating a real signature.
+                if let Err(e) = router.generate_keypair().await {
+                    warn!(
+                        "❌ Failed to generate keypair for service '{}': {}",
+                        service_name, e
+                    );
+                    continue;
+                }
                 info!(
                     "✅ Service '{}' ({}) initialized",
                     service_name, service_type

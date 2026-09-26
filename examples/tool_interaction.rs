@@ -25,6 +25,11 @@ async fn main() -> Result<()> {
     let ai_router = SynapseRouter::new(ai_config, "ai_assistant".to_string()).await?;
     let tool_router = SynapseRouter::new(tool_config, "calculator_tool".to_string()).await?;
 
+    // A keypair is required before `convert_to_secure_message` (below) can sign anything --
+    // without one, that call fails with `KeyNotFound` instead of demonstrating a real signature.
+    ai_router.generate_keypair().await?;
+    tool_router.generate_keypair().await?;
+
     info!("✅ AI assistant and calculator tool initialized");
 
     // Simulate tool interaction workflow

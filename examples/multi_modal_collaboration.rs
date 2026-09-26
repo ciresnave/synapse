@@ -43,6 +43,13 @@ async fn main() -> Result<()> {
 
         match SynapseRouter::new(config, name.to_string()).await {
             Ok(router) => {
+                // A keypair is required before `convert_to_secure_message` (below) can sign
+                // anything -- without one, that call fails with `KeyNotFound` instead of
+                // demonstrating a real signature.
+                if let Err(e) = router.generate_keypair().await {
+                    info!("❌ Failed to generate keypair for {}: {}", name, e);
+                    continue;
+                }
                 info!("✅ {} initialized: {}", name, description);
                 entity_routers.push((name, entity_type, description, router));
             }

@@ -64,7 +64,7 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Initialize with your identity
 //!     let config = Config::default();
-//!     let router = EnhancedSynapseRouter::new(config, "MyBot@example.com".to_string()).await?;
+//!     let router = SynapseRouter::new(config, "MyBot@example.com".to_string()).await?;
 //!
 //!     // Register some contacts (or use auto-discovery) - using register_entity
 //!     // router.register_peer("Alice", "alice@ai-lab.example.com").await?;
@@ -100,7 +100,7 @@
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let config = Config::default();
-//! # let router = EnhancedSynapseRouter::new(config, "test@example.com".to_string()).await?;
+//! # let router = SynapseRouter::new(config, "test@example.com".to_string()).await?;
 //! // Real-time collaboration (prefers TCP/UDP) - commented out for doctest
 //! // router.send_message_smart(
 //! //     "ai-partner@example.com",
@@ -130,7 +130,7 @@
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let config = Config::default();
-//! let router = EnhancedSynapseRouter::new(config, "bot@mydomain.com".to_string()).await?;
+//! let router = SynapseRouter::new(config, "bot@mydomain.com".to_string()).await?;
 //!
 //! if router.is_running_email_server() {
 //!     // You can receive emails directly at bot@mydomain.com
@@ -153,7 +153,7 @@
 //! - **🔑 Automatic Key Management**: Keys generated and distributed automatically
 //! ## 📚 Module Overview
 //!
-//! - [`router_enhanced`]: Main interface - start here for most use cases
+//! - [`router_merged`]: Main interface (`SynapseRouter`) - start here for most use cases
 //! - [`identity`]: Name resolution and identity management
 //! - [`transport`]: Multi-transport layer and intelligent routing
 //! - [`email_server`]: SMTP/IMAP server implementation
@@ -208,8 +208,6 @@ pub mod mcp_server;
 pub mod monitoring;
 pub mod network_scope;
 pub mod replay;
-pub mod router;
-pub mod router_enhanced;
 pub mod router_merged;
 pub mod sealing;
 pub mod sender_auth;

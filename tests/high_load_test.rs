@@ -11,7 +11,12 @@ use tokio::sync::Barrier;
 async fn test_high_load_routing() -> Result<()> {
     // Create a configuration for testing
     let config = Config::for_testing();
-    let router = Arc::new(SynapseRouter::new(config, "test_entity".to_string()).await?);
+    let router = SynapseRouter::new(config, "test_entity".to_string()).await?;
+    // convert_to_secure_message now genuinely signs (see router_merged.rs), which requires a
+    // keypair to exist; the old, deleted SynapseRouter::convert_to_secure_message hardcoded an
+    // unsigned proof and never needed one.
+    router.generate_keypair().await?;
+    let router = Arc::new(router);
 
     // Number of concurrent routers and operations
     const NUM_ROUTERS: usize = 50;
@@ -87,7 +92,10 @@ async fn test_high_load_routing() -> Result<()> {
 async fn test_concurrent_message_conversion() -> Result<()> {
     // Create a configuration for testing
     let config = Config::for_testing();
-    let router = Arc::new(SynapseRouter::new(config, "test_entity".to_string()).await?);
+    let router = SynapseRouter::new(config, "test_entity".to_string()).await?;
+    // See test_high_load_routing above for why this is now required.
+    router.generate_keypair().await?;
+    let router = Arc::new(router);
 
     // Number of concurrent operations
     const NUM_OPERATIONS: usize = 100;

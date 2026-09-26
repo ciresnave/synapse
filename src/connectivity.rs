@@ -8,7 +8,7 @@ use crate::synapse::blockchain::serialization::UuidWrapper;
 use crate::{
     config::Config,
     error::Result,
-    router::SynapseRouter,
+    router_merged::SynapseRouter,
     types::{MessageType, SecurityLevel, SimpleMessage},
 };
 use std::time::Duration;

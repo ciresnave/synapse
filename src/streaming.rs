@@ -13,7 +13,7 @@ pub struct StreamSession {
     pub stream_id: String,
     pub chunk_counter: u64,
 }
-use crate::router::SynapseRouter;
+use crate::router_merged::SynapseRouter;
 use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 use crate::types::{MessageType, SimpleMessage, StreamChunk};
 use base64::Engine;
