@@ -150,8 +150,10 @@
 //! - **🔒 Content Confidentiality**: Not implemented -- `SecurityLevel::Private`/`Secure` are
 //!   refused (see `SynapseError::UnsupportedSecurityLevel`); messages are signed, not encrypted
 //! - **✍️ Digital Signatures**: Verify sender authenticity
-//! - **🛡️ TLS Transport**: Encrypted connections for real-time transports
-//! - **🔑 Automatic Key Management**: Keys generated and distributed automatically
+//! - **🛡️ TLS Transport**: Encrypted connections on transports that support it (QUIC, HTTPS);
+//!   TCP, UDP and WebSocket transports in this build are unencrypted
+//! - **🔑 Explicit Key Management**: Keys must be generated via `generate_keypair()`; there is no
+//!   automatic key distribution
 //! ## 📚 Module Overview
 //!
 //! - [`router_merged`]: Main interface (`SynapseRouter`) - start here for most use cases

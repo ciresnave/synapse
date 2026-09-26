@@ -88,8 +88,11 @@ fn fabricated_security_claims_do_not_reappear() {
             continue;
         }
         if let Ok(text) = fs::read_to_string(f) {
+            // Case-insensitive: a claim reworded with different capitalization (e.g. mid-sentence
+            // vs. sentence-start) is the same false claim and must still be caught.
+            let text_lower = text.to_lowercase();
             for (claim, reason) in FORBIDDEN_CLAIMS {
-                if text.contains(claim) {
+                if text_lower.contains(&claim.to_lowercase()) {
                     let rel = f.strip_prefix(&root).unwrap_or(f).display().to_string();
                     violations.push(format!("{rel}: {claim:?} ({reason})"));
                 }

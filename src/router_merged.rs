@@ -224,12 +224,6 @@ impl SynapseRouter {
         }
     }
 
-    /// The ONE place a `SecureMessage` is built and signed for sending. Every send path in this
-    /// router -- `send_message`, `send_message_smart`'s fast branch (Task 3),
-    /// `send_message_with_transport` -- calls this, so no path can reach a transport with an
-    /// unsigned message by forgetting to call `sign_secure_message` itself. This is the
-    /// structural fix for board item 65 (the old `EnhancedSynapseRouter::create_secure_message`
-    /// hardcoded `SenderProof::unsigned()` and never signed at all).
     /// Refuse `SecurityLevel`s this router cannot honour. Neither send nor receive in this router
     /// seals/unseals (`src/sealing.rs` is never called here), so `Private` ("end-to-end
     /// encrypted") and `Secure` ("both encrypted and signed") cannot be delivered as their name
@@ -245,6 +239,13 @@ impl SynapseRouter {
         }
     }
 
+    /// The ONE place a `SecureMessage` is built and signed for sending. Every send path in this
+    /// router -- `send_message`, `send_message_smart`'s fast branch (Task 3),
+    /// `send_message_with_transport` -- calls this, so no path can reach a transport with an
+    /// unsigned message by forgetting to call `sign_secure_message` itself. This is the
+    /// structural fix for board item 65 (the old `EnhancedSynapseRouter::create_secure_message`
+    /// hardcoded `SenderProof::unsigned()` and never signed at all).
+    ///
     /// `metadata` MUST be supplied here, before signing, and never set on the returned message
     /// afterward: `sender_auth::canonical_input` (the function whose output gets signed, see
     /// `src/sender_auth.rs:109-134`) includes `message.metadata` in the signed bytes. Signing first
@@ -330,7 +331,7 @@ impl SynapseRouter {
                 &destination_global_id,
                 simple_msg.content.as_bytes(),
                 SecurityLevel::Authenticated,
-                Default::default(),
+                simple_msg.metadata.clone(),
             )
             .await?;
         let transport = self.ensure_email_transport().await?;
