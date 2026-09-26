@@ -14,6 +14,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing Real NAT Traversal Implementation");
     println!("=========================================");
 
+    // Every message this demo sends must be genuinely signed -- this crate's policy is that no
+    // message may ever be sent unsigned. Generate a real keypair up front.
+    let mut crypto = synapse::CryptoManager::new();
+    crypto.generate_keypair()?;
+
     // Create a real NAT traversal transport
     let mut transport = NatTraversalTransport::new(12345).await?;
 
@@ -112,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test message creation and parsing
     println!("\n📨 Testing message handling...");
-    let test_message = SecureMessage {
+    let mut test_message = SecureMessage {
         message_id: UuidWrapper::new(Uuid::new_v4()),
         to_global_id: "test_recipient".to_string(),
         from_global_id: "test_sender".to_string(),
@@ -128,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         protocol_version: synapse::types::PROTOCOL_VERSION,
     };
+    crypto.sign_secure_message(&mut test_message)?;
 
     // Test sending to localhost (this should work)
     let localhost_target = TransportTarget::new("localhost_test".to_string())
