@@ -51,8 +51,7 @@ async fn test_cryptographic_key_generation() {
     let rsa_result = crypto
         .generate_keypair("test_rsa_key", KeyAlgorithm::RSA)
         .await;
-    if rsa_result.is_ok() {
-        let rsa_keypair = rsa_result.unwrap();
+    if let Ok(rsa_keypair) = rsa_result {
         assert_ne!(
             keypair.public_key, rsa_keypair.public_key,
             "Different algorithms should produce different keys"
@@ -105,11 +104,8 @@ async fn test_digital_signature_security() {
     let verify_tampered = crypto
         .verify(&keypair.public_key, tampered_data, &signature)
         .await;
-    if verify_tampered.is_ok() {
-        assert!(
-            !verify_tampered.unwrap(),
-            "Tampered data signature should verify as false"
-        );
+    if let Ok(verified) = verify_tampered {
+        assert!(!verified, "Tampered data signature should verify as false");
     }
 
     // Test signature verification fails with wrong signature
@@ -117,11 +113,8 @@ async fn test_digital_signature_security() {
     let verify_wrong = crypto
         .verify(&keypair.public_key, test_data, &wrong_signature)
         .await;
-    if verify_wrong.is_ok() {
-        assert!(
-            !verify_wrong.unwrap(),
-            "Wrong signature should verify as false"
-        );
+    if let Ok(verified) = verify_wrong {
+        assert!(!verified, "Wrong signature should verify as false");
     }
 }
 
@@ -395,8 +388,7 @@ async fn test_cryptographic_algorithm_security() {
 
     // Test RSA (ensure sufficient key length)
     let rsa_key = crypto.generate_keypair("rsa_test", KeyAlgorithm::RSA).await;
-    if rsa_key.is_ok() {
-        let keypair = rsa_key.unwrap();
+    if let Ok(keypair) = rsa_key {
         // RSA keys should be substantial length (2048+ bits minimum)
         assert!(
             keypair.private_key.len() >= 256,
@@ -412,8 +404,7 @@ async fn test_cryptographic_algorithm_security() {
     let ecdsa_key = crypto
         .generate_keypair("ecdsa_test", KeyAlgorithm::ECDSA)
         .await;
-    if ecdsa_key.is_ok() {
-        let keypair = ecdsa_key.unwrap();
+    if let Ok(keypair) = ecdsa_key {
         assert!(
             !keypair.public_key.is_empty(),
             "ECDSA keys should be generated"
