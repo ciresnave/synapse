@@ -47,16 +47,14 @@ async fn test_cryptographic_key_generation() {
         "Public and private keys should be different"
     );
 
-    // Test different algorithms produce different keys
-    let rsa_result = crypto
-        .generate_keypair("test_rsa_key", KeyAlgorithm::RSA)
-        .await;
-    if let Ok(rsa_keypair) = rsa_result {
-        assert_ne!(
-            keypair.public_key, rsa_keypair.public_key,
-            "Different algorithms should produce different keys"
-        );
-    }
+    // RSA is not implemented, so it must be refused rather than answered.
+    assert!(
+        crypto
+            .generate_keypair("test_rsa_key", KeyAlgorithm::RSA)
+            .await
+            .is_err(),
+        "RSA key generation must be refused"
+    );
 }
 
 /// Test digital signature creation and verification
@@ -104,18 +102,20 @@ async fn test_digital_signature_security() {
     let verify_tampered = crypto
         .verify(&keypair.public_key, tampered_data, &signature)
         .await;
-    if let Ok(verified) = verify_tampered {
-        assert!(!verified, "Tampered data signature should verify as false");
-    }
+    assert!(
+        !verify_tampered.expect("verification of a well-formed signature must not error"),
+        "Tampered data signature should verify as false"
+    );
 
     // Test signature verification fails with wrong signature
     let wrong_signature = vec![0u8; signature.len()]; // All zeros
     let verify_wrong = crypto
         .verify(&keypair.public_key, test_data, &wrong_signature)
         .await;
-    if let Ok(verified) = verify_wrong {
-        assert!(!verified, "Wrong signature should verify as false");
-    }
+    assert!(
+        !verify_wrong.expect("verification of a well-formed signature must not error"),
+        "Wrong signature should verify as false"
+    );
 }
 
 /// Test password key derivation security (PBKDF2 with proper salting)
@@ -255,67 +255,10 @@ async fn test_blockchain_block_signing() {
     // in tests/blockchain_verification_is_still_unbuilt.rs.
 }
 
-/// Test encryption and decryption security
-#[tokio::test]
-async fn test_encryption_decryption_security() {
-    let crypto = SynapseKeyManager::new().await.unwrap();
-    let mut crypto = crypto;
-    let keypair = crypto
-        .generate_keypair("encryption_key", KeyAlgorithm::Ed25519)
-        .await
-        .unwrap();
-    let sensitive_data = b"Top secret information that must be protected";
-
-    // Test encryption
-    let encrypted_result = crypto
-        .encrypt_with_public_key(&keypair.public_key, sensitive_data)
-        .await;
-    assert!(
-        encrypted_result.is_ok(),
-        "Encryption should succeed: {:?}",
-        encrypted_result.err()
-    );
-
-    let encrypted_data = encrypted_result.unwrap();
-    assert!(
-        !encrypted_data.is_empty(),
-        "Encrypted data should not be empty"
-    );
-    assert_ne!(
-        encrypted_data,
-        sensitive_data.to_vec(),
-        "Encrypted data should not equal plaintext"
-    );
-
-    // Test decryption
-    let decrypted_result = crypto
-        .decrypt_with_private_key("encryption_key", &encrypted_data)
-        .await;
-    assert!(
-        decrypted_result.is_ok(),
-        "Decryption should succeed: {:?}",
-        decrypted_result.err()
-    );
-
-    let decrypted_data = decrypted_result.unwrap();
-    assert_eq!(
-        decrypted_data, sensitive_data,
-        "Decrypted data should match original"
-    );
-
-    // Test decryption fails with wrong key
-    let _wrong_keypair = crypto
-        .generate_keypair("wrong_key", KeyAlgorithm::RSA)
-        .await
-        .unwrap();
-    let wrong_decrypt = crypto
-        .decrypt_with_private_key("wrong_key", &encrypted_data)
-        .await;
-    assert!(
-        wrong_decrypt.is_err(),
-        "Decryption with wrong key should fail"
-    );
-}
+// `encrypt_with_public_key` / `decrypt_with_private_key` were removed: they
+// derived the AES key from the PUBLIC key, so holding the public key was enough
+// to decrypt. Public-key encryption is `synapse::sealing` (HPKE), tested in
+// tests/sealing.rs.
 
 /// Test against common security vulnerabilities (basic input validation)
 #[tokio::test]
@@ -336,27 +279,15 @@ async fn test_input_validation_security() {
     let large_sign_result = crypto
         .sign("large_test_key", very_long_input.as_bytes())
         .await;
-    // Should either succeed or fail gracefully, not crash
-    match large_sign_result {
-        Ok(signature) => {
-            assert!(
-                !signature.is_empty(),
-                "Large data signature should be valid"
-            );
-
-            // Test verification of large data
-            let verify_result = crypto
-                .verify(&keypair.public_key, very_long_input.as_bytes(), &signature)
-                .await;
-            assert!(
-                verify_result.unwrap_or(false),
-                "Large data signature should verify correctly"
-            );
-        }
-        Err(_) => {
-            // Graceful failure is acceptable for very large inputs
-        }
-    }
+    // Ed25519 has no message-length limit, so this must succeed.
+    let signature = large_sign_result.expect("Ed25519 signs a message of any length");
+    let verify_result = crypto
+        .verify(&keypair.public_key, very_long_input.as_bytes(), &signature)
+        .await;
+    assert!(
+        verify_result.expect("verification of a well-formed signature must not error"),
+        "Large data signature should verify correctly"
+    );
 
     // Test empty input handling
     let empty_result = crypto.sign("large_test_key", b"").await;
@@ -386,50 +317,43 @@ async fn test_cryptographic_algorithm_security() {
         .await;
     assert!(ed25519_key.is_ok(), "Ed25519 key generation should succeed");
 
-    // Test RSA (ensure sufficient key length)
+    // RSA is not implemented, so it must be refused rather than answered.
     let rsa_key = crypto.generate_keypair("rsa_test", KeyAlgorithm::RSA).await;
-    if let Ok(keypair) = rsa_key {
-        // RSA keys should be substantial length (2048+ bits minimum)
-        assert!(
-            keypair.private_key.len() >= 256,
-            "RSA private key should be substantial size"
-        );
-        assert!(
-            keypair.public_key.len() >= 256,
-            "RSA public key should be substantial size"
-        );
-    }
+    assert!(rsa_key.is_err(), "RSA key generation must be refused");
 
-    // Test ECDSA
-    let ecdsa_key = crypto
+    // ECDSA P-256 is implemented: generation must succeed and round-trip.
+    let keypair = crypto
         .generate_keypair("ecdsa_test", KeyAlgorithm::ECDSA)
-        .await;
-    if let Ok(keypair) = ecdsa_key {
-        assert!(
-            !keypair.public_key.is_empty(),
-            "ECDSA keys should be generated"
-        );
-        assert!(
-            !keypair.private_key.is_empty(),
-            "ECDSA keys should be generated"
-        );
-    }
+        .await
+        .expect("ECDSA key generation should succeed");
+    let data = b"ecdsa round trip";
+    let signature = crypto.sign("ecdsa_test", data).await.unwrap();
+    assert!(
+        crypto
+            .verify(&keypair.public_key, data, &signature)
+            .await
+            .unwrap(),
+        "ECDSA signature should verify under its own key"
+    );
+    assert!(
+        !crypto
+            .verify(&keypair.public_key, b"other data", &signature)
+            .await
+            .unwrap(),
+        "ECDSA signature must not verify over different data"
+    );
 }
 
 /// Integration test: End-to-end security validation
 #[tokio::test]
 async fn test_end_to_end_security_integration() {
-    // Test complete security flow: key generation -> signing -> verification -> encryption
+    // Test complete security flow: key generation -> block signing -> signature verification -> key derivation
 
     // 1. Generate cryptographic keys
     let crypto = SynapseKeyManager::new().await.unwrap();
     let mut crypto = crypto;
     let signing_keypair = crypto
         .generate_keypair("signing_key", KeyAlgorithm::Ed25519)
-        .await
-        .unwrap();
-    let encryption_keypair = crypto
-        .generate_keypair("encryption_key", KeyAlgorithm::Ed25519)
         .await
         .unwrap();
 
@@ -446,28 +370,25 @@ async fn test_end_to_end_security_integration() {
         signature: None,
     };
 
+    let signed_bytes = serde_json::to_vec(&block).unwrap();
     block
-        .sign_block(&signing_keypair.private_key, "secure_validator")
+        .sign_block(&signing_keypair.private_key, "Ed25519")
         .await
         .unwrap();
-    assert!(block.signature.is_some(), "Block should be signed");
-
-    // 3. Test data encryption for sensitive communications
-    let sensitive_message = b"Confidential blockchain transaction data";
-    let encrypted = crypto
-        .encrypt_with_public_key(&encryption_keypair.public_key, sensitive_message)
-        .await
-        .unwrap();
-    let decrypted = crypto
-        .decrypt_with_private_key("encryption_key", &encrypted)
-        .await
-        .unwrap();
-    assert_eq!(
-        decrypted, sensitive_message,
-        "Encryption round-trip should preserve data"
+    let block_signature = block.signature.as_ref().expect("Block should be signed");
+    assert!(
+        crypto
+            .verify(
+                &signing_keypair.public_key,
+                &signed_bytes,
+                &block_signature.data
+            )
+            .await
+            .unwrap(),
+        "Block signature should verify under the validator's key"
     );
 
-    // 4. Test signature verification
+    // 3. Test signature verification
     let test_data = b"Important data requiring authentication";
     let signature = crypto.sign("signing_key", test_data).await.unwrap();
     let verified = crypto
@@ -476,7 +397,7 @@ async fn test_end_to_end_security_integration() {
         .unwrap();
     assert!(verified, "Signature should verify correctly");
 
-    // 5. Test key derivation for password-based security
+    // 4. Test key derivation for password-based security
     let password = "user_secure_password_123!";
     let params = KeyDerivationParams {
         salt: "unique_salt_per_user".to_string(),
@@ -495,8 +416,7 @@ async fn test_end_to_end_security_integration() {
     println!("✅ End-to-end security integration test passed");
     println!("✅ Cryptographic key generation: SECURE");
     println!("✅ Digital signatures: SECURE");
-    println!("✅ Blockchain integrity: SECURE");
-    println!("✅ Data encryption: SECURE");
+    println!("✅ Block signing: signs with the validator's key");
     println!("✅ Key derivation: SECURE");
 }
 

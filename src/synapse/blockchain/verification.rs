@@ -446,21 +446,14 @@ impl VerificationEngine {
         }
     }
 
-    /// Get validator's public key from trust registry or block metadata
-    async fn get_validator_public_key(&self, validator_id: &str) -> Option<Vec<u8>> {
-        // Try to get the public key from the trust registry
-        // In a real implementation, this would query the distributed trust registry
-        // For now, return a placeholder that indicates the key lookup mechanism is in place
-        if !validator_id.is_empty() {
-            // This would be replaced with actual key retrieval logic
-            Some(
-                format!("public_key_for_{}", validator_id)
-                    .as_bytes()
-                    .to_vec(),
-            )
-        } else {
-            None
-        }
+    /// Get a validator's public key.
+    ///
+    /// ⚠️ There is no validator key registry yet, so no key is ever found and every
+    /// signed block fails `verify_consensus_signatures` with "Validator public key
+    /// not found". That is deliberate: a key that no validator holds must not be
+    /// invented here, because verification against an invented key means nothing.
+    async fn get_validator_public_key(&self, _validator_id: &str) -> Option<Vec<u8>> {
+        None
     }
 
     /// Verify validator has sufficient stake
