@@ -1041,6 +1041,56 @@ it delivers.**
 > the trigger condition (a real external provider in the loop) does not exist yet in this slice's own
 > scope.
 
+> **Status, 2026-09-27, sizing pass (not implemented — banked deliberately, see below):**
+>
+> ⚠️ **The decision that must be made before this is built, stated first because it is the thing that
+> makes this bankable rather than a quick fix: WHEN a fetched message gets marked `\Seen` on the
+> server.** Both wrong branches are real:
+> - **Too early** (immediately after `FETCH`, before the message is actually handed to the router):
+>   a failure between fetch and delivery **silently loses the message** — it will never be fetched
+>   again, and nothing else re-delivers it. This is the more dangerous branch.
+> - **Too late, or never**: every future `SEARCH UNSEEN` keeps returning the same messages forever,
+>   and the optimisation this whole change exists for does nothing.
+>
+> No answer is proposed here. Naming the decision, and both failure modes, is the deliverable — it is
+> not a design call to make mechanically while wiring a protocol change, and it should not be made at
+> the end of a long session.
+>
+> **A framing correction to the entry above, checked rather than assumed**: the entry above frames a
+> future fix as needing "a real `CAPABILITY` negotiation." Re-checked against RFC 3501 §6.4.4:
+> **`SEARCH` is a MANDATORY IMAP4rev1 command, not an optional extension a server might lack.** Any
+> RFC-compliant real provider supports `SEARCH UNSEEN` unconditionally — there is nothing to
+> negotiate. The earlier framing was more cautious than the protocol actually requires; correcting it
+> here rather than letting it stand as a phantom requirement for whoever eventually builds this.
+>
+> **Confirmed at no cost**: `async-imap` 0.11 (already the pinned dependency,
+> `Cargo.toml`: `async-imap = "0.11"`) already provides `Session::search`, `Session::store`, and
+> `Session::fetch` — the client-side library needs nothing added.
+>
+> **Sizing, read from the code rather than guessed:**
+> - `SynapseImapServer` (`src/email_server/imap_server.rs`) has **no `\Seen`-flag concept anywhere
+>   today** — `FETCH`'s own `FLAGS` response is hardcoded to always return `FLAGS ()`. Needs: a
+>   per-message Seen bit (new field), a new `SEARCH` match arm (minimally parsing the literal
+>   `"UNSEEN"`), a new `STORE` match arm (minimally parsing `"+FLAGS (\Seen)"`).
+> - **A concrete blocker, not an estimate**: `FETCH`'s sequence-set parser handles only the literal
+>   `"1:*"` or a single bare number — a targeted `FETCH` of the specific sequence numbers a `SEARCH`
+>   would return **does not parse today** and needs a real upgrade (comma-separated lists at minimum).
+> - `poll_imap_inbox` (`src/transport/email_unified.rs`) needs rewriting from one `FETCH "1:*"` call
+>   into three steps: `SEARCH UNSEEN` → format the returned sequence numbers into a targeted `FETCH`
+>   → `STORE +FLAGS (\Seen)` on each successfully-processed message (timing per the decision above).
+>   Whether the existing client-side `imap_seen_ids` in-memory dedup stays as defense-in-depth or is
+>   replaced is part of the same decision.
+> - At least two new integration tests with real assertions (unseen-only delivery; a second poll
+>   after marking confirms nothing re-delivers), not vacuous ones.
+> - Rough total: **~300–400 lines including tests** — comparable in scope to a normal single-task PR
+>   in this repo, not a quick fix, and not free of a genuine design decision.
+>
+> **Why banked rather than built now**: this is an optimisation, not a bug fix — `FETCH "1:*"` is
+> slow but *correct* today, and stays correct until External mode targets a real provider (the
+> trigger already named above). A design decision whose wrong branch silently loses messages is worth
+> making deliberately, with time to reason about it, not mechanically at the tail of an unrelated
+> session. Slow-and-correct is a better place to sit than fast-and-occasionally-lossy.
+
 > **Status, 2026-09-23, the QUIC slice (branch `design/quic-transport`, not yet on `main`):** QUIC
 > is now measured end-to-end too — `quic_carries_a_verified_message_end_to_end` and 12 further tests
 > in `tests/transport_repairs.rs` cover the round trip, connection pooling/reuse, size limits, the
