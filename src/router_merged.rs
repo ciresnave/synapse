@@ -483,15 +483,18 @@ impl SynapseRouter {
     /// Identity-model decision (Task 4 brief, Step 1): this router's receive-side verification uses
     /// [`TrustStore::verify_at`] -- the SAME mechanism `TransportManager::receive_messages` already
     /// uses for every other transport in this crate (TCP, UDP, WebSocket, QUIC, NAT traversal) --
-    /// not `IdentityRegistry::get_public_key`. `IdentityRegistry` (`src/identity.rs`) stores a
-    /// public key as an opaque, undefined-format `String` (`GlobalIdentity::public_key`), performs
-    /// no signature check anywhere in this crate, and `register_entity` -- its own normal
-    /// registration path -- sets that field to `""` by default. There is no existing convention
+    /// not an `IdentityRegistry` accessor. `IdentityRegistry` (`src/identity.rs`) used to expose a
+    /// `get_public_key` accessor over an opaque, undefined-format `String` field
+    /// (`GlobalIdentity::public_key`); it performed no signature check anywhere in this crate, and
+    /// `register_entity` -- its own normal registration path -- set that field to `""` by default.
+    /// Both the accessor and its backing field were removed per board item 69 (`IdentityRegistry`
+    /// narrowed to name resolution; see `src/identity.rs`). There was never an existing convention
     /// for what encoding that string would even be in for an Ed25519 key. Verifying against it
-    /// would mean inventing a brand-new key encoding and a brand-new, hand-rolled signature-check
-    /// routine that duplicates `TrustStore::verify_against_pinned_key`/`canonical_input` without
-    /// their review history or test coverage -- itself a second, divergent verification path, the
-    /// same defect class board item 65 was on the send side (`sign_new_message`'s doc comment).
+    /// would have meant inventing a brand-new key encoding and a brand-new, hand-rolled
+    /// signature-check routine that duplicates `TrustStore::verify_against_pinned_key`/
+    /// `canonical_input` without their review history or test coverage -- itself a second,
+    /// divergent verification path, the same defect class board item 65 was on the send side
+    /// (`sign_new_message`'s doc comment).
     /// `SenderProof`/`canonical_input` (`sender_auth.rs`) are already `TrustStore`'s vocabulary, and
     /// `sign_new_message` (this file) already produces proofs meant to be checked against a
     /// `TrustStore`, so this uses the store that already speaks the signer's language rather than

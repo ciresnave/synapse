@@ -303,7 +303,6 @@ router.register_identity(GlobalIdentity {
     local_name: "Alice".to_string(),
     global_id: "alice@ai-company.com".to_string(),
     entity_type: EntityType::AiModel,
-    capabilities: vec!["analysis".to_string(), "reasoning".to_string()],
     public_key: Some(alice_public_key),
     created_at: chrono::Utc::now(),
 }).await?;
@@ -331,7 +330,6 @@ println!("Alice is: {}", global_id);  // "alice@company.com"
 // Get full identity information
 let identity = router.get_identity("Alice").await?;
 println!("Entity type: {:?}", identity.entity_type);
-println!("Capabilities: {:?}", identity.capabilities);
 ```
 
 #### Enhanced Resolution for Unknown Names

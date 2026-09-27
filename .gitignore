@@ -63,3 +63,7 @@ __pycache__/
 # mlmf (3 of 3 sampled) and it should have been here too -- its absence is why
 # a `git add -A` swept a 539 KB binary onto main in PR #24.
 supertool
+
+# Per-task scratch reports (e.g. board-item work), not part of this crate's
+# source or history.
+/.superpowers/
