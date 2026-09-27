@@ -703,7 +703,8 @@ mod tests {
         let (issuer, subject) = (key(1), key(2));
         let cert = AgentCertificate::sign(unsigned(&issuer, &subject, "agent@host"), &issuer);
         // Changing any one field must break verification: the signing input covers them all.
-        let mutations: Vec<Box<dyn Fn(&mut AgentCertificate)>> = vec![
+        type Mutation = Box<dyn Fn(&mut AgentCertificate)>;
+        let mutations: Vec<Mutation> = vec![
             Box::new(|c| c.version = 2),
             Box::new(|c| c.serial[0] ^= 1),
             Box::new(|c| c.issuer_key_id.push('a')),

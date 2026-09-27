@@ -837,8 +837,8 @@ mod tests {
     #[test]
     fn a_knock_with_an_oversized_claimed_id_is_truncated_and_bounded() {
         let mut s = state(false);
-        let huge_id: String = std::iter::repeat('a').take(10_000).collect();
-        let huge_key: String = std::iter::repeat('b').take(10_000).collect();
+        let huge_id = "a".repeat(10_000);
+        let huge_key = "b".repeat(10_000);
         s.admit(&unsigned(), &huge_id, &huge_key, t(10));
         let knocks = s.knocks();
         assert_eq!(knocks.len(), 1);
