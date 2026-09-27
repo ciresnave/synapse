@@ -125,15 +125,11 @@
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registry = IdentityRegistry::new();
 //!
-//! # let alice_public_key = "mock_key".to_string();
 //! // Register with full details
 //! registry.register_identity(GlobalIdentity {
 //!     local_name: "Alice".to_string(),
 //!     global_id: "alice@ai-lab.example.com".to_string(),
 //!     entity_type: EntityType::AiModel,
-//!     capabilities: vec!["real-time".to_string(), "file-transfer".to_string()],
-//!     public_key: alice_public_key,
-//!     trust_level: 0,
 //!     last_seen: DateTimeWrapper::new(Utc::now()),
 //!     routing_preferences: HashMap::new(),
 //! })?;
@@ -423,9 +419,6 @@ pub struct ContactEntry {
     pub global_id: String,
     pub local_name: String,
     pub entity_type: Option<EntityType>,
-    pub public_key: Option<String>,
-    pub trust_level: Option<u8>,
-    pub capabilities: Option<Vec<String>>,
 }
 
 /// Registry for managing entity identities
@@ -500,41 +493,6 @@ impl IdentityRegistry {
         Ok(())
     }
 
-    /// Get public key for a global identity
-    pub fn get_public_key(&self, global_id: &str) -> Option<String> {
-        self.identities
-            .get(global_id)
-            .map(|entry| entry.public_key.clone())
-    }
-
-    /// Update trust level for an identity
-    pub fn update_trust_level(&self, global_id: &str, trust_delta: i32) -> Result<()> {
-        self.identities
-            .entry(global_id.to_string())
-            .and_modify(|identity| {
-                let current_trust = identity.trust_level as i32;
-                let new_trust = (current_trust + trust_delta).clamp(0, 100) as u8;
-                identity.trust_level = new_trust;
-
-                tracing::debug!(
-                    "Updated trust level for {} from {} to {}",
-                    global_id,
-                    current_trust,
-                    new_trust
-                );
-            })
-            .or_insert_with(|| {
-                // This should not happen in normal operation
-                tracing::warn!(
-                    "Attempted to update trust for non-existent identity: {}",
-                    global_id
-                );
-                GlobalIdentity::default()
-            });
-
-        Ok(())
-    }
-
     /// Update last seen timestamp for an identity
     pub fn update_last_seen(&self, global_id: &str) -> Result<()> {
         self.identities
@@ -572,15 +530,6 @@ impl IdentityRegistry {
         self.identities
             .iter()
             .filter(|entry| entry.value().entity_type == entity_type)
-            .map(|entry| entry.value().clone())
-            .collect()
-    }
-
-    /// List all identities with a specific capability
-    pub fn list_by_capability(&self, capability: &str) -> Vec<GlobalIdentity> {
-        self.identities
-            .iter()
-            .filter(|entry| entry.value().has_capability(capability))
             .map(|entry| entry.value().clone())
             .collect()
     }
@@ -659,9 +608,6 @@ impl IdentityRegistry {
                 .clone()
                 .unwrap_or_else(|| global_id.to_string()),
             entity_type: EntityType::AiModel, // Default to AiModel
-            public_key: "".to_string(),       // Empty public key initially
-            trust_level: 0,
-            capabilities: Vec::new(),
             last_seen: DateTimeWrapper::new(chrono::Utc::now()),
             routing_preferences: std::collections::HashMap::new(),
         };
@@ -770,9 +716,6 @@ impl IdentityRegistry {
                 global_id: contact.global_id,
                 local_name: contact.local_name,
                 entity_type: contact.entity_type.unwrap_or(EntityType::Human),
-                public_key: contact.public_key.unwrap_or_default(),
-                trust_level: contact.trust_level.unwrap_or(0),
-                capabilities: contact.capabilities.unwrap_or_default(),
                 last_seen: DateTimeWrapper::new(chrono::Utc::now()),
                 routing_preferences: std::collections::HashMap::new(),
             };
@@ -817,9 +760,6 @@ impl IdentityRegistry {
             global_id: "alice@example.com".to_string(),
             local_name: "Alice".to_string(),
             entity_type: EntityType::Human,
-            public_key: "".to_string(),
-            trust_level: 50,
-            capabilities: vec!["email".to_string()],
             last_seen: DateTimeWrapper::new(chrono::Utc::now()),
             routing_preferences: std::collections::HashMap::new(),
         }])
@@ -835,9 +775,6 @@ impl IdentityRegistry {
             global_id: format!("bob@{}", peer_id.split('@').nth(1).unwrap_or("peer.com")),
             local_name: "Bob".to_string(),
             entity_type: EntityType::Human,
-            public_key: "".to_string(),
-            trust_level: 25,
-            capabilities: vec!["peer_discovery".to_string()],
             last_seen: DateTimeWrapper::new(chrono::Utc::now()),
             routing_preferences: std::collections::HashMap::new(),
         }])
@@ -876,46 +813,33 @@ impl IdentityRegistry {
     pub fn create_ai_model(
         local_name: impl Into<String>,
         domain: impl Into<String>,
-        public_key: impl Into<String>,
-        capabilities: Vec<String>,
     ) -> GlobalIdentity {
         let local_name = local_name.into();
         let domain = domain.into();
         let global_id = format!("{}@ai.{}", local_name.to_lowercase(), domain);
 
-        let mut identity =
-            GlobalIdentity::new(local_name, global_id, EntityType::AiModel, public_key);
-        identity.capabilities = capabilities;
-        identity
+        GlobalIdentity::new(local_name, global_id, EntityType::AiModel)
     }
 
     /// Create a new human identity
     pub fn create_human(
         local_name: impl Into<String>,
         domain: impl Into<String>,
-        public_key: impl Into<String>,
     ) -> GlobalIdentity {
         let local_name = local_name.into();
         let domain = domain.into();
         let global_id = format!("{}@humans.{}", local_name.to_lowercase(), domain);
 
-        GlobalIdentity::new(local_name, global_id, EntityType::Human, public_key)
+        GlobalIdentity::new(local_name, global_id, EntityType::Human)
     }
 
     /// Create a new tool identity
-    pub fn create_tool(
-        local_name: impl Into<String>,
-        domain: impl Into<String>,
-        public_key: impl Into<String>,
-        capabilities: Vec<String>,
-    ) -> GlobalIdentity {
+    pub fn create_tool(local_name: impl Into<String>, domain: impl Into<String>) -> GlobalIdentity {
         let local_name = local_name.into();
         let domain = domain.into();
         let global_id = format!("{}@tools.{}", local_name.to_lowercase(), domain);
 
-        let mut identity = GlobalIdentity::new(local_name, global_id, EntityType::Tool, public_key);
-        identity.capabilities = capabilities;
-        identity
+        GlobalIdentity::new(local_name, global_id, EntityType::Tool)
     }
 
     /// Generate a random global ID for testing
@@ -946,12 +870,7 @@ mod tests {
     fn test_identity_registration() {
         let registry = IdentityRegistry::new();
 
-        let identity = IdentityRegistry::create_ai_model(
-            "Claude",
-            "anthropic.ai",
-            "test-public-key",
-            vec!["conversation".to_string(), "analysis".to_string()],
-        );
+        let identity = IdentityRegistry::create_ai_model("Claude", "anthropic.ai");
 
         assert!(registry.register_identity(identity).is_ok());
         assert!(registry.has_local_name("Claude"));
@@ -962,79 +881,10 @@ mod tests {
     fn test_duplicate_registration() {
         let registry = IdentityRegistry::new();
 
-        let identity1 = IdentityRegistry::create_human("Eric", "company.com", "key1");
-        let identity2 = IdentityRegistry::create_human("Eric", "company.com", "key2");
+        let identity1 = IdentityRegistry::create_human("Eric", "company.com");
+        let identity2 = IdentityRegistry::create_human("Eric", "company.com");
 
         assert!(registry.register_identity(identity1).is_ok());
         assert!(registry.register_identity(identity2).is_err());
-    }
-
-    #[test]
-    fn test_trust_level_update() {
-        let registry = IdentityRegistry::new();
-
-        let identity = IdentityRegistry::create_tool(
-            "FileSystem",
-            "tools.local",
-            "fs-key",
-            vec!["file_ops".to_string()],
-        );
-        let global_id = identity.global_id.clone();
-
-        registry.register_identity(identity).unwrap();
-
-        // Increase trust
-        registry.update_trust_level(&global_id, 20).unwrap();
-        assert_eq!(registry.get_identity(&global_id).unwrap().trust_level, 70);
-
-        // Decrease trust
-        registry.update_trust_level(&global_id, -30).unwrap();
-        assert_eq!(registry.get_identity(&global_id).unwrap().trust_level, 40);
-
-        // Test bounds
-        registry.update_trust_level(&global_id, -100).unwrap();
-        assert_eq!(registry.get_identity(&global_id).unwrap().trust_level, 0);
-
-        registry.update_trust_level(&global_id, 200).unwrap();
-        assert_eq!(registry.get_identity(&global_id).unwrap().trust_level, 100);
-    }
-
-    #[test]
-    fn test_capability_filtering() {
-        let registry = IdentityRegistry::new();
-
-        let ai1 = IdentityRegistry::create_ai_model(
-            "Claude",
-            "anthropic.ai",
-            "key1",
-            vec!["conversation".to_string(), "analysis".to_string()],
-        );
-
-        let ai2 = IdentityRegistry::create_ai_model(
-            "GPT",
-            "openai.com",
-            "key2",
-            vec!["conversation".to_string(), "generation".to_string()],
-        );
-
-        let tool = IdentityRegistry::create_tool(
-            "FileSystem",
-            "tools.local",
-            "key3",
-            vec!["file_ops".to_string()],
-        );
-
-        registry.register_identity(ai1).unwrap();
-        registry.register_identity(ai2).unwrap();
-        registry.register_identity(tool).unwrap();
-
-        let conversation_entities = registry.list_by_capability("conversation");
-        assert_eq!(conversation_entities.len(), 2);
-
-        let analysis_entities = registry.list_by_capability("analysis");
-        assert_eq!(analysis_entities.len(), 1);
-
-        let ai_entities = registry.list_by_type(EntityType::AiModel);
-        assert_eq!(ai_entities.len(), 2);
     }
 }

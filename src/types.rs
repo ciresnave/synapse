@@ -408,12 +408,6 @@ pub struct GlobalIdentity {
     pub global_id: String,
     /// Type of entity
     pub entity_type: EntityType,
-    /// Public key for encryption (PEM format)
-    pub public_key: String,
-    /// Entity capabilities
-    pub capabilities: Vec<String>,
-    /// Trust level (0-100)
-    pub trust_level: u8,
     /// Last seen timestamp
     pub last_seen: DateTimeWrapper,
     /// Routing preferences
@@ -427,9 +421,6 @@ impl Default for GlobalIdentity {
             local_name: String::new(),
             global_id: String::new(),
             entity_type: EntityType::AiModel,
-            public_key: String::new(),
-            capabilities: Vec::new(),
-            trust_level: 0,
             last_seen: DateTimeWrapper::new(Utc::now()),
             routing_preferences: HashMap::new(),
         }
@@ -442,28 +433,14 @@ impl GlobalIdentity {
         local_name: impl Into<String>,
         global_id: impl Into<String>,
         entity_type: EntityType,
-        public_key: impl Into<String>,
     ) -> Self {
         Self {
             local_name: local_name.into(),
             global_id: global_id.into(),
             entity_type,
-            public_key: public_key.into(),
-            capabilities: Vec::new(),
-            trust_level: 50,
             last_seen: DateTimeWrapper::new(Utc::now()),
             routing_preferences: HashMap::new(),
         }
-    }
-
-    /// Add a capability to this identity
-    pub fn add_capability(&mut self, capability: impl Into<String>) {
-        self.capabilities.push(capability.into());
-    }
-
-    /// Check if this identity has a specific capability
-    pub fn has_capability(&self, capability: &str) -> bool {
-        self.capabilities.iter().any(|c| c == capability)
     }
 
     /// Update the last seen timestamp
