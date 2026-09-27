@@ -178,7 +178,12 @@ jobs:
 
     - name: Clippy
       if: always()
-      run: cargo clippy -- -D warnings
+      # --all-targets: without it clippy lints only the lib and bins, never
+      # #[cfg(test)] code, tests/, examples/ or benches/ (issue #53). Under the
+      # default `native` feature set this reaches every target except those that
+      # are known not to compile: the `enhanced-auth` example and the two
+      # `test = false` integration tests (see Cargo.toml).
+      run: cargo clippy --all-targets -- -D warnings
 
   # The WebAssembly package has its own job so that `Build and Test` can be a
   # required check. While it was a step of that job, it failed on every run with

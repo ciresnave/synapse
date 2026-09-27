@@ -86,10 +86,10 @@ fn no_block_signature_verifier_exists_yet() {
 
     let mut defined_in = Vec::new();
     for f in &files {
-        if let Ok(text) = fs::read_to_string(f) {
-            if text.contains(definition.as_str()) {
-                defined_in.push(f.strip_prefix(&root).unwrap_or(f).display().to_string());
-            }
+        if let Ok(text) = fs::read_to_string(f)
+            && text.contains(definition.as_str())
+        {
+            defined_in.push(f.strip_prefix(&root).unwrap_or(f).display().to_string());
         }
     }
 

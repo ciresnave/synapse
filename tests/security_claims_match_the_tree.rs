@@ -149,7 +149,7 @@ fn the_completion_report_may_not_claim_a_quantifier_the_tree_refutes() {
         hits.len(),
         {
             let mut h = hits.clone();
-            h.sort_by(|a, b| b.1.cmp(&a.1));
+            h.sort_by_key(|x| std::cmp::Reverse(x.1));
             h.into_iter().take(4).collect::<Vec<_>>()
         }
     );

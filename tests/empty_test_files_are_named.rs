@@ -43,14 +43,12 @@ fn empty_by_content(tests_dir: &Path) -> BTreeSet<String> {
     };
     for e in entries.flatten() {
         let p = e.path();
-        if p.extension().is_some_and(|x| x == "rs") {
-            if let Ok(text) = fs::read_to_string(&p) {
-                if text.trim().is_empty() {
-                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                        out.insert(stem.to_string());
-                    }
-                }
-            }
+        if p.extension().is_some_and(|x| x == "rs")
+            && let Ok(text) = fs::read_to_string(&p)
+            && text.trim().is_empty()
+            && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+        {
+            out.insert(stem.to_string());
         }
     }
     out
