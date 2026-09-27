@@ -49,6 +49,51 @@ jobs:
       - name: Every tracked source file declares the licence
         run: python3 .github/spdx_gate.py
 
+  # ⚠️⚠️ RED FROM THIS JOB IS GOOD NEWS, NOT A REGRESSION. Read
+  # `.github/enhanced_auth_guard.py`'s own header before touching this job or
+  # "fixing" a red run -- it explains the whole thing, including why matching
+  # on rustc error CODES rather than message text is deliberate.
+  #
+  # `src/auth_integration_enhanced.rs` (behind the `enhanced-auth` feature) is
+  # written against an `auth-framework` API that has never been published
+  # (`CAPABILITY_INVENTORY.md` §5.1/§5.2). It is deliberately left in-tree,
+  # gated rather than deleted, because its fate is a Synapse/FAM merge
+  # decision. `COMPILATION_FIXES_COMPLETE.md` used to claim
+  # `cargo check --all-features --all-targets` succeeds; it does not, and
+  # nothing in this pipeline ever ran that command, so the false claim could
+  # never turn red on its own -- see that document's own correction.
+  #
+  # This job is a SEPARATE job for the same reason `spdx` is: it needs
+  # neither the postgres service nor a full toolchain warm-up to be
+  # meaningful, and a failure here should never be confused with `Build and
+  # Test` failing for an unrelated reason.
+  enhanced-auth-guard:
+    name: "enhanced-auth still known-broken, for the recorded reason (RED = GOOD NEWS if this ever fails otherwise)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config libpq-dev protobuf-compiler
+
+      # The gate's own controls run FIRST, same reasoning as `spdx`'s
+      # self-test: a checker nobody has watched fail is a checker nobody has
+      # evidence works.
+      - name: Self-test the guard's classification logic
+        run: python3 .github/enhanced_auth_guard.py --self-test
+
+      - name: enhanced-auth must still fail for the recorded reason
+        run: python3 .github/enhanced_auth_guard.py
+
   build:
     name: Build and Test
     runs-on: ubuntu-latest

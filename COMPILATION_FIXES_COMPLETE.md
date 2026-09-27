@@ -1,5 +1,15 @@
 # 🔧 COMPILATION FIXES COMPLETE
 
+> ⚠️ **CORRECTION — 2026-09-27, measured at `main` `87fa701`. THE VERIFICATION RESULT BELOW (line ~152) IS FALSE AS WRITTEN, AND HAS BEEN SINCE THE `enhanced-auth` FEATURE WAS WIRED UP.**
+>
+> This document's own named command, `cargo check --all-features --all-targets`, does **not** succeed — it exits 101 with 14 compiler errors (codes `E0308`, `E0382`, `E0432`, `E0560`, `E0599`), every one of them in `src/auth_integration_enhanced.rs`. That module is gated behind the `enhanced-auth` feature (selected by `--all-features`) and is written against an `auth-framework` API that has never been published — see `CAPABILITY_INVENTORY.md` §5.1/§5.2 for the full measurement. It is deliberately left in-tree, gated rather than deleted, because its fate is a Synapse/FAM merge decision (CireSnave's call, not this document's).
+>
+> **The `Build and Test` CI job is unaffected and genuinely green** — it runs `cargo build`/`cargo test` on default features, which do not select `enhanced-auth`, and that build is real and repaired. What was false is specifically the claim that the *named, all-features* command succeeds.
+>
+> ⚠️ **This claim was previously unfalsifiable by this repository's own pipeline**: nothing in `.github/workflows/ci_cd.yml` ever ran `--all-features`, so a false "✅ No compilation errors" here could never be contradicted by CI. `.github/enhanced_auth_guard.py` (added in the same change as this correction) closes that gap — it runs the named command and asserts the failure matches the recorded reason, and it will turn red the day that stops being true, in either direction: if `enhanced-auth` is fixed (making this document's original claim true again) or if it starts failing for some *other*, unrecorded reason. Read that script's own header before touching it — it inverts what "red" means, on purpose.
+>
+> **Nothing else in this document is disturbed by this correction** — the individual fixes recorded below were real, verified changes at the time they were made. What's corrected is the one verification block whose claim outlived the state it described.
+
 ## ✅ All Compilation Errors Resolved Successfully
 
 I have successfully resolved all compilation errors and warnings identified in the `cargo check --all-features --all-targets` command. Here's what was fixed:
