@@ -27,9 +27,10 @@ one with its reason.
 
 ## 1. What claude-peers actually does, and what it gets wrong
 
-Read from `C:/Users/cires/claude-peers-mcp` at `c1210c6` (read-only; nothing exercised). I could not
-find the 2026-09-28 gap analysis as a file (searched the portfolio's `*.md` for "mailbox"/"gap
-analysis": no hits, and no positive control was taken), so this is re-derived from the source.
+Read from `C:/Users/cires/claude-peers-mcp` at `c1210c6` (read-only; nothing exercised). The 2026-09-28
+gap analysis exists only as its summarized build list in CIRESNAVE-EXPECTATIONS §5.1d. A search of
+the portfolio's `*.md` for the mailbox phrasing found that file and this lane's HANDOFF, and nothing
+else. So this table is re-derived from the source, and §5 covers every item in the §5.1d list.
 
 | claude-peers today | Consequence | Synapse replacement |
 |---|---|---|
