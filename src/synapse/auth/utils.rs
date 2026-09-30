@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use ring::{
-    digest, pbkdf2,
+    pbkdf2,
     rand::SystemRandom,
     signature::{self, KeyPair as RingKeyPair},
 };
@@ -57,23 +57,7 @@ impl KeyManager {
         let rng = SystemRandom::new();
 
         let keypair = match algorithm {
-            KeyAlgorithm::RSA => {
-                // Generate secure RSA key material
-                let mut private_bytes = vec![0u8; 256]; // 2048-bit equivalent
-                let mut public_bytes = vec![0u8; 256];
-
-                // Fill with cryptographically secure random data
-                ring::rand::SecureRandom::fill(&rng, &mut private_bytes)
-                    .map_err(|_| anyhow::anyhow!("Secure random generation failed"))?;
-                ring::rand::SecureRandom::fill(&rng, &mut public_bytes)
-                    .map_err(|_| anyhow::anyhow!("Secure random generation failed"))?;
-
-                KeyPair {
-                    public_key: public_bytes,
-                    private_key: private_bytes,
-                    algorithm: algorithm.clone(),
-                }
-            }
+            KeyAlgorithm::RSA => return Err(rsa_not_implemented()),
             KeyAlgorithm::ECDSA => {
                 // Generate P-256 ECDSA key with ring - this is production ready
                 let private_key_doc = signature::EcdsaKeyPair::generate_pkcs8(
@@ -141,94 +125,10 @@ impl KeyManager {
         Ok(derived_key)
     }
 
-    /// Encrypt data with a public key
-    pub async fn encrypt_with_public_key(
-        &self,
-        public_key: &[u8],
-        data: &[u8],
-    ) -> anyhow::Result<Vec<u8>> {
-        // Since Ring doesn't support RSA encryption, we'll use AES-GCM
-        // with a key derived from the public key
-        use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
-
-        let rng = SystemRandom::new();
-
-        // Derive AES key from public key using HKDF
-        let salt = b"synapse_encryption_salt";
-        let mut key_material = Vec::new();
-        key_material.extend_from_slice(salt);
-        key_material.extend_from_slice(public_key);
-        let derived_key = digest::digest(&digest::SHA256, &key_material);
-        let aes_key = Key::<Aes256Gcm>::from_slice(derived_key.as_ref());
-
-        // Generate random nonce
-        let mut nonce_bytes = [0u8; 12];
-        ring::rand::SecureRandom::fill(&rng, &mut nonce_bytes)
-            .map_err(|_| anyhow::anyhow!("Failed to generate nonce"))?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        // Encrypt data with AES
-        let cipher = Aes256Gcm::new(aes_key);
-        let encrypted_data = cipher
-            .encrypt(nonce, data)
-            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
-
-        // Store format: nonce(12) + encrypted_data (key is derived, not stored)
-        let mut result = Vec::new();
-        result.extend_from_slice(&nonce_bytes); // 12 bytes
-        result.extend_from_slice(&encrypted_data);
-
-        Ok(result)
-    }
-    /// Decrypt data with a private key
-    pub async fn decrypt_with_private_key(
-        &self,
-        keypair: &KeyPair,
-        data: &[u8],
-    ) -> anyhow::Result<Vec<u8>> {
-        // Support AES-GCM decryption for all key types since encryption uses the same approach
-        match keypair.algorithm {
-            KeyAlgorithm::RSA | KeyAlgorithm::Ed25519 | KeyAlgorithm::ECDSA => {
-                // Check if this is AES-GCM format (nonce + data)
-                if data.len() >= 12 {
-                    use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
-
-                    // Derive AES key from private key (corresponding to public key used in encryption)
-                    let salt = b"synapse_encryption_salt";
-                    let mut key_material = Vec::new();
-                    key_material.extend_from_slice(salt);
-                    key_material.extend_from_slice(&keypair.public_key);
-                    let derived_key = digest::digest(&digest::SHA256, &key_material);
-                    let aes_key = Key::<Aes256Gcm>::from_slice(derived_key.as_ref());
-
-                    // Extract components
-                    let nonce_bytes = &data[0..12];
-                    let encrypted_data = &data[12..];
-
-                    let nonce = Nonce::from_slice(nonce_bytes);
-
-                    // Decrypt data
-                    let cipher = Aes256Gcm::new(aes_key);
-                    let decrypted = cipher
-                        .decrypt(nonce, encrypted_data)
-                        .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
-
-                    Ok(decrypted)
-                } else {
-                    Err(anyhow::anyhow!("Invalid encrypted data format"))
-                }
-            }
-        }
-    }
-
     /// Sign data with a keypair
     pub async fn sign(&self, keypair: &KeyPair, data: &[u8]) -> anyhow::Result<Vec<u8>> {
         match keypair.algorithm {
-            KeyAlgorithm::RSA => {
-                // Hash the data first
-                let hash = digest::digest(&digest::SHA256, data);
-                Ok(hash.as_ref().to_vec())
-            }
+            KeyAlgorithm::RSA => Err(rsa_not_implemented()),
             KeyAlgorithm::ECDSA => {
                 // Use ring for ECDSA signing
                 let rng = SystemRandom::new();
@@ -256,42 +156,47 @@ impl KeyManager {
         }
     }
 
-    /// Verify a signature
+    /// Verify a signature.
+    ///
+    /// The algorithm is chosen from the public key's length: 32 bytes is Ed25519,
+    /// 33 or 65 bytes is ECDSA P-256. `Ok(false)` means the signature does not
+    /// verify; any other key length is an `Err`, because it names no algorithm
+    /// this function can check.
     pub async fn verify(
         &self,
         public_key: &[u8],
         data: &[u8],
         signature: &[u8],
     ) -> anyhow::Result<bool> {
-        // For RSA verification - simplified hash comparison
-        if public_key.len() > 200 {
-            // Likely RSA PEM
-            let hash = digest::digest(&digest::SHA256, data);
-            return Ok(hash.as_ref() == signature);
+        match public_key.len() {
+            32 => {
+                let key: [u8; 32] = public_key.try_into()?;
+                let Ok(verifying_key) = VerifyingKey::from_bytes(&key) else {
+                    return Ok(false);
+                };
+                let Ok(sig_array) = <[u8; 64]>::try_from(signature) else {
+                    return Ok(false);
+                };
+                let sig = Signature::from_bytes(&sig_array);
+                Ok(verifying_key.verify(data, &sig).is_ok())
+            }
+            33 | 65 => {
+                let public_key_input = signature::UnparsedPublicKey::new(
+                    &signature::ECDSA_P256_SHA256_FIXED,
+                    public_key,
+                );
+                Ok(public_key_input.verify(data, signature).is_ok())
+            }
+            n => Err(anyhow::anyhow!(
+                "unsupported public key format ({n} bytes): expected Ed25519 (32) or ECDSA P-256 (33 or 65)"
+            )),
         }
-
-        // For Ed25519 verification (raw bytes)
-        if public_key.len() == 32
-            && signature.len() == 64
-            && let Ok(verifying_key) = VerifyingKey::from_bytes(&public_key.try_into().unwrap())
-        {
-            let sig_array: [u8; 64] = signature
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Invalid signature length"))?;
-            let sig = Signature::from_bytes(&sig_array);
-            return Ok(verifying_key.verify(data, &sig).is_ok());
-        }
-
-        // For ECDSA verification (raw bytes)
-        if public_key.len() == 65 || public_key.len() == 33 {
-            // Uncompressed or compressed P-256
-            let public_key_input =
-                signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, public_key);
-            return Ok(public_key_input.verify(data, signature).is_ok());
-        }
-
-        Ok(false) // Unknown format
     }
+}
+
+/// RSA appears in [`KeyAlgorithm`] but has no implementation in this crate.
+fn rsa_not_implemented() -> anyhow::Error {
+    anyhow::anyhow!("RSA is not implemented; use Ed25519 or ECDSA")
 }
 
 /// Key derivation parameters
@@ -383,40 +288,6 @@ impl SynapseKeyManager {
             .await?;
 
         Ok(key)
-    }
-
-    /// Encrypt data with a public key
-    pub async fn encrypt_with_public_key(
-        &self,
-        public_key: &[u8],
-        data: &[u8],
-    ) -> anyhow::Result<Vec<u8>> {
-        let encrypted = self
-            .key_manager
-            .encrypt_with_public_key(public_key, data)
-            .await?;
-
-        Ok(encrypted)
-    }
-
-    /// Decrypt data with a private key
-    pub async fn decrypt_with_private_key(
-        &self,
-        key_id: &str,
-        data: &[u8],
-    ) -> anyhow::Result<Vec<u8>> {
-        // Get the key pair
-        let keypair = match self.get_keypair(key_id).await? {
-            Some(keypair) => keypair,
-            None => return Err(anyhow::anyhow!("Key not found")),
-        };
-
-        let decrypted = self
-            .key_manager
-            .decrypt_with_private_key(&keypair, data)
-            .await?;
-
-        Ok(decrypted)
     }
 
     /// Sign data with a private key

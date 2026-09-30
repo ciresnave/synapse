@@ -134,32 +134,34 @@ impl Block {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Sign the block with a validator's private key
+    /// Sign the block with a validator's private key.
+    ///
+    /// The signed bytes are the block's JSON with `signature` set to `None`, which
+    /// is what `VerificationEngine` verifies. Only `"Ed25519"` is implemented, and
+    /// `validator_private_key` must be its 32-byte secret key; anything else is an
+    /// error and leaves the block unsigned.
     pub async fn sign_block(
         &mut self,
-        _validator_private_key: &[u8],
+        validator_private_key: &[u8],
         algorithm: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if algorithm != "Ed25519" {
+            return Err(format!("unsupported block signature algorithm: {algorithm}").into());
+        }
+        let secret: [u8; 32] = validator_private_key
+            .try_into()
+            .map_err(|_| "an Ed25519 private key is 32 bytes")?;
+
         // Create data to sign (block without signature)
         let mut block_to_sign = self.clone();
         block_to_sign.signature = None;
 
         let block_bytes = serde_json::to_vec(&block_to_sign)?;
 
-        // Use the authentication system for signing
-        let mut auth_manager = crate::synapse::auth::utils::SynapseKeyManager::new().await?;
-
-        // Create a temporary keypair for signing
-        let _temp_keypair = auth_manager
-            .generate_keypair(
-                "temp_validator_key",
-                crate::synapse::auth::utils::KeyAlgorithm::Ed25519,
-            )
-            .await?;
-
-        let signature_data = auth_manager
-            .sign("temp_validator_key", &block_bytes)
-            .await?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
+        let signature_data = ed25519_dalek::Signer::sign(&signing_key, &block_bytes)
+            .to_bytes()
+            .to_vec();
 
         self.signature = Some(BlockSignature {
             data: signature_data,
