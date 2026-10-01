@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "5.0.0"
+version = "5.1.0"
 
 [package]
 name = "synapse"
@@ -77,7 +77,7 @@ hpke = { version = "0.14.1", default-features = false, features = ["alloc", "get
 rsa = { version = "0.9", optional = true }
 aes-gcm = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
-ed25519-dalek = { version = "2.2.0", optional = true }
+ed25519-dalek = { version = "2.2.0", optional = true, features = ["pkcs8", "pem"] }
 blake3 = { version = "1.5", optional = true }
 base64 = { version = "0.22", optional = true }
 
@@ -182,6 +182,10 @@ rcgen = "0.14.10"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 # Development dependencies
+# Windows ACL check for the keystore (M2, spec 4 Q2(a)).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1.0"
@@ -443,8 +447,11 @@ wasm = [
     "dep:getrandom",
 ]
 
+# No cdylib: on Windows it and the `synapse` CLI binary both emit synapse.pdb (cargo#6313).
+# The root wasm-pack path it served is unmeasured and not working (CAPABILITY_INVENTORY 5.4);
+# the planned WASM slice builds its own `wasm/` crate, which will declare cdylib itself.
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [package.metadata.wasm-pack.profile.release]
 wee_alloc = false

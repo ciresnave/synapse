@@ -206,6 +206,7 @@ pub mod delivery_ack;
 pub mod email;
 pub mod email_server;
 pub mod identity;
+pub mod keystore;
 pub mod monitoring;
 pub mod network_scope;
 pub mod replay;
