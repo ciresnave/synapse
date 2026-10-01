@@ -287,3 +287,42 @@ fn restore_does_not_resurrect_superseded_epochs() {
     );
     assert_eq!(restored.check("lane@acct", 2), Ok(()));
 }
+
+// ---- Final-review fixes ----
+
+/// Review I1: the signed text carries whole seconds only, so a captured claim's `signed_at` could
+/// be nudged within its second to land after a restart's horizon and pass as fresh. The table
+/// judges freshness on exactly what was signed.
+#[test]
+fn a_captured_claim_cannot_be_nudged_past_a_restart_within_its_second() {
+    let f = Fixture::new();
+    let captured = sign_claim(&f.role("lane"), nonce(1), t0()).unwrap(); // whole-second t0
+    let restart = t0() + Duration::milliseconds(500);
+    let mut restarted = Roles::new(restart);
+    let mut nudged = captured.clone();
+    nudged.signed_at = t0() + Duration::milliseconds(999);
+    assert_eq!(
+        f.claim(
+            &mut restarted,
+            &nudged,
+            restart + Duration::milliseconds(600)
+        ),
+        Err(ClaimError::Stale)
+    );
+    assert_eq!(restarted.current("lane@acct"), None);
+}
+
+/// Review I2: the claim path is the first to take chains from untrusted input, and
+/// `validate_chain` leaves the length cap to its caller.
+#[test]
+fn an_overlong_chain_is_refused_before_validation() {
+    let f = Fixture::new();
+    let mut req = sign_claim(&f.role("lane"), nonce(1), t0()).unwrap();
+    let leaf = req.chain[0].clone();
+    req.chain = vec![leaf; synapse::roles::MAX_CLAIM_CHAIN + 1];
+    let mut roles = table();
+    assert_eq!(
+        f.claim(&mut roles, &req, t0()),
+        Err(ClaimError::ChainTooLong)
+    );
+}

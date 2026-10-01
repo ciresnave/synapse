@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, SubsecRound, Utc};
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,10 @@ use crate::replay::{Decision, Freshness, ReplayConfig, ReplayGuard};
 /// The first line of every signed claim, so a claim signature can never be mistaken for (or
 /// replayed as) a signature over anything else.
 pub const CLAIM_DOMAIN_TAG: &str = "synapse/role-claim/v1";
+
+/// The longest certificate chain a claim may carry. `validate_chain` leaves the cap to callers
+/// that take chains from untrusted input, and the claim path is one (final review I2).
+pub const MAX_CLAIM_CHAIN: usize = 8;
 
 /// What a session sends to take a role.
 #[derive(Debug, Clone)]
@@ -89,6 +93,8 @@ pub enum ClaimError {
     Replayed,
     /// The identity has no signing key loaded (client side only).
     NoSigningKey,
+    /// The chain is longer than [`MAX_CLAIM_CHAIN`].
+    ChainTooLong,
 }
 
 impl fmt::Display for ClaimError {
@@ -99,6 +105,7 @@ impl fmt::Display for ClaimError {
             ClaimError::Stale => write!(f, "the claim is outside the freshness window"),
             ClaimError::Replayed => write!(f, "the claim was already used"),
             ClaimError::NoSigningKey => write!(f, "no signing key is loaded for the role"),
+            ClaimError::ChainTooLong => write!(f, "the certificate chain is too long"),
         }
     }
 }
@@ -164,19 +171,23 @@ impl Roles {
         revoked: &dyn RevocationLookup,
         now: DateTime<Utc>,
     ) -> Result<Grant, ClaimError> {
+        if req.chain.len() > MAX_CLAIM_CHAIN {
+            return Err(ClaimError::ChainTooLong);
+        }
         let leaf =
             validate_chain(&req.chain, account_keys, revoked, now).map_err(ClaimError::Chain)?;
         let global_id = leaf.subject_global_id;
-        let text = claim_signing_input(&global_id, &req.nonce, req.signed_at);
+        // The signed text carries whole seconds, so judge freshness on exactly that: a sub-second
+        // part is unsigned, and an attacker could otherwise nudge a captured claim past a
+        // restart's horizon within its second (final review I1).
+        let signed_at = req.signed_at.trunc_subsecs(0);
+        let text = claim_signing_input(&global_id, &req.nonce, signed_at);
         UnparsedPublicKey::new(&ED25519, &leaf.subject_signing_key)
             .verify(text.as_bytes(), &req.signature)
             .map_err(|_| ClaimError::BadSignature)?;
 
         let key_id = crate::sender_auth::key_id(&leaf.subject_signing_key);
-        match self
-            .claims
-            .check(&key_id, &hex(&req.nonce), req.signed_at, now)
-        {
+        match self.claims.check(&key_id, &hex(&req.nonce), signed_at, now) {
             Decision::Deliver(Freshness::Fresh) => {}
             Decision::Deliver(_) => return Err(ClaimError::Stale),
             Decision::Drop => return Err(ClaimError::Replayed),
