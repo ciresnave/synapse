@@ -56,7 +56,10 @@ impl fmt::Display for KeystoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             KeystoreError::InvalidName => {
-                write!(f, "names may contain only letters, digits, '-' and '_' (1 to 64)")
+                write!(
+                    f,
+                    "names may contain only letters, digits, '-' and '_' (1 to 64)"
+                )
             }
             KeystoreError::NoHome => write!(f, "no keystore home: set SYNAPSE_HOME"),
             KeystoreError::AccountExists => write!(f, "an account already exists"),
@@ -92,16 +95,21 @@ pub fn default_home() -> Result<PathBuf> {
     if let Some(home) = var("SYNAPSE_HOME") {
         return Ok(PathBuf::from(home));
     }
-    if cfg!(windows) {
-        if let Some(local) = var("LOCALAPPDATA") {
-            return Ok(PathBuf::from(local).join("synapse"));
-        }
+    if cfg!(windows)
+        && let Some(local) = var("LOCALAPPDATA")
+    {
+        return Ok(PathBuf::from(local).join("synapse"));
     }
     if let Some(data) = var("XDG_DATA_HOME") {
         return Ok(PathBuf::from(data).join("synapse"));
     }
     var("HOME")
-        .map(|home| PathBuf::from(home).join(".local").join("share").join("synapse"))
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("synapse")
+        })
         .ok_or(KeystoreError::NoHome)
 }
 
@@ -291,7 +299,11 @@ impl Keystore {
                     signature: [0; 64],
                 };
                 let chain = vec![AgentCertificate::sign(unsigned, &self.account_key)];
-                replace(&cert_path, chain_to_pem(&chain).as_bytes(), "role certificate")?;
+                replace(
+                    &cert_path,
+                    chain_to_pem(&chain).as_bytes(),
+                    "role certificate",
+                )?;
                 chain
             }
         };
@@ -366,7 +378,10 @@ fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(path).map_err(io_err(item))?.permissions().mode();
+        let mode = fs::metadata(path)
+            .map_err(io_err(item))?
+            .permissions()
+            .mode();
         if mode & 0o077 != 0 {
             return Err(KeystoreError::PermissionsTooOpen(item));
         }
@@ -451,7 +466,12 @@ mod windows_acl {
             let mut size = SECURITY_MAX_SID_SIZE;
             // SAFETY: `buffer` holds SECURITY_MAX_SID_SIZE bytes, as `size` says.
             let ok = unsafe {
-                CreateWellKnownSid(*kind, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size)
+                CreateWellKnownSid(
+                    *kind,
+                    std::ptr::null_mut(),
+                    buffer.as_mut_ptr().cast(),
+                    &mut size,
+                )
             };
             if ok == 0 {
                 return Err(io::Error::last_os_error());
@@ -509,7 +529,9 @@ fn load_or_create(
 
 /// Write `bytes` to a fresh owner-only `.tmp-` sibling of `path` and sync it.
 fn write_temp(path: &Path, bytes: &[u8], item: &'static str) -> Result<PathBuf> {
-    let dir = path.parent().ok_or(KeystoreError::Io(item, io::ErrorKind::NotFound))?;
+    let dir = path
+        .parent()
+        .ok_or(KeystoreError::Io(item, io::ErrorKind::NotFound))?;
     let nonce = u64::from_le_bytes(random_bytes::<8>()?);
     let temp = dir.join(format!(".tmp-{}-{nonce:016x}", std::process::id()));
     let mut options = fs::OpenOptions::new();

@@ -37,14 +37,20 @@ fn init_refuses_when_an_account_exists() {
     let before = std::fs::read(account_key_path(dir.path())).unwrap();
 
     let again = Keystore::init_account(dir.path(), "other");
-    assert!(matches!(again, Err(KeystoreError::AccountExists)), "{again:?}");
+    assert!(
+        matches!(again, Err(KeystoreError::AccountExists)),
+        "{again:?}"
+    );
     assert_eq!(std::fs::read(account_key_path(dir.path())).unwrap(), before);
 }
 
 #[test]
 fn open_without_an_account_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(matches!(Keystore::open(dir.path()), Err(KeystoreError::NoAccount)));
+    assert!(matches!(
+        Keystore::open(dir.path()),
+        Err(KeystoreError::NoAccount)
+    ));
 }
 
 #[test]
@@ -74,7 +80,10 @@ fn a_garbage_account_key_is_corrupt_and_unnamed() {
     std::fs::write(&key, b"junk").unwrap();
 
     let err = Keystore::open(dir.path()).expect_err("garbage must not load");
-    assert!(matches!(err, KeystoreError::Corrupt("account key")), "{err:?}");
+    assert!(
+        matches!(err, KeystoreError::Corrupt("account key")),
+        "{err:?}"
+    );
     let msg = err.to_string();
     for form in path_forms(dir.path()) {
         assert!(!msg.contains(&form), "message names the path: {msg}");
@@ -147,8 +156,11 @@ fn store_with_account() -> (tempfile::TempDir, Keystore) {
 }
 
 /// Validate a role's chain against the store's account key, as a receiver that pinned it would.
-fn validates(store: &Keystore, chain: &[synapse::certificate::AgentCertificate], now: DateTime<Utc>)
-    -> Result<synapse::certificate::VerifiedChain, synapse::certificate::ChainError> {
+fn validates(
+    store: &Keystore,
+    chain: &[synapse::certificate::AgentCertificate],
+    now: DateTime<Utc>,
+) -> Result<synapse::certificate::VerifiedChain, synapse::certificate::ChainError> {
     let account_key_id = store.account().key_id;
     let account_key = store.account_public_key();
     validate_chain(
@@ -163,12 +175,17 @@ fn validates(store: &Keystore, chain: &[synapse::certificate::AgentCertificate],
 fn a_role_is_stable_across_loads() {
     let (_dir, store) = store_with_account();
     let first = store.role("synapse", t0()).expect("role");
-    let second = store.role("synapse", t0() + Duration::minutes(5)).expect("role again");
+    let second = store
+        .role("synapse", t0() + Duration::minutes(5))
+        .expect("role again");
     assert_eq!(first.global_id, "synapse@acct");
     assert_eq!(second.global_id, first.global_id);
     assert_eq!(second.signing_key_id, first.signing_key_id);
     assert_eq!(second.sealing_key_id, first.sealing_key_id);
-    assert_eq!(second.chain[0].serial, first.chain[0].serial, "a valid certificate is not reissued");
+    assert_eq!(
+        second.chain[0].serial, first.chain[0].serial,
+        "a valid certificate is not reissued"
+    );
 }
 
 #[test]
@@ -178,7 +195,11 @@ fn a_fresh_certificate_validates_against_the_account_key() {
     let verified = validates(&store, &role.chain, t0()).expect("chain validates");
     assert_eq!(verified.subject_global_id, "synapse@acct");
     assert_eq!(verified.links, 1);
-    let mut names: Vec<String> = verified.permissions.iter().map(Permission::as_str).collect();
+    let mut names: Vec<String> = verified
+        .permissions
+        .iter()
+        .map(Permission::as_str)
+        .collect();
     names.sort();
     assert_eq!(names, ["ack", "request-ack", "send"]);
     assert_eq!(role.not_before, t0());
@@ -198,16 +219,30 @@ fn a_certificate_is_renewed_under_twelve_hours_and_not_before() {
     let (_dir, store) = store_with_account();
     let first = store.role("r", t0()).expect("role");
 
-    let at_11h = store.role("r", t0() + Duration::hours(11)).expect("role at 11h");
-    assert_eq!(at_11h.chain[0].serial, first.chain[0].serial, "12h+ left: keep");
+    let at_11h = store
+        .role("r", t0() + Duration::hours(11))
+        .expect("role at 11h");
+    assert_eq!(
+        at_11h.chain[0].serial, first.chain[0].serial,
+        "12h+ left: keep"
+    );
 
     let now = t0() + Duration::hours(12) + Duration::seconds(1);
     let renewed = store.role("r", now).expect("role past 12h");
-    assert_ne!(renewed.chain[0].serial, first.chain[0].serial, "under 12h left: renew");
+    assert_ne!(
+        renewed.chain[0].serial, first.chain[0].serial,
+        "under 12h left: renew"
+    );
     assert_eq!(renewed.not_before, now);
     assert_eq!(renewed.not_after, now + Duration::hours(24));
-    assert_eq!(renewed.signing_key_id, first.signing_key_id, "renewal keeps the keys");
-    assert_eq!(renewed.sealing_key_id, first.sealing_key_id, "renewal keeps the keys");
+    assert_eq!(
+        renewed.signing_key_id, first.signing_key_id,
+        "renewal keeps the keys"
+    );
+    assert_eq!(
+        renewed.sealing_key_id, first.sealing_key_id,
+        "renewal keeps the keys"
+    );
     validates(&store, &renewed.chain, now).expect("renewed chain validates");
 }
 
@@ -239,7 +274,10 @@ fn concurrent_first_loads_agree_on_one_key() {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    assert!(ids.windows(2).all(|w| w[0] == w[1]), "racing loaders disagree: {ids:?}");
+    assert!(
+        ids.windows(2).all(|w| w[0] == w[1]),
+        "racing loaders disagree: {ids:?}"
+    );
 }
 
 #[test]
@@ -258,7 +296,10 @@ fn a_garbage_role_key_is_corrupt_and_unnamed() {
 #[test]
 fn role_names_are_validated() {
     let (_dir, store) = store_with_account();
-    assert!(matches!(store.role("../evil", t0()), Err(KeystoreError::InvalidName)));
+    assert!(matches!(
+        store.role("../evil", t0()),
+        Err(KeystoreError::InvalidName)
+    ));
 }
 
 // ---- Task 3: Windows ACL check ----
@@ -272,14 +313,19 @@ fn icacls_grant_read(path: &Path, sid: &str) {
         .stdout(std::process::Stdio::null())
         .status()
         .expect("icacls runs");
-    assert!(status.success(), "icacls could not grant {sid} read: the mutation did not apply");
+    assert!(
+        status.success(),
+        "icacls could not grant {sid} read: the mutation did not apply"
+    );
 }
 
 #[cfg(windows)]
 #[test]
 fn a_fresh_store_passes_the_acl_check() {
     let (_dir, store) = store_with_account();
-    store.role("r", t0()).expect("a fresh store under the user's temp dir is owner-only");
+    store
+        .role("r", t0())
+        .expect("a fresh store under the user's temp dir is owner-only");
 }
 
 #[cfg(windows)]
@@ -303,10 +349,16 @@ fn a_key_readable_by_a_broad_group_is_refused() {
 fn a_role_key_readable_by_everyone_is_refused() {
     let (dir, store) = store_with_account();
     store.role("r", t0()).expect("role");
-    icacls_grant_read(&dir.path().join("roles").join("r").join("signing.key.pem"), "S-1-1-0");
+    icacls_grant_read(
+        &dir.path().join("roles").join("r").join("signing.key.pem"),
+        "S-1-1-0",
+    );
     let got = store.role("r", t0());
     assert!(
-        matches!(got, Err(KeystoreError::PermissionsTooOpen("role signing key"))),
+        matches!(
+            got,
+            Err(KeystoreError::PermissionsTooOpen("role signing key"))
+        ),
         "{got:?}"
     );
 }
