@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! Roles in core (M3): claim a role with its key; the newest epoch wins.
+//! Design: `docs/superpowers/specs/2026-10-01-m3-roles-design.md`.
+
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use synapse::certificate::{ChainError, RevocationLookup};
+use synapse::keystore::{Keystore, RoleIdentity};
+use synapse::roles::{ClaimError, ClaimRequest, Grant, Roles, Superseded, sign_claim};
+
+struct NoRevocations;
+impl RevocationLookup for NoRevocations {
+    fn is_revoked(&self, _issuer_key_id: &str, _serial: &[u8; 16]) -> bool {
+        false
+    }
+}
+
+fn t0() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap()
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    store: Keystore,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        Keystore::init_account(dir.path(), "acct").expect("init");
+        let store = Keystore::open(dir.path()).expect("open");
+        Fixture { _dir: dir, store }
+    }
+
+    fn role(&self, name: &str) -> RoleIdentity {
+        self.store.role(name, t0()).expect("role")
+    }
+
+    fn lookup(&self) -> impl Fn(&str) -> Option<[u8; 32]> + use<> {
+        let key_id = self.store.account().key_id;
+        let key = self.store.account_public_key();
+        move |kid: &str| (kid == key_id).then_some(key)
+    }
+
+    fn claim(&self, roles: &mut Roles, req: &ClaimRequest, now: DateTime<Utc>) -> Result<Grant, ClaimError> {
+        roles.claim(req, &self.lookup(), &NoRevocations, now)
+    }
+}
+
+/// A table that started just before t0: claims signed at or before a table's start are refused
+/// (see `a_claim_signed_before_the_table_started_is_refused`), so the fixtures sign after it.
+fn table() -> Roles {
+    Roles::new(t0() - Duration::seconds(1))
+}
+
+fn nonce(n: u8) -> [u8; 16] {
+    [n; 16]
+}
+
+#[test]
+fn first_claim_gets_epoch_one_and_a_second_supersedes_it() {
+    let f = Fixture::new();
+    let lane = f.role("lane");
+    let mut roles = table();
+
+    let a = f.claim(&mut roles, &sign_claim(&lane, nonce(1), t0()).unwrap(), t0()).expect("claim A");
+    assert_eq!(a, Grant { global_id: "lane@acct".into(), epoch: 1, superseded: None });
+
+    let later = t0() + Duration::seconds(30);
+    let b = f.claim(&mut roles, &sign_claim(&lane, nonce(2), later).unwrap(), later).expect("claim B");
+    assert_eq!(b, Grant { global_id: "lane@acct".into(), epoch: 2, superseded: Some(1) });
+
+    assert_eq!(roles.check("lane@acct", 1), Err(Superseded { current: 2 }));
+    assert_eq!(roles.check("lane@acct", 2), Ok(()));
+    assert_eq!(roles.current("lane@acct"), Some(2));
+}
+
+#[test]
+fn a_never_claimed_role_is_superseded_at_zero() {
+    let roles = table();
+    assert_eq!(roles.check("x@acct", 1), Err(Superseded { current: 0 }));
+    assert_eq!(roles.current("x@acct"), None);
+}
+
+#[test]
+fn an_unknown_account_is_refused_and_changes_nothing() {
+    let f = Fixture::new();
+    let req = sign_claim(&f.role("lane"), nonce(1), t0()).unwrap();
+    let mut roles = table();
+
+    let refused = roles.claim(&req, &|_: &str| None, &NoRevocations, t0());
+    assert_eq!(refused, Err(ClaimError::Chain(ChainError::UnknownIssuer)));
+    assert_eq!(roles.current("lane@acct"), None);
+
+    // The refused attempt must not have consumed the nonce.
+    let granted = f.claim(&mut roles, &req, t0()).expect("the same request, with the right lookup");
+    assert_eq!(granted.epoch, 1);
+}
+
+#[test]
+fn a_signature_by_another_key_is_refused() {
+    let f = Fixture::new();
+    let lane = f.role("lane");
+    let other = f.role("other");
+    let mut forged = sign_claim(&other, nonce(1), t0()).unwrap();
+    forged.chain = lane.chain.clone();
+    let mut roles = table();
+    assert_eq!(f.claim(&mut roles, &forged, t0()), Err(ClaimError::BadSignature));
+    assert_eq!(roles.current("lane@acct"), None);
+}
+
+#[test]
+fn a_claim_for_another_role_cannot_reuse_a_certificate() {
+    // A signature over role A's text, presented with role B's certificate: the signed text names A,
+    // the certificate names B, and the key that signed is A's, so nothing verifies.
+    let f = Fixture::new();
+    let a = f.role("alpha");
+    let b = f.role("beta");
+    let mut mixed = sign_claim(&a, nonce(1), t0()).unwrap();
+    mixed.chain = b.chain.clone();
+    let mut roles = table();
+    assert_eq!(f.claim(&mut roles, &mixed, t0()), Err(ClaimError::BadSignature));
+    assert_eq!(roles.current("beta@acct"), None);
+    assert_eq!(roles.current("alpha@acct"), None);
+}
+
+#[test]
+fn a_replayed_claim_is_refused_without_a_new_epoch() {
+    let f = Fixture::new();
+    let req = sign_claim(&f.role("lane"), nonce(7), t0()).unwrap();
+    let mut roles = table();
+    assert_eq!(f.claim(&mut roles, &req, t0()).unwrap().epoch, 1);
+    let again = f.claim(&mut roles, &req, t0() + Duration::seconds(1));
+    assert_eq!(again, Err(ClaimError::Replayed));
+    assert_eq!(roles.current("lane@acct"), Some(1));
+}
+
+#[test]
+fn a_stale_or_future_claim_is_refused() {
+    let f = Fixture::new();
+    let lane = f.role("lane");
+    let mut roles = table();
+
+    let old = sign_claim(&lane, nonce(1), t0()).unwrap();
+    assert_eq!(
+        f.claim(&mut roles, &old, t0() + Duration::minutes(6)),
+        Err(ClaimError::Stale)
+    );
+    let future = sign_claim(&lane, nonce(2), t0() + Duration::minutes(2)).unwrap();
+    assert_eq!(f.claim(&mut roles, &future, t0()), Err(ClaimError::Stale));
+    assert_eq!(roles.current("lane@acct"), None);
+}
+
+#[test]
+fn a_short_signature_is_refused_not_a_panic() {
+    let f = Fixture::new();
+    let mut req = sign_claim(&f.role("lane"), nonce(1), t0()).unwrap();
+    req.signature.truncate(10);
+    let mut roles = table();
+    assert_eq!(f.claim(&mut roles, &req, t0()), Err(ClaimError::BadSignature));
+}
+
+#[test]
+fn an_expired_certificate_is_refused() {
+    let f = Fixture::new();
+    let lane = f.role("lane"); // certificate issued at t0 for 24h
+    let late = t0() + Duration::hours(25);
+    let req = sign_claim(&lane, nonce(1), late).unwrap();
+    let mut roles = table();
+    assert_eq!(
+        f.claim(&mut roles, &req, late),
+        Err(ClaimError::Chain(ChainError::Expired))
+    );
+}
+
+/// After a daemon restart the replay record is empty, so a claim signed before the table started
+/// could be a captured, already-used claim. It is refused; a live client simply signs a new one.
+#[test]
+fn a_claim_signed_before_the_table_started_is_refused() {
+    let f = Fixture::new();
+    let req = sign_claim(&f.role("lane"), nonce(1), t0()).unwrap();
+    let mut restarted = Roles::new(t0() + Duration::seconds(10));
+    assert_eq!(
+        f.claim(&mut restarted, &req, t0() + Duration::seconds(11)),
+        Err(ClaimError::Stale)
+    );
+    let resigned = sign_claim(&f.role("lane"), nonce(2), t0() + Duration::seconds(11)).unwrap();
+    assert_eq!(f.claim(&mut restarted, &resigned, t0() + Duration::seconds(11)).unwrap().epoch, 1);
+}
