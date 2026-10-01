@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
-use synapse::mcp_server::{McpConfig, SynapseMcpServer};
+use synapse_mcp::{McpConfig, SynapseMcpServer};
 
 #[tokio::main]
 async fn main() -> ExitCode {

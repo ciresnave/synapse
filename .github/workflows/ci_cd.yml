@@ -162,19 +162,21 @@ jobs:
     # a full build before it is reported.
 
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --workspace --verbose
 
     - name: Run tests
       if: always()
       # --no-fail-fast: without it cargo stops at the first failing test binary, and
       # every target that sorts after it (including all doc-tests) never runs here.
-      run: cargo test --verbose --no-fail-fast
+      # --workspace: a root package with members tests only itself by default, which would
+      # silently drop crates/synapse-mcp's tests.
+      run: cargo test --workspace --verbose --no-fail-fast
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
     - name: Check formatting
       if: always()
-      run: cargo fmt -- --check
+      run: cargo fmt --all -- --check
 
     - name: Clippy
       if: always()
@@ -183,7 +185,7 @@ jobs:
       # default `native` feature set this reaches every target except those that
       # are known not to compile: the `enhanced-auth` example and the two
       # `test = false` integration tests (see Cargo.toml).
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
 
   # The WebAssembly package has its own job so that `Build and Test` can be a
   # required check. While it was a step of that job, it failed on every run with
