@@ -5,7 +5,9 @@
 //! communication system for \*any LLM\*."* Claude-specific and MCP code lives in adapter crates
 //! under `crates/`. This test holds the core (`src/` and `Cargo.toml`, from `git ls-files`) to that.
 //!
-//! The needle is assembled at runtime, so this file never matches itself if the scope widens.
+//! ⚠️ This file names the words it forbids (in this documentation, the quote and its messages),
+//! so it must stay OUT of the scanned scope. Widening the scan to `tests/` or `.` requires
+//! excluding this file by path. Only the needles are assembled at runtime.
 //! Each allowlist entry must still match, so the list cannot rot into a blanket exception.
 
 use std::path::Path;
@@ -23,7 +25,6 @@ fn needles() -> Vec<String> {
         format!("{}{}", "clau", "de"),
         format!("{}{}", "anthro", "pic"),
         format!("{}{}", "mc", "p"),
-        format!("{}{}", "rm", "cp"),
     ]
 }
 
@@ -48,9 +49,9 @@ fn tracked(root: &Path, pathspecs: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Every (file, trimmed line) that contains a needle as a whole word, case-insensitive.
-/// "Whole word" means not preceded or followed by an ASCII letter, so `mcp_server` matches
-/// `mcp`, and `rmcp` is caught by its own needle rather than hiding behind the `r`.
+/// Every (file, trimmed line) that contains a needle anywhere, case-insensitive. Plain substrings
+/// on purpose: `McpTransport` or `ClaudeAdapter` is exactly what a misplaced adapter type looks like
+/// (review finding I1). A false positive gets an allowlist entry, which is self-checking.
 fn hits(root: &Path, files: &[String]) -> Vec<(String, String)> {
     let needles = needles();
     let mut found = Vec::new();
@@ -59,8 +60,7 @@ fn hits(root: &Path, files: &[String]) -> Vec<(String, String)> {
             continue;
         };
         for line in text.lines() {
-            let lower = line.to_ascii_lowercase();
-            if needles.iter().any(|n| contains_word(&lower, n)) {
+            if line_hits_with(line, &needles) {
                 found.push((f.clone(), line.trim().to_owned()));
             }
         }
@@ -68,20 +68,13 @@ fn hits(root: &Path, files: &[String]) -> Vec<(String, String)> {
     found
 }
 
-fn contains_word(haystack: &str, needle: &str) -> bool {
-    let bytes = haystack.as_bytes();
-    let mut start = 0;
-    while let Some(i) = haystack[start..].find(needle) {
-        let at = start + i;
-        let letter = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphabetic());
-        if !letter(at.checked_sub(1).and_then(|j| bytes.get(j)))
-            && !letter(bytes.get(at + needle.len()))
-        {
-            return true;
-        }
-        start = at + needle.len();
-    }
-    false
+fn line_hits(line: &str) -> bool {
+    line_hits_with(line, &needles())
+}
+
+fn line_hits_with(line: &str, needles: &[String]) -> bool {
+    let lower = line.to_ascii_lowercase();
+    needles.iter().any(|n| lower.contains(n.as_str()))
 }
 
 #[test]
@@ -136,5 +129,24 @@ fn the_scan_finds_mcp_in_the_adapter() {
     assert!(
         !hits(root, &files).is_empty(),
         "the scan finds nothing even in the MCP adapter: it is broken"
+    );
+}
+
+/// Review finding I1: a vendor or MCP name glued to more letters (`McpTransport`,
+/// `ClaudeAdapter`, `AnthropicClient`) is exactly what an adapter type in the core would look like,
+/// so the scan matches substrings, not whole words.
+#[test]
+fn the_scan_catches_names_inside_identifiers() {
+    for line in [
+        "pub struct McpTransport;",
+        "pub struct ClaudeAdapter;",
+        "pub struct AnthropicClient;",
+        "use rmcp::model;",
+    ] {
+        assert!(line_hits(line), "the scan missed {line:?}");
+    }
+    assert!(
+        !line_hits("pub struct NeutralTransport;"),
+        "control: a neutral line must not hit"
     );
 }
