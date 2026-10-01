@@ -41,7 +41,12 @@ impl Fixture {
         move |kid: &str| (kid == key_id).then_some(key)
     }
 
-    fn claim(&self, roles: &mut Roles, req: &ClaimRequest, now: DateTime<Utc>) -> Result<Grant, ClaimError> {
+    fn claim(
+        &self,
+        roles: &mut Roles,
+        req: &ClaimRequest,
+        now: DateTime<Utc>,
+    ) -> Result<Grant, ClaimError> {
         roles.claim(req, &self.lookup(), &NoRevocations, now)
     }
 }
@@ -62,12 +67,38 @@ fn first_claim_gets_epoch_one_and_a_second_supersedes_it() {
     let lane = f.role("lane");
     let mut roles = table();
 
-    let a = f.claim(&mut roles, &sign_claim(&lane, nonce(1), t0()).unwrap(), t0()).expect("claim A");
-    assert_eq!(a, Grant { global_id: "lane@acct".into(), epoch: 1, superseded: None });
+    let a = f
+        .claim(
+            &mut roles,
+            &sign_claim(&lane, nonce(1), t0()).unwrap(),
+            t0(),
+        )
+        .expect("claim A");
+    assert_eq!(
+        a,
+        Grant {
+            global_id: "lane@acct".into(),
+            epoch: 1,
+            superseded: None
+        }
+    );
 
     let later = t0() + Duration::seconds(30);
-    let b = f.claim(&mut roles, &sign_claim(&lane, nonce(2), later).unwrap(), later).expect("claim B");
-    assert_eq!(b, Grant { global_id: "lane@acct".into(), epoch: 2, superseded: Some(1) });
+    let b = f
+        .claim(
+            &mut roles,
+            &sign_claim(&lane, nonce(2), later).unwrap(),
+            later,
+        )
+        .expect("claim B");
+    assert_eq!(
+        b,
+        Grant {
+            global_id: "lane@acct".into(),
+            epoch: 2,
+            superseded: Some(1)
+        }
+    );
 
     assert_eq!(roles.check("lane@acct", 1), Err(Superseded { current: 2 }));
     assert_eq!(roles.check("lane@acct", 2), Ok(()));
@@ -92,7 +123,9 @@ fn an_unknown_account_is_refused_and_changes_nothing() {
     assert_eq!(roles.current("lane@acct"), None);
 
     // The refused attempt must not have consumed the nonce.
-    let granted = f.claim(&mut roles, &req, t0()).expect("the same request, with the right lookup");
+    let granted = f
+        .claim(&mut roles, &req, t0())
+        .expect("the same request, with the right lookup");
     assert_eq!(granted.epoch, 1);
 }
 
@@ -104,7 +137,10 @@ fn a_signature_by_another_key_is_refused() {
     let mut forged = sign_claim(&other, nonce(1), t0()).unwrap();
     forged.chain = lane.chain.clone();
     let mut roles = table();
-    assert_eq!(f.claim(&mut roles, &forged, t0()), Err(ClaimError::BadSignature));
+    assert_eq!(
+        f.claim(&mut roles, &forged, t0()),
+        Err(ClaimError::BadSignature)
+    );
     assert_eq!(roles.current("lane@acct"), None);
 }
 
@@ -118,7 +154,10 @@ fn a_claim_for_another_role_cannot_reuse_a_certificate() {
     let mut mixed = sign_claim(&a, nonce(1), t0()).unwrap();
     mixed.chain = b.chain.clone();
     let mut roles = table();
-    assert_eq!(f.claim(&mut roles, &mixed, t0()), Err(ClaimError::BadSignature));
+    assert_eq!(
+        f.claim(&mut roles, &mixed, t0()),
+        Err(ClaimError::BadSignature)
+    );
     assert_eq!(roles.current("beta@acct"), None);
     assert_eq!(roles.current("alpha@acct"), None);
 }
@@ -156,7 +195,10 @@ fn a_short_signature_is_refused_not_a_panic() {
     let mut req = sign_claim(&f.role("lane"), nonce(1), t0()).unwrap();
     req.signature.truncate(10);
     let mut roles = table();
-    assert_eq!(f.claim(&mut roles, &req, t0()), Err(ClaimError::BadSignature));
+    assert_eq!(
+        f.claim(&mut roles, &req, t0()),
+        Err(ClaimError::BadSignature)
+    );
 }
 
 #[test]
@@ -184,5 +226,64 @@ fn a_claim_signed_before_the_table_started_is_refused() {
         Err(ClaimError::Stale)
     );
     let resigned = sign_claim(&f.role("lane"), nonce(2), t0() + Duration::seconds(11)).unwrap();
-    assert_eq!(f.claim(&mut restarted, &resigned, t0() + Duration::seconds(11)).unwrap().epoch, 1);
+    assert_eq!(
+        f.claim(&mut restarted, &resigned, t0() + Duration::seconds(11))
+            .unwrap()
+            .epoch,
+        1
+    );
+}
+
+// ---- Task 2: snapshot and restore ----
+
+fn claimed_twice(f: &Fixture) -> Roles {
+    let lane = f.role("lane");
+    let mut roles = table();
+    f.claim(
+        &mut roles,
+        &sign_claim(&lane, nonce(1), t0()).unwrap(),
+        t0(),
+    )
+    .unwrap();
+    let later = t0() + Duration::seconds(30);
+    f.claim(
+        &mut roles,
+        &sign_claim(&lane, nonce(2), later).unwrap(),
+        later,
+    )
+    .unwrap();
+    roles
+}
+
+#[test]
+fn restore_continues_epochs() {
+    let f = Fixture::new();
+    let roles = claimed_twice(&f);
+    let json = serde_json::to_string(&roles.snapshot()).expect("serialize");
+    let state: synapse::roles::RolesState = serde_json::from_str(&json).expect("deserialize");
+    let restart = t0() + Duration::minutes(1);
+    let mut restored = Roles::restore(state, restart);
+    assert_eq!(restored.current("lane@acct"), Some(2));
+
+    let after = restart + Duration::seconds(1);
+    let grant = f
+        .claim(
+            &mut restored,
+            &sign_claim(&f.role("lane"), nonce(3), after).unwrap(),
+            after,
+        )
+        .expect("claim after restore");
+    assert_eq!(grant.epoch, 3);
+    assert_eq!(grant.superseded, Some(2));
+}
+
+#[test]
+fn restore_does_not_resurrect_superseded_epochs() {
+    let f = Fixture::new();
+    let restored = Roles::restore(claimed_twice(&f).snapshot(), t0() + Duration::minutes(1));
+    assert_eq!(
+        restored.check("lane@acct", 1),
+        Err(Superseded { current: 2 })
+    );
+    assert_eq!(restored.check("lane@acct", 2), Ok(()));
 }

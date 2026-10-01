@@ -14,6 +14,7 @@ use std::fmt;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use ring::signature::{ED25519, UnparsedPublicKey};
+use serde::{Deserialize, Serialize};
 
 use crate::certificate::{AgentCertificate, ChainError, RevocationLookup, validate_chain};
 use crate::keystore::RoleIdentity;
@@ -113,21 +114,33 @@ pub struct Superseded {
 
 impl fmt::Display for Superseded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "superseded: the role's current epoch is {}", self.current)
+        write!(
+            f,
+            "superseded: the role's current epoch is {}",
+            self.current
+        )
     }
 }
 
 impl std::error::Error for Superseded {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Record {
-    epoch: u64,
-    claimed_at: DateTime<Utc>,
+/// One role's persisted state: its current epoch and when it was claimed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleRecord {
+    pub epoch: u64,
+    pub claimed_at: DateTime<Utc>,
+}
+
+/// Everything that must survive a restart (spec rule 6): every role's epoch, so a restarted table
+/// never reissues an old one. The replay record is deliberately absent; see [`Roles::restore`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RolesState {
+    pub roles: BTreeMap<String, RoleRecord>,
 }
 
 /// The role table: the current epoch of every claimed role.
 pub struct Roles {
-    roles: BTreeMap<String, Record>,
+    roles: BTreeMap<String, RoleRecord>,
     claims: ReplayGuard,
 }
 
@@ -151,7 +164,8 @@ impl Roles {
         revoked: &dyn RevocationLookup,
         now: DateTime<Utc>,
     ) -> Result<Grant, ClaimError> {
-        let leaf = validate_chain(&req.chain, account_keys, revoked, now).map_err(ClaimError::Chain)?;
+        let leaf =
+            validate_chain(&req.chain, account_keys, revoked, now).map_err(ClaimError::Chain)?;
         let global_id = leaf.subject_global_id;
         let text = claim_signing_input(&global_id, &req.nonce, req.signed_at);
         UnparsedPublicKey::new(&ED25519, &leaf.subject_signing_key)
@@ -159,7 +173,10 @@ impl Roles {
             .map_err(|_| ClaimError::BadSignature)?;
 
         let key_id = crate::sender_auth::key_id(&leaf.subject_signing_key);
-        match self.claims.check(&key_id, &hex(&req.nonce), req.signed_at, now) {
+        match self
+            .claims
+            .check(&key_id, &hex(&req.nonce), req.signed_at, now)
+        {
             Decision::Deliver(Freshness::Fresh) => {}
             Decision::Deliver(_) => return Err(ClaimError::Stale),
             Decision::Drop => return Err(ClaimError::Replayed),
@@ -169,7 +186,7 @@ impl Roles {
         let epoch = previous.unwrap_or(0) + 1;
         self.roles.insert(
             global_id.clone(),
-            Record {
+            RoleRecord {
                 epoch,
                 claimed_at: now,
             },
@@ -190,6 +207,26 @@ impl Roles {
                 current: record.epoch,
             }),
             None => Err(Superseded { current: 0 }),
+        }
+    }
+
+    /// The state to persist (M4).
+    #[must_use]
+    pub fn snapshot(&self) -> RolesState {
+        RolesState {
+            roles: self.roles.clone(),
+        }
+    }
+
+    /// Rebuild a table from persisted state. Epochs continue from where they were. The replay
+    /// record starts empty with its horizon at `now`, so any claim signed at or before `now` is
+    /// refused as [`ClaimError::Stale`]: a claim captured before the restart cannot be replayed
+    /// after it.
+    #[must_use]
+    pub fn restore(state: RolesState, now: DateTime<Utc>) -> Roles {
+        Roles {
+            roles: state.roles,
+            claims: ReplayGuard::new(ReplayConfig::default(), now),
         }
     }
 
