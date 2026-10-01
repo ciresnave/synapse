@@ -260,3 +260,53 @@ fn role_names_are_validated() {
     let (_dir, store) = store_with_account();
     assert!(matches!(store.role("../evil", t0()), Err(KeystoreError::InvalidName)));
 }
+
+// ---- Task 3: Windows ACL check ----
+
+#[cfg(windows)]
+fn icacls_grant_read(path: &Path, sid: &str) {
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/grant")
+        .arg(format!("*{sid}:R"))
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("icacls runs");
+    assert!(status.success(), "icacls could not grant {sid} read: the mutation did not apply");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_fresh_store_passes_the_acl_check() {
+    let (_dir, store) = store_with_account();
+    store.role("r", t0()).expect("a fresh store under the user's temp dir is owner-only");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_key_readable_by_a_broad_group_is_refused() {
+    // S-1-1-0 Everyone, S-1-5-32-545 Users, S-1-5-11 Authenticated Users.
+    for sid in ["S-1-1-0", "S-1-5-32-545", "S-1-5-11"] {
+        let dir = tempfile::tempdir().unwrap();
+        Keystore::init_account(dir.path(), "acct").expect("init");
+        icacls_grant_read(&account_key_path(dir.path()), sid);
+        let got = Keystore::open(dir.path());
+        assert!(
+            matches!(got, Err(KeystoreError::PermissionsTooOpen("account key"))),
+            "{sid} can read the account key, yet open returned {got:?}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_role_key_readable_by_everyone_is_refused() {
+    let (dir, store) = store_with_account();
+    store.role("r", t0()).expect("role");
+    icacls_grant_read(&dir.path().join("roles").join("r").join("signing.key.pem"), "S-1-1-0");
+    let got = store.role("r", t0());
+    assert!(
+        matches!(got, Err(KeystoreError::PermissionsTooOpen("role signing key"))),
+        "{got:?}"
+    );
+}

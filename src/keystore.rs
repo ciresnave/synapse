@@ -371,9 +371,121 @@ fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
             return Err(KeystoreError::PermissionsTooOpen(item));
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if windows_acl::readable_by_broad_group(path).map_err(io_err(item))? {
+            return Err(KeystoreError::PermissionsTooOpen(item));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = (path, item);
     Ok(())
+}
+
+/// The Windows half of "owner-only" (PM-approved, spec §4 Q2(a)): files live under the user's
+/// `%LOCALAPPDATA%`, whose inherited ACL admits the user, SYSTEM and Administrators. On every load
+/// we refuse a file or directory that `Everyone`, `Users` or `Authenticated Users` can read, the
+/// same rule OpenSSH for Windows applies to private keys. A NULL DACL grants everyone everything, so
+/// it is refused too.
+#[cfg(windows)]
+mod windows_acl {
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+        EqualSid, GetAce, PSECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
+        WinAuthenticatedUserSid, WinBuiltinUsersSid, WinWorldSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA;
+
+    /// `ACCESS_ALLOWED_ACE_TYPE` (winnt.h), a fixed ABI value; defined here rather than enabling
+    /// windows-sys's `System_SystemServices` feature for one constant.
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const READ_BITS: u32 = FILE_READ_DATA | GENERIC_READ | GENERIC_ALL;
+    const BROAD: [WELL_KNOWN_SID_TYPE; 3] =
+        [WinWorldSid, WinBuiltinUsersSid, WinAuthenticatedUserSid];
+
+    /// Frees the security descriptor `GetNamedSecurityInfoW` allocated, on every path.
+    struct Descriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: allocated by GetNamedSecurityInfoW with LocalAlloc; freed exactly once.
+                unsafe { LocalFree(self.0) };
+            }
+        }
+    }
+
+    pub(super) fn readable_by_broad_group(path: &Path) -> io::Result<bool> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated; the out-pointers are valid for writes; owner, group and
+        // SACL are not requested, so their out-pointers may be null.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        let _owned = Descriptor(descriptor);
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        if dacl.is_null() {
+            return Ok(true);
+        }
+
+        let mut broad = [[0u8; SECURITY_MAX_SID_SIZE as usize]; 3];
+        for (kind, buffer) in BROAD.iter().zip(broad.iter_mut()) {
+            let mut size = SECURITY_MAX_SID_SIZE;
+            // SAFETY: `buffer` holds SECURITY_MAX_SID_SIZE bytes, as `size` says.
+            let ok = unsafe {
+                CreateWellKnownSid(*kind, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size)
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+
+        // SAFETY: `dacl` is non-null and points into `descriptor`, which `_owned` keeps alive.
+        let count = unsafe { (*dacl).AceCount };
+        for index in 0..u32::from(count) {
+            let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+            // SAFETY: index < AceCount; `ace` receives a pointer into the DACL.
+            if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: every ACE starts with an ACE_HEADER.
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                continue;
+            }
+            // SAFETY: AceType says this ACE is an ACCESS_ALLOWED_ACE; its SID starts at SidStart.
+            let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
+            if allowed.Mask & READ_BITS == 0 {
+                continue;
+            }
+            let sid = std::ptr::addr_of!(allowed.SidStart) as *mut core::ffi::c_void;
+            for buffer in &mut broad {
+                // SAFETY: both point at valid SIDs for the duration of the call.
+                if unsafe { EqualSid(sid, buffer.as_mut_ptr().cast()) } != 0 {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// Check permissions, then read.

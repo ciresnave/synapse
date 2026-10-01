@@ -182,6 +182,10 @@ rcgen = "0.14.10"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 # Development dependencies
+# Windows ACL check for the keystore (M2, spec 4 Q2(a)).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1.0"
