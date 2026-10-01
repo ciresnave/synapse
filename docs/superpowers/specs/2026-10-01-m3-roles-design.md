@@ -69,6 +69,9 @@ pub struct Superseded { pub current: u64 }
    `claim_signing_input(global_id, nonce, signed_at)`.
 3. **Freshness and replay** go through `ReplayGuard`, keyed by the leaf signing key's `key_id` and
    the nonce. A replayed or stale claim is refused, so a captured claim can't bump the epoch again.
+   The transport *delivers* stale messages with a mark; claims are stricter. Only
+   `Deliver(Fresh)` is accepted. `Deliver(Stale | Ahead | …)` gives `Stale`, and `Drop` gives
+   `Replayed`.
 4. **Epoch.** The new epoch is the old epoch + 1, or 1 for a first claim. **The newest claim always
    wins.** `Grant.superseded` names the epoch it displaced.
 5. **`check`** passes only for the current epoch. Any other epoch gets `Superseded { current }`.
