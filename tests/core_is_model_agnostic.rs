@@ -74,7 +74,9 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     while let Some(i) = haystack[start..].find(needle) {
         let at = start + i;
         let letter = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphabetic());
-        if !letter(at.checked_sub(1).and_then(|j| bytes.get(j))) && !letter(bytes.get(at + needle.len())) {
+        if !letter(at.checked_sub(1).and_then(|j| bytes.get(j)))
+            && !letter(bytes.get(at + needle.len()))
+        {
             return true;
         }
         start = at + needle.len();

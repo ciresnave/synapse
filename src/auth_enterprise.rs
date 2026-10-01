@@ -72,7 +72,7 @@ pub struct SynapseEnterpriseAuthManager {
 /// 🤖 Enhanced Enterprise User Profile for AI Networks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnterpriseUserProfile {
-    /// Unique Synapse global ID (e.g., "claude@anthropic.ai")
+    /// Unique Synapse global ID (e.g., "assistant@ai-lab.example.com")
     pub global_id: String,
 
     /// Display name for AI agents or humans
@@ -1369,7 +1369,7 @@ mod tests {
         let assertion_string = serde_json::to_string(&mock_assertion).unwrap();
 
         let result = auth_manager
-            .authenticate_ai_agent_webauthn("claude-3", &assertion_string, "ai_network")
+            .authenticate_ai_agent_webauthn("assistant-1", &assertion_string, "ai_network")
             .await
             .unwrap();
 

@@ -13,7 +13,7 @@
 // │                SimpleMessage                        │
 // │  Human-readable, easy to work with                  │
 // │  • to: "Alice"                                      │
-// │  • from_entity: "Claude"                            │
+// │  • from_entity: "Assistant"                         │
 // │  • content: "Hello!"                                │
 // │  • message_type: Direct                             │
 // └─────────────────┬───────────────────────────────────┘
@@ -24,7 +24,7 @@
 // │  Network-ready with security and routing            │
 // │  • message_id: uuid                                 │
 // │  • to_global_id: "alice@ai-lab.example.com"        │
-// │  • from_global_id: "claude@anthropic.com"          │
+// │  • from_global_id: "assistant@ai-lab.example.com"  │
 // │  • encrypted_content: [encrypted bytes]             │
 // │  • signature: [digital signature]                   │
 // │  • security_level: Authenticated                    │
@@ -44,7 +44,7 @@
 //
 // ### AiModel
 // - **Purpose**: AI systems, language models, intelligent agents
-// - **Examples**: Claude, GPT-4, local AI assistants, specialized ML models
+// - **Examples**: GPT-4, Llama, local AI assistants, specialized ML models
 // - **Capabilities**: Automated responses, real-time communication, batch processing
 // - **Security**: May have special encryption requirements, rate limiting
 //
@@ -75,7 +75,7 @@
 // // One-to-one private communication
 // SimpleMessage {
 //     to: "Alice".to_string(),
-//     from_entity: "Claude".to_string(),
+//     from_entity: "Assistant".to_string(),
 //     content: "Can you help me with this analysis?".to_string(),
 //     message_type: MessageType::Direct,
 //     metadata: HashMap::new(),
@@ -186,7 +186,7 @@
 // // Example: AI collaboration metadata
 // let mut metadata = HashMap::new();
 // metadata.insert("conversation_id".to_string(), "research-session-001".to_string());
-// metadata.insert("model_version".to_string(), "claude-3.5".to_string());
+// metadata.insert("model_version".to_string(), "model-1.0".to_string());
 // metadata.insert("temperature".to_string(), "0.7".to_string());
 // metadata.insert("context_window".to_string(), "200k".to_string());
 //
@@ -326,7 +326,7 @@ impl std::fmt::Display for SecurityLevel {
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 // Always derive bincode traits for monolithic build
 pub struct SimpleMessage {
-    /// Recipient's local name (e.g., "Eric", "Claude", "FileSystem")
+    /// Recipient's local name (e.g., "Eric", "Assistant", "FileSystem")
     pub to: String,
     /// Sender's local name
     pub from_entity: String,
@@ -402,7 +402,7 @@ impl SimpleMessage {
 /// Global identity for an entity in the network
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalIdentity {
-    /// Local name (e.g., "Eric", "Claude")
+    /// Local name (e.g., "Eric", "Assistant")
     pub local_name: String,
     /// Global email identifier
     pub global_id: String,

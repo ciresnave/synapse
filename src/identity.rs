@@ -8,7 +8,7 @@
 //! ## 🎯 The Magic of Simple Names
 //!
 //! Instead of dealing with complex URLs, IP addresses, or lengthy identifiers, EMRP
-//! lets you use simple names like `"Alice"`, `"Claude"`, or `"MyBot"`. The identity
+//! lets you use simple names like `"Alice"`, `"Assistant"`, or `"MyBot"`. The identity
 //! system automatically resolves these to complete network information:
 //!
 //! ```text
@@ -20,13 +20,13 @@
 //!
 //! ### 1. Local Names (Human Layer)
 //! - **Purpose**: Human-friendly identifiers for easy communication
-//! - **Examples**: `"Alice"`, `"Claude"`, `"ResearchBot"`, `"Team-Alpha"`
+//! - **Examples**: `"Alice"`, `"Assistant"`, `"ResearchBot"`, `"Team-Alpha"`
 //! - **Scope**: Local to your identity registry
 //! - **Usage**: What you use in code and conversations
 //!
 //! ### 2. Global IDs (Email Layer)
 //! - **Purpose**: Globally unique identifiers based on email addresses
-//! - **Examples**: `"alice@ai-lab.example.com"`, `"claude@anthropic.com"`
+//! - **Examples**: `"alice@ai-lab.example.com"`, `"assistant@ai-lab.example.com"`
 //! - **Scope**: Global across all EMRP systems worldwide
 //! - **Benefits**: Leverages existing email infrastructure and DNS
 //!
@@ -331,13 +331,13 @@
 //! # let router = std::sync::Arc::new(tokio::sync::Mutex::new("router".to_string())); // Mock router
 //! // Set up a research team identity registry
 //! let mut team = IdentityRegistry::new();
-//! team.register_entity("claude@anthropic.com", "claude@anthropic.com", Some("Claude".to_string()))?;
+//! team.register_entity("assistant@ai-lab.example.com", "assistant@ai-lab.example.com", Some("Assistant".to_string()))?;
 //! team.register_entity("gpt4@openai.com", "gpt4@openai.com", Some("GPT-4".to_string()))?;
 //! team.register_entity("gemini@google.com", "gemini@google.com", Some("Gemini".to_string()))?;
 //! team.register_entity("dr.smith@university.edu", "dr.smith@university.edu", Some("Research-Lead".to_string()))?;
 //!
 //! // Now anyone can easily send to team members
-//! // router.send_to("Claude", "What's your take on consciousness?").await?;
+//! // router.send_to("Assistant", "What's your take on consciousness?").await?;
 //! // router.send_to("Research-Lead", "Results are ready for review").await?;
 //! # Ok(())
 //! # }
@@ -870,11 +870,11 @@ mod tests {
     fn test_identity_registration() {
         let registry = IdentityRegistry::new();
 
-        let identity = IdentityRegistry::create_ai_model("Claude", "anthropic.ai");
+        let identity = IdentityRegistry::create_ai_model("Assistant", "ai-lab.example.com");
 
         assert!(registry.register_identity(identity).is_ok());
-        assert!(registry.has_local_name("Claude"));
-        assert!(registry.resolve_local_name("Claude").is_some());
+        assert!(registry.has_local_name("Assistant"));
+        assert!(registry.resolve_local_name("Assistant").is_some());
     }
 
     #[test]
