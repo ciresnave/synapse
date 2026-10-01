@@ -192,8 +192,40 @@ that share those names.
 
 ## 8. Things that could make this estimate wrong
 
-- **M1 fails**, meaning Claude Code accepts channel notifications only from allow-listed or TS
-  servers. Then (a) waits, and Claude lanes would poll through (b) in the meantime.
+- ~~**M1 fails**~~ **M1 PASSED (2026-10-01; see §9).** Claude Code accepts a channel push from a
+  Rust rmcp 3.5 server, with one protocol-version constraint that M7 must keep, recorded below.
+- **Channel push needs a session protocol revision (found by M1).** Claude Code 2.1.286 opens
+  with `server/discover`, offering `2026-07-28`, which has no `initialize` handshake (SEP-2567).
+  A connection made at that revision has no session, so it has no path for an unsolicited push.
+  So the M7 adapter must cap its supported versions at `2025-11-25`, the newest revision with
+  `initialize`. The risk is that a future Claude Code drops session revisions or moves channels
+  to a new mechanism. Then (a) waits, and Claude lanes poll through (b) in the meantime.
 - **Windows daemon lifecycle** (M5) has historically eaten more time than planned: claude-peers
   needed several fixes for the spawn/port race and for shutdown on stdin close.
 - **Review load:** 12–15 PRs through one PM gate.
+
+## 9. M1 result (2026-10-01): PASS
+
+The spike was throwaway and is not in the repo: an rmcp 3.5 stdio server declaring
+`experimental: {"claude/channel": {}}` and sending `notifications/claude/channel`.
+
+- **Live run 1 (CireSnave) FAILED.** The screen said: *"this connection's protocol version has no
+  channel delivery p…"*.
+- **The cause was read from captured bytes, not guessed.** A logging tee sat between Claude Code
+  and the spike, during a headless run with no dev-channels flag.
+  - Claude Code's first message is `server/discover` at `2026-07-28`, and rmcp 3.5 accepted it.
+  - So the connection never sent `notifications/initialized`, and no push could be delivered.
+  - claude-peers' TypeScript SDK (1.27) doesn't know that revision, so it falls back to a session.
+- **The earlier wire probe passed and still missed this.** It opened with `initialize` at
+  `2025-06-18`. That proved the bytes were right, but it never asked what the real client sends
+  first.
+- **The fix:** cap supported versions at `2025-11-25`. The wire then shows:
+  1. `server/discover` is rejected with `-32022`;
+  2. Claude Code sends `initialize` at `2025-11-25`;
+  3. Claude Code sends `notifications/initialized`;
+  4. the push is delivered.
+- **Live run 2 (CireSnave) PASSED.** The screen showed *"← synapse-spike: M1 spike push #1 from a
+  Rust (rmcp 3.5) MCP server"*, then #2, injected unprompted.
+- **Not explained:** both runs also showed *"server:synapse-spike · no MCP server configured with
+  that name"*. Channel delivery worked in spite of it, so it is orthogonal to channels. It might be
+  because the spike declares no `tools` capability, but that is unverified. M7 should check it.
