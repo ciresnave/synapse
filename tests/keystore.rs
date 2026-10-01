@@ -72,11 +72,9 @@ fn names_are_validated() {
 fn a_garbage_account_key_is_corrupt_and_unnamed() {
     let dir = tempfile::tempdir().unwrap();
     Keystore::init_account(dir.path(), "acct").expect("init");
+    // Overwrite in place: the owner may write its own key, and the file keeps its owner-only
+    // permissions, so the only thing wrong is the content.
     let key = account_key_path(dir.path());
-    let mut perms = std::fs::metadata(&key).unwrap().permissions();
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    std::fs::set_permissions(&key, perms).unwrap();
     std::fs::write(&key, b"junk").unwrap();
 
     let err = Keystore::open(dir.path()).expect_err("garbage must not load");
@@ -112,8 +110,16 @@ fn keys_are_owner_only_and_widened_keys_are_refused() {
 #[test]
 fn a_leftover_temp_file_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("account")).unwrap();
-    std::fs::write(dir.path().join("account").join(".tmp-1-1"), b"junk").unwrap();
+    // The account directory must be owner-only for the keystore to accept it at all, so the
+    // leftover is planted in one created the way the keystore creates it.
+    let account = dir.path().join("account");
+    std::fs::create_dir_all(&account).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&account, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(account.join(".tmp-1-1"), b"junk").unwrap();
     Keystore::init_account(dir.path(), "acct").expect("init despite a leftover temp file");
     Keystore::open(dir.path()).expect("open despite a leftover temp file");
 }
