@@ -20,8 +20,18 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey, spki::der::pem::LineEnding};
+
+use crate::certificate::{AgentCertificate, Permission, chain_from_pem, chain_to_pem};
+use crate::crypto::CryptoManager;
+use crate::sealing::SealingKeyPair;
+
+/// How long a role certificate is valid (PM-approved, spec §4 Q3).
+pub const CERT_VALIDITY: Duration = Duration::hours(24);
+/// A certificate with less than this left is reissued on load.
+pub const RENEW_BELOW: Duration = Duration::hours(12);
 
 /// What went wrong, naming only the item involved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +128,39 @@ impl fmt::Debug for Keystore {
     }
 }
 
+/// A role, loaded: its identity, its keys in a ready [`CryptoManager`], and its certificate.
+pub struct RoleIdentity {
+    /// `<role>@<account>`.
+    pub global_id: String,
+    /// The signing key, the sealing key and the certificate chain, all loaded.
+    pub crypto: CryptoManager,
+    pub signing_key_id: String,
+    pub sealing_key_id: String,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+    pub permissions: Vec<Permission>,
+    /// Leaf first; one link, signed by the account key.
+    pub chain: Vec<AgentCertificate>,
+}
+
+impl fmt::Debug for RoleIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RoleIdentity")
+            .field("global_id", &self.global_id)
+            .field("signing_key_id", &self.signing_key_id)
+            .field("sealing_key_id", &self.sealing_key_id)
+            .field("not_before", &self.not_before)
+            .field("not_after", &self.not_after)
+            .field("permissions", &self.permissions)
+            .finish_non_exhaustive()
+    }
+}
+
 const ACCOUNT_DIR: &str = "account";
+const ROLES_DIR: &str = "roles";
+const SIGNING_KEY: &str = "signing.key.pem";
+const SEALING_KEY: &str = "sealing.key.pem";
+const CERT: &str = "cert.pem";
 const ACCOUNT_KEY: &str = "account.key.pem";
 const ACCOUNT_NAME: &str = "name";
 
@@ -173,6 +215,102 @@ impl Keystore {
     #[must_use]
     pub fn account(&self) -> AccountSummary {
         summary(&self.account, &self.account_key)
+    }
+
+    /// Load `role`, creating its keys on first use, and (re)issuing its certificate when there is
+    /// none, it does not match the keys, or less than [`RENEW_BELOW`] of it remains at `now`.
+    pub fn role(&self, role: &str, now: DateTime<Utc>) -> Result<RoleIdentity> {
+        if !valid_name(role) {
+            return Err(KeystoreError::InvalidName);
+        }
+        let roles = self.home.join(ROLES_DIR);
+        ensure_dir(&roles, "roles directory")?;
+        let dir = roles.join(role);
+        ensure_dir(&dir, "role directory")?;
+
+        let signing_pem = load_or_create(&dir.join(SIGNING_KEY), "role signing key", || {
+            CryptoManager::new()
+                .generate_keypair()
+                .map(|(private, _public)| private)
+                .map_err(|_| KeystoreError::Io("role signing key", io::ErrorKind::Other))
+        })?;
+        let sealing_pem = load_or_create(&dir.join(SEALING_KEY), "role sealing key", || {
+            Ok(SealingKeyPair::generate().to_pkcs8_pem())
+        })?;
+
+        let mut crypto = CryptoManager::new();
+        crypto
+            .load_private_key(&signing_pem)
+            .map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+        crypto
+            .load_sealing_key_pem(&sealing_pem)
+            .map_err(|_| KeystoreError::Corrupt("role sealing key"))?;
+        let signing_public = crypto
+            .public_key_bytes()
+            .map_err(|_| KeystoreError::Corrupt("role signing key"))?;
+        let sealing_public = *crypto
+            .sealing_key()
+            .ok_or(KeystoreError::Corrupt("role sealing key"))?
+            .public_key()
+            .as_bytes();
+
+        let global_id = format!("{role}@{}", self.account);
+        let cert_path = dir.join(CERT);
+        let current = if exists(&cert_path, "role certificate")? {
+            read_checked(&cert_path, "role certificate")?
+        } else {
+            Vec::new()
+        };
+        let reusable = std::str::from_utf8(&current)
+            .ok()
+            .and_then(|pem| chain_from_pem(pem).ok())
+            .filter(|chain| {
+                chain.len() == 1
+                    && chain[0].subject_global_id == global_id
+                    && chain[0].subject_signing_key == signing_public
+                    && chain[0].subject_sealing_key == sealing_public
+                    && chain[0].issuer_key_id == self.account().key_id
+                    && chain[0].not_before <= now
+                    && chain[0].not_after - now >= RENEW_BELOW
+            });
+        let chain = match reusable {
+            Some(chain) => chain,
+            None => {
+                let unsigned = AgentCertificate {
+                    version: 1,
+                    serial: random_bytes::<16>()?,
+                    issuer_key_id: self.account().key_id,
+                    subject_label: role.to_string(),
+                    subject_global_id: global_id.clone(),
+                    subject_signing_key: signing_public,
+                    subject_sealing_key: sealing_public,
+                    not_before: now,
+                    not_after: now + CERT_VALIDITY,
+                    permissions: vec![Permission::Send, Permission::RequestAck, Permission::Ack],
+                    may_delegate: 0,
+                    signature: [0; 64],
+                };
+                let chain = vec![AgentCertificate::sign(unsigned, &self.account_key)];
+                replace(&cert_path, chain_to_pem(&chain).as_bytes(), "role certificate")?;
+                chain
+            }
+        };
+
+        let leaf = &chain[0];
+        let identity = RoleIdentity {
+            global_id,
+            signing_key_id: crate::sender_auth::key_id(&signing_public),
+            sealing_key_id: crate::sender_auth::key_id(&sealing_public),
+            not_before: leaf.not_before,
+            not_after: leaf.not_after,
+            permissions: leaf.permissions.clone(),
+            chain: chain.clone(),
+            crypto: {
+                crypto.set_certificate_chain(chain);
+                crypto
+            },
+        };
+        Ok(identity)
     }
 
     /// The account's public key: what a receiver pins to trust this account's roles.
@@ -242,6 +380,19 @@ fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
 fn read_checked(path: &Path, item: &'static str) -> Result<Vec<u8>> {
     check_owner_only(path, item)?;
     fs::read(path).map_err(io_err(item))
+}
+
+/// Read the key at `path`, or create it with `make` if absent. If another process creates it
+/// between our check and our write, its key wins and is the one returned.
+fn load_or_create(
+    path: &Path,
+    item: &'static str,
+    make: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    if !exists(path, item)? {
+        write_new(path, make()?.as_bytes(), item)?;
+    }
+    String::from_utf8(read_checked(path, item)?).map_err(|_| KeystoreError::Corrupt(item))
 }
 
 /// Write `bytes` to a fresh owner-only `.tmp-` sibling of `path` and sync it.

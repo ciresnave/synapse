@@ -122,3 +122,141 @@ fn default_home_prefers_synapse_home() {
     #[cfg(windows)]
     assert!(fallback.starts_with(std::env::var("LOCALAPPDATA").unwrap()));
 }
+
+// ---- Task 2: roles ----
+
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use synapse::certificate::{Permission, RevocationLookup, validate_chain};
+
+struct NoRevocations;
+impl RevocationLookup for NoRevocations {
+    fn is_revoked(&self, _issuer_key_id: &str, _serial: &[u8; 16]) -> bool {
+        false
+    }
+}
+
+fn t0() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0).unwrap()
+}
+
+fn store_with_account() -> (tempfile::TempDir, Keystore) {
+    let dir = tempfile::tempdir().unwrap();
+    Keystore::init_account(dir.path(), "acct").expect("init");
+    let store = Keystore::open(dir.path()).expect("open");
+    (dir, store)
+}
+
+/// Validate a role's chain against the store's account key, as a receiver that pinned it would.
+fn validates(store: &Keystore, chain: &[synapse::certificate::AgentCertificate], now: DateTime<Utc>)
+    -> Result<synapse::certificate::VerifiedChain, synapse::certificate::ChainError> {
+    let account_key_id = store.account().key_id;
+    let account_key = store.account_public_key();
+    validate_chain(
+        chain,
+        &move |kid: &str| (kid == account_key_id).then_some(account_key),
+        &NoRevocations,
+        now,
+    )
+}
+
+#[test]
+fn a_role_is_stable_across_loads() {
+    let (_dir, store) = store_with_account();
+    let first = store.role("synapse", t0()).expect("role");
+    let second = store.role("synapse", t0() + Duration::minutes(5)).expect("role again");
+    assert_eq!(first.global_id, "synapse@acct");
+    assert_eq!(second.global_id, first.global_id);
+    assert_eq!(second.signing_key_id, first.signing_key_id);
+    assert_eq!(second.sealing_key_id, first.sealing_key_id);
+    assert_eq!(second.chain[0].serial, first.chain[0].serial, "a valid certificate is not reissued");
+}
+
+#[test]
+fn a_fresh_certificate_validates_against_the_account_key() {
+    let (_dir, store) = store_with_account();
+    let role = store.role("synapse", t0()).expect("role");
+    let verified = validates(&store, &role.chain, t0()).expect("chain validates");
+    assert_eq!(verified.subject_global_id, "synapse@acct");
+    assert_eq!(verified.links, 1);
+    let mut names: Vec<String> = verified.permissions.iter().map(Permission::as_str).collect();
+    names.sort();
+    assert_eq!(names, ["ack", "request-ack", "send"]);
+    assert_eq!(role.not_before, t0());
+    assert_eq!(role.not_after, t0() + Duration::hours(24));
+    assert_eq!(
+        synapse::sender_auth::key_id(&verified.subject_signing_key),
+        role.signing_key_id
+    );
+    assert_eq!(
+        role.crypto.public_key_bytes().expect("signing key loaded"),
+        verified.subject_signing_key
+    );
+}
+
+#[test]
+fn a_certificate_is_renewed_under_twelve_hours_and_not_before() {
+    let (_dir, store) = store_with_account();
+    let first = store.role("r", t0()).expect("role");
+
+    let at_11h = store.role("r", t0() + Duration::hours(11)).expect("role at 11h");
+    assert_eq!(at_11h.chain[0].serial, first.chain[0].serial, "12h+ left: keep");
+
+    let now = t0() + Duration::hours(12) + Duration::seconds(1);
+    let renewed = store.role("r", now).expect("role past 12h");
+    assert_ne!(renewed.chain[0].serial, first.chain[0].serial, "under 12h left: renew");
+    assert_eq!(renewed.not_before, now);
+    assert_eq!(renewed.not_after, now + Duration::hours(24));
+    assert_eq!(renewed.signing_key_id, first.signing_key_id, "renewal keeps the keys");
+    assert_eq!(renewed.sealing_key_id, first.sealing_key_id, "renewal keeps the keys");
+    validates(&store, &renewed.chain, now).expect("renewed chain validates");
+}
+
+#[test]
+fn an_expired_certificate_is_renewed() {
+    let (_dir, store) = store_with_account();
+    let first = store.role("r", t0()).expect("role");
+    let later = t0() + Duration::hours(48);
+    let renewed = store.role("r", later).expect("role after expiry");
+    assert_ne!(renewed.chain[0].serial, first.chain[0].serial);
+    validates(&store, &renewed.chain, later).expect("renewed chain validates");
+}
+
+#[test]
+fn concurrent_first_loads_agree_on_one_key() {
+    let dir = tempfile::tempdir().unwrap();
+    Keystore::init_account(dir.path(), "acct").expect("init");
+    let home = dir.path().to_path_buf();
+    let ids: Vec<(String, String)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let home = &home;
+                s.spawn(move || {
+                    let store = Keystore::open(home).expect("open");
+                    let role = store.role("race", t0()).expect("role");
+                    (role.signing_key_id, role.sealing_key_id)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(ids.windows(2).all(|w| w[0] == w[1]), "racing loaders disagree: {ids:?}");
+}
+
+#[test]
+fn a_garbage_role_key_is_corrupt_and_unnamed() {
+    let (dir, store) = store_with_account();
+    store.role("x", t0()).expect("role");
+    let key = dir.path().join("roles").join("x").join("signing.key.pem");
+    std::fs::write(&key, b"junk").unwrap();
+    let err = store.role("x", t0()).expect_err("garbage must not load");
+    assert_eq!(err, KeystoreError::Corrupt("role signing key"));
+    for form in path_forms(dir.path()) {
+        assert!(!err.to_string().contains(&form));
+    }
+}
+
+#[test]
+fn role_names_are_validated() {
+    let (_dir, store) = store_with_account();
+    assert!(matches!(store.role("../evil", t0()), Err(KeystoreError::InvalidName)));
+}
