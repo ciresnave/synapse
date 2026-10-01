@@ -447,8 +447,11 @@ wasm = [
     "dep:getrandom",
 ]
 
+# No cdylib: on Windows it and the `synapse` CLI binary both emit synapse.pdb (cargo#6313).
+# The root wasm-pack path it served is unmeasured and not working (CAPABILITY_INVENTORY 5.4);
+# the planned WASM slice builds its own `wasm/` crate, which will declare cdylib itself.
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [package.metadata.wasm-pack.profile.release]
 wee_alloc = false

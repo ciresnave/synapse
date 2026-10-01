@@ -1592,7 +1592,7 @@ it also broke `cargo fmt` on EVERY platform, which is why CI never reached its b
 before realising it was already causing a *measured* failure on the host, in the pipeline, on every
 run. **A defect scoped to a platform nobody builds for was the one blocking the platform everybody
 builds on.** `Cargo.toml` declares
-`crate-type = ["cdylib", "rlib"]`, a `wasm` feature, `Cargo-wasm.toml`, `build-wasm.sh` and
+`crate-type = ["cdylib", "rlib"]` (as of this pass; `cdylib` was dropped in M2, synapse#66, because on Windows it collided with the `synapse` CLI binary's `synapse.pdb` and the root wasm-pack path it served was not working), a `wasm` feature, `Cargo-wasm.toml`, `build-wasm.sh` and
 `build-wasm.bat`. **No wasm32 build was attempted in this pass** — recorded as unmeasured, not as
 working.
 
