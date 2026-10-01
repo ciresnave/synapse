@@ -6,15 +6,6 @@
 //! Secret hygiene (spec §6): nothing here may put the private key's path or bytes into a tool result,
 //! a tool error or a log line. `McpConfig` deliberately does not implement `Debug`.
 
-use crate::crypto::CryptoManager;
-// rmcp's tool_router macro emits a bare `Result`, so the crate's alias is not imported here.
-use crate::error::SynapseError;
-use crate::sender_auth::{ContradictedReason, SenderVerdict, TrustStore, UnverifiableReason};
-use crate::transport::{
-    ReceivedMessage, TransportManager, TransportManagerBuilder, TransportStatus, TransportTarget,
-    TransportType, UdpTransportFactory,
-};
-use crate::types::{SecureMessage, SecurityLevel};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{ErrorData, tool, tool_router};
@@ -24,6 +15,15 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use synapse::crypto::CryptoManager;
+// rmcp's tool_router macro emits a bare `Result`, so synapse's `Result` alias is not imported here.
+use synapse::error::SynapseError;
+use synapse::sender_auth::{ContradictedReason, SenderVerdict, TrustStore, UnverifiableReason};
+use synapse::transport::{
+    ReceivedMessage, TransportManager, TransportManagerBuilder, TransportStatus, TransportTarget,
+    TransportType, UdpTransportFactory,
+};
+use synapse::types::{SecureMessage, SecurityLevel};
 use tokio::sync::Mutex;
 
 /// The server's configuration. Keys and peers can only be changed here (spec §3).
@@ -85,7 +85,7 @@ pub struct PeerConfig {
 }
 
 impl McpConfig {
-    pub fn from_toml(text: &str) -> crate::error::Result<Self> {
+    pub fn from_toml(text: &str) -> synapse::error::Result<Self> {
         // toml's error text can quote the offending line, which may be the key path: drop it.
         toml::from_str(text)
             .map_err(|_| config_error("the config file is not valid TOML for synapse-mcp"))
@@ -102,7 +102,7 @@ pub(crate) struct PeerView {
     pub(crate) global_id: String,
     pub(crate) address: String,
     pub(crate) key_id: String,
-    pub(crate) sealing_key: Option<crate::sealing::SealingPublicKey>,
+    pub(crate) sealing_key: Option<synapse::sealing::SealingPublicKey>,
 }
 
 pub(crate) struct Inner {
@@ -114,9 +114,9 @@ pub(crate) struct Inner {
     pub(crate) peers: Vec<PeerView>,
     pub(crate) reply_address: String,
     /// Messages `poll` returned, by id, so `ack` can find them. Bounded by age and count (slice e).
-    pub(crate) kept: Mutex<crate::replay::Bounded<ReceivedMessage>>,
+    pub(crate) kept: Mutex<synapse::replay::Bounded<ReceivedMessage>>,
     /// Ids this server sent with `request_ack`. Bounded by age and count (slice e).
-    pub(crate) sent_with_ack: Mutex<crate::replay::Bounded<()>>,
+    pub(crate) sent_with_ack: Mutex<synapse::replay::Bounded<()>>,
 }
 
 /// The MCP server. Cheap to clone; all state is shared.
@@ -128,7 +128,7 @@ pub struct SynapseMcpServer {
 impl SynapseMcpServer {
     /// Load the key, pin the peers, and start the UDP transport (spec §3). Every error message is
     /// fixed text: none names the key path or contains key bytes.
-    pub async fn start(config: McpConfig) -> crate::error::Result<Self> {
+    pub async fn start(config: McpConfig) -> synapse::error::Result<Self> {
         let pem = std::fs::read_to_string(&config.private_key_pem_path)
             .map_err(|_| config_error("cannot read the private key file"))?;
         let mut crypto = CryptoManager::new();
@@ -141,7 +141,7 @@ impl SynapseMcpServer {
         let sealing_pem = std::fs::read_to_string(&config.sealing_key_path)
             .map_err(|_| config_error("cannot read the sealing key file"))?;
         let sealing_key =
-            crate::sealing::SealingKeyPair::from_pkcs8_pem(&sealing_pem).map_err(|_| {
+            synapse::sealing::SealingKeyPair::from_pkcs8_pem(&sealing_pem).map_err(|_| {
                 config_error("the sealing key file does not hold a usable X25519 PKCS#8 key")
             })?;
         let sealing_key_id = sealing_key.public_key().key_id();
@@ -160,7 +160,7 @@ impl SynapseMcpServer {
             let peer_sealing_key = match &peer.sealing_public_key {
                 None => None,
                 Some(pem) => Some(
-                    crate::sealing::SealingPublicKey::from_spki_pem(pem).map_err(|_| {
+                    synapse::sealing::SealingPublicKey::from_spki_pem(pem).map_err(|_| {
                         config_error(format!(
                             "peer {}: sealing_public_key is not an X25519 public key",
                             peer.global_id
@@ -180,7 +180,7 @@ impl SynapseMcpServer {
 
         const DURATION_OUT_OF_RANGE: &str =
             "a replay or tracking duration in the config is out of range";
-        let replay_config = crate::replay::ReplayConfig {
+        let replay_config = synapse::replay::ReplayConfig {
             past: chrono::Duration::try_seconds(config.replay_past_seconds)
                 .ok_or_else(|| config_error(DURATION_OUT_OF_RANGE))?,
             ahead: chrono::Duration::try_seconds(config.replay_ahead_seconds)
@@ -190,7 +190,7 @@ impl SynapseMcpServer {
             capacity: config.replay_capacity,
         };
         replay_config.validate().map_err(config_error)?;
-        let gate_config = crate::replay::GateConfig {
+        let gate_config = synapse::replay::GateConfig {
             accept_unverified: config.accept_unverified,
             ..Default::default()
         };
@@ -237,14 +237,14 @@ impl SynapseMcpServer {
         Ok(Self {
             inner: Arc::new(Inner {
                 global_id: config.global_id.clone(),
-                key_id: crate::sender_auth::key_id(&own_key),
+                key_id: synapse::sender_auth::key_id(&own_key),
                 sealing_key_id,
                 crypto,
                 manager,
                 peers,
                 reply_address,
-                kept: Mutex::new(crate::replay::Bounded::new(tracking_ttl, 1_000)),
-                sent_with_ack: Mutex::new(crate::replay::Bounded::new(tracking_ttl, 1_000)),
+                kept: Mutex::new(synapse::replay::Bounded::new(tracking_ttl, 1_000)),
+                sent_with_ack: Mutex::new(synapse::replay::Bounded::new(tracking_ttl, 1_000)),
             }),
         })
     }
@@ -313,7 +313,7 @@ fn sender_view(verdict: &SenderVerdict) -> Value {
 fn message_view(received: &ReceivedMessage) -> Value {
     let message = &received.incoming.message;
     let (text, text_lossy, open_error) = match &received.payload {
-        crate::sealing::Payload::Plain(bytes) | crate::sealing::Payload::Opened(bytes) => {
+        synapse::sealing::Payload::Plain(bytes) | synapse::sealing::Payload::Opened(bytes) => {
             match std::str::from_utf8(bytes) {
                 Ok(text) => (Value::from(text), false, Value::Null),
                 Err(_) => (
@@ -323,7 +323,7 @@ fn message_view(received: &ReceivedMessage) -> Value {
                 ),
             }
         }
-        crate::sealing::Payload::CouldNotOpen(reason) => {
+        synapse::sealing::Payload::CouldNotOpen(reason) => {
             (Value::Null, false, Value::from(reason.to_string()))
         }
     };
@@ -333,7 +333,7 @@ fn message_view(received: &ReceivedMessage) -> Value {
         "to": message.to_global_id,
         "text": text,
         "text_lossy": text_lossy,
-        "sealed": message.metadata.contains_key(crate::sealing::SEALED_KEY),
+        "sealed": message.metadata.contains_key(synapse::sealing::SEALED_KEY),
         "open_error": open_error,
         "sender": sender_view(&received.sender),
         "received_at": received.incoming.received_timestamp,
@@ -373,7 +373,7 @@ impl SynapseMcpServer {
             message.request_ack(inner.reply_address.clone());
         }
         // Seal, then sign, so the signature covers the sealed body.
-        if crate::sealing::seal(&mut message, recipient_key).is_err() {
+        if synapse::sealing::seal(&mut message, recipient_key).is_err() {
             return Err(ErrorData::internal_error("sealing failed", None));
         }
         if inner.crypto.sign_secure_message(&mut message).is_err() {

@@ -20,7 +20,7 @@
 //! Simple Name → Global ID → Network Discovery → Smart Transport Selection
 //!
 //! "Alice" → alice@ai-lab.example.com → 192.168.1.100:8080 → TCP (real-time)
-//! "Claude" → claude@anthropic.com → [external] → Email (reliable)
+//! "Assistant" → assistant@ai-lab.example.com → [external] → Email (reliable)
 //! "LocalBot" → bot@localhost → 127.0.0.1:9090 → UDP (fast local)
 //! ```
 //! This means you can send messages using simple, human-readable names, and Synapse
@@ -206,8 +206,6 @@ pub mod delivery_ack;
 pub mod email;
 pub mod email_server;
 pub mod identity;
-#[cfg(feature = "mcp")]
-pub mod mcp_server;
 pub mod monitoring;
 pub mod network_scope;
 pub mod replay;

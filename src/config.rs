@@ -419,8 +419,8 @@ mod tests {
 
     #[test]
     fn test_default_config_creation() {
-        let config = Config::default_for_entity("Claude", "ai_model");
-        assert_eq!(config.entity.local_name, "Claude");
+        let config = Config::default_for_entity("Assistant", "ai_model");
+        assert_eq!(config.entity.local_name, "Assistant");
         assert_eq!(config.entity.entity_type, "ai_model");
         assert!(config.validate().is_ok());
     }

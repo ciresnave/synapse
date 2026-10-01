@@ -1474,7 +1474,7 @@ mod tests {
     }
 
     // P2e review finding 2: an invalid `ReplayConfig` (e.g. `capacity: 0`) must not silently
-    // disable replay suppression for a direct library consumer who bypasses the MCP config
+    // disable replay suppression for a direct library consumer who bypasses an adapter's config
     // boundary. `build()` falls back to `ReplayConfig::default()` and logs why.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_invalid_replay_config_falls_back_to_default_instead_of_disabling_suppression() {

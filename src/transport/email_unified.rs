@@ -91,7 +91,7 @@
 //! reversing whatever transfer encoding `lettre` applied) *before* the `serde_json` parse that
 //! actually produces a `SecureMessage` -- an extra pass over the bytes this transport's own
 //! `send_message` produced, that TCP's wire format never has. Per this crate's standing
-//! discipline (CLAUDE.md §7: state a measurement with its method, don't assume another
+//! discipline (the portfolio's measurement rule: state a measurement with its method, don't assume another
 //! transport's number applies), `f` was re-measured for this transport's real pipeline rather than
 //! reusing TCP's ≈18/≈12, the same way `http_unified.rs` measured its own connection-buffer
 //! overhead instead of assuming TCP's.

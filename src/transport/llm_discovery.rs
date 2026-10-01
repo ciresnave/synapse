@@ -87,7 +87,7 @@ pub struct DiscoveredLlm {
 /// LLM model information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmModelInfo {
-    /// Model name (e.g., "GPT-4", "Claude-3", "Llama-2")
+    /// Model name (e.g., "GPT-4", "Llama-3", "Llama-2")
     pub model_name: String,
     /// Model version
     pub model_version: String,

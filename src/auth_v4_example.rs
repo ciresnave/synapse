@@ -333,7 +333,10 @@ impl SynapseAuthV4Example {
         // 1. WebAuthn passwordless authentication for AI agents
         println!("1️⃣  WebAuthn Passwordless AI Agent Authentication:");
         let _ai_session = self
-            .authenticate_ai_agent_webauthn("claude-3@anthropic.ai", "mock_webauthn_assertion_data")
+            .authenticate_ai_agent_webauthn(
+                "assistant@ai-lab.example.com",
+                "mock_webauthn_assertion_data",
+            )
             .await?;
         println!();
 
@@ -372,7 +375,7 @@ impl SynapseAuthV4Example {
         // 6. Rate limiting
         println!("6️⃣  Advanced Rate Limiting:");
         let _allowed = self
-            .check_rate_limit("claude-3@anthropic.ai", "send_message")
+            .check_rate_limit("assistant@ai-lab.example.com", "send_message")
             .await?;
         println!();
 

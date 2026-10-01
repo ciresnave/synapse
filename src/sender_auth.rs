@@ -556,7 +556,7 @@ impl TrustStore {
 
         // The one permission Synapse itself enforces: a validated leaf that was never granted
         // `send` may not originate a message, no matter how valid the rest of its chain is.
-        // Checked here (not in the transport) so every consumer of `verify_at` -- `synapse-mcp`
+        // Checked here (not in the transport) so every consumer of `verify_at` -- an adapter
         // included -- inherits it from the single verdict path.
         if !verified
             .permissions

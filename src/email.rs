@@ -256,18 +256,18 @@ mod tests {
 
         let tool_call = SimpleMessage {
             to: "FileSystem".to_string(),
-            from_entity: "Claude".to_string(),
+            from_entity: "Assistant".to_string(),
             content: "list_files /home".to_string(),
             message_type: MessageType::ToolCall,
             metadata: HashMap::new(),
         };
 
         let subject = transport.generate_subject(&tool_call);
-        assert_eq!(subject, "[Synapse Tool Call] Claude → FileSystem");
+        assert_eq!(subject, "[Synapse Tool Call] Assistant → FileSystem");
 
         let direct_msg = SimpleMessage {
             to: "Eric".to_string(),
-            from_entity: "Claude".to_string(),
+            from_entity: "Assistant".to_string(),
             content: "Hello! How can I help you today?".to_string(),
             message_type: MessageType::Direct,
             metadata: HashMap::new(),

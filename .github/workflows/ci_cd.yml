@@ -162,19 +162,21 @@ jobs:
     # a full build before it is reported.
 
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --workspace --verbose
 
     - name: Run tests
       if: always()
       # --no-fail-fast: without it cargo stops at the first failing test binary, and
       # every target that sorts after it (including all doc-tests) never runs here.
-      run: cargo test --verbose --no-fail-fast
+      # --workspace: a root package with members tests only itself by default, which would
+      # silently drop crates/synapse-mcp's tests.
+      run: cargo test --workspace --verbose --no-fail-fast
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
     - name: Check formatting
       if: always()
-      run: cargo fmt -- --check
+      run: cargo fmt --all -- --check
 
     - name: Clippy
       if: always()
@@ -183,7 +185,74 @@ jobs:
       # default `native` feature set this reaches every target except those that
       # are known not to compile: the `enhanced-auth` example and the two
       # `test = false` integration tests (see Cargo.toml).
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # CIRESNAVE-EXPECTATIONS 5.1d, verbatim: "Make sure Synapse isn't building things
+  # claude-specific because it is a communication system for *any LLM*." The core crate
+  # must build and pass with NO adapter crate present, and must not depend on rmcp.
+  # Each check pairs with a positive control so a broken query cannot pass by finding nothing.
+  # cargo REJECTS members = ["crates/*"] when crates/ is absent or empty (measured
+  # 2026-09-30), so the core-only build rewrites members to [] and asserts the rewrite.
+  model-agnostic-core:
+    name: core is model-agnostic
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: synapse_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libpq-dev protobuf-compiler
+
+    - name: Install stable toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+
+    - name: Positive control -- the MCP adapter does depend on rmcp
+      run: |
+        set -o pipefail
+        n=$(cargo tree -p synapse-mcp -e normal --prefix none | { grep -c '^rmcp ' || true; })
+        echo "rmcp lines in synapse-mcp's tree: $n"
+        test "$n" -ge 1
+
+    - name: The core's dependency tree has no rmcp (all features)
+      run: |
+        set -o pipefail
+        n=$(cargo tree -p synapse --all-features -e normal,build --prefix none | { grep -c '^rmcp ' || true; })
+        echo "rmcp lines in synapse's tree: $n"
+        test "$n" -eq 0
+
+    - name: Remove every adapter crate
+      run: |
+        set -o pipefail
+        rm -rf crates/
+        test ! -e crates
+        sed -i 's/^members = \["crates\/\*"\]\(\r\?\)$/members = []\1/' Cargo.toml
+        test "$(grep -cE '^members = \[\]'$'\r''?$' Cargo.toml)" -eq 1
+
+    - name: The core builds and passes with no adapter present
+      run: cargo test -p synapse --verbose --no-fail-fast
+      env:
+        DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
   # The WebAssembly package has its own job so that `Build and Test` can be a
   # required check. While it was a step of that job, it failed on every run with
