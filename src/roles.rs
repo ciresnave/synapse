@@ -95,6 +95,8 @@ pub enum ClaimError {
     NoSigningKey,
     /// The chain is longer than [`MAX_CLAIM_CHAIN`].
     ChainTooLong,
+    /// The role is at the last representable epoch; no newer one can be granted.
+    EpochExhausted,
 }
 
 impl fmt::Display for ClaimError {
@@ -106,6 +108,7 @@ impl fmt::Display for ClaimError {
             ClaimError::Replayed => write!(f, "the claim was already used"),
             ClaimError::NoSigningKey => write!(f, "no signing key is loaded for the role"),
             ClaimError::ChainTooLong => write!(f, "the certificate chain is too long"),
+            ClaimError::EpochExhausted => write!(f, "the role has no epochs left"),
         }
     }
 }
@@ -130,6 +133,22 @@ impl fmt::Display for Superseded {
 }
 
 impl std::error::Error for Superseded {}
+
+/// Persisted state that cannot be valid: an epoch of 0 for the named role. No claim is ever
+/// granted epoch 0, so such a record can only be corruption, and restoring it would let
+/// `check(role, 0)` pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidState {
+    pub global_id: String,
+}
+
+impl fmt::Display for InvalidState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "persisted role state is invalid for {}", self.global_id)
+    }
+}
+
+impl std::error::Error for InvalidState {}
 
 /// One role's persisted state: its current epoch and when it was claimed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +205,14 @@ impl Roles {
             .verify(text.as_bytes(), &req.signature)
             .map_err(|_| ClaimError::BadSignature)?;
 
+        // Every check that can fail runs before the replay guard records the nonce, so a refused
+        // claim never burns it.
+        let previous = self.roles.get(&global_id).map(|r| r.epoch);
+        let epoch = previous
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(ClaimError::EpochExhausted)?;
+
         let key_id = crate::sender_auth::key_id(&leaf.subject_signing_key);
         match self.claims.check(&key_id, &hex(&req.nonce), signed_at, now) {
             Decision::Deliver(Freshness::Fresh) => {}
@@ -193,8 +220,6 @@ impl Roles {
             Decision::Drop => return Err(ClaimError::Replayed),
         }
 
-        let previous = self.roles.get(&global_id).map(|r| r.epoch);
-        let epoch = previous.unwrap_or(0) + 1;
         self.roles.insert(
             global_id.clone(),
             RoleRecord {
@@ -233,12 +258,16 @@ impl Roles {
     /// record starts empty with its horizon at `now`, so any claim signed at or before `now` is
     /// refused as [`ClaimError::Stale`]: a claim captured before the restart cannot be replayed
     /// after it.
-    #[must_use]
-    pub fn restore(state: RolesState, now: DateTime<Utc>) -> Roles {
-        Roles {
+    pub fn restore(state: RolesState, now: DateTime<Utc>) -> Result<Roles, InvalidState> {
+        if let Some((global_id, _)) = state.roles.iter().find(|(_, record)| record.epoch == 0) {
+            return Err(InvalidState {
+                global_id: global_id.clone(),
+            });
+        }
+        Ok(Roles {
             roles: state.roles,
             claims: ReplayGuard::new(ReplayConfig::default(), now),
-        }
+        })
     }
 
     #[must_use]

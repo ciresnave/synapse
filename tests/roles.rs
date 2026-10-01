@@ -262,7 +262,7 @@ fn restore_continues_epochs() {
     let json = serde_json::to_string(&roles.snapshot()).expect("serialize");
     let state: synapse::roles::RolesState = serde_json::from_str(&json).expect("deserialize");
     let restart = t0() + Duration::minutes(1);
-    let mut restored = Roles::restore(state, restart);
+    let mut restored = Roles::restore(state, restart).expect("valid state");
     assert_eq!(restored.current("lane@acct"), Some(2));
 
     let after = restart + Duration::seconds(1);
@@ -280,7 +280,8 @@ fn restore_continues_epochs() {
 #[test]
 fn restore_does_not_resurrect_superseded_epochs() {
     let f = Fixture::new();
-    let restored = Roles::restore(claimed_twice(&f).snapshot(), t0() + Duration::minutes(1));
+    let restored = Roles::restore(claimed_twice(&f).snapshot(), t0() + Duration::minutes(1))
+        .expect("valid state");
     assert_eq!(
         restored.check("lane@acct", 1),
         Err(Superseded { current: 2 })
@@ -325,4 +326,41 @@ fn an_overlong_chain_is_refused_before_validation() {
         f.claim(&mut roles, &req, t0()),
         Err(ClaimError::ChainTooLong)
     );
+}
+
+/// PR #67 review (Sourcery, and the final review's M2): no claim is ever granted epoch 0, so a
+/// persisted epoch-0 record can only be corruption, and `check(role, 0)` would pass on it.
+#[test]
+fn restore_refuses_an_epoch_zero_record() {
+    let mut state = synapse::roles::RolesState::default();
+    state.roles.insert(
+        "lane@acct".into(),
+        synapse::roles::RoleRecord {
+            epoch: 0,
+            claimed_at: t0(),
+        },
+    );
+    assert!(Roles::restore(state, t0()).is_err());
+}
+
+/// PR #67 review (Sourcery, and the final review's M1): `epoch + 1` at `u64::MAX` would panic in
+/// debug and wrap to 0 in release, which `check` would then accept.
+#[test]
+fn a_claim_past_the_last_epoch_is_refused() {
+    let f = Fixture::new();
+    let mut state = synapse::roles::RolesState::default();
+    state.roles.insert(
+        "lane@acct".into(),
+        synapse::roles::RoleRecord {
+            epoch: u64::MAX,
+            claimed_at: t0(),
+        },
+    );
+    let mut roles = Roles::restore(state, t0() - Duration::seconds(1)).expect("valid state");
+    let req = sign_claim(&f.role("lane"), nonce(1), t0()).unwrap();
+    assert_eq!(
+        f.claim(&mut roles, &req, t0()),
+        Err(ClaimError::EpochExhausted)
+    );
+    assert_eq!(roles.current("lane@acct"), Some(u64::MAX));
 }
