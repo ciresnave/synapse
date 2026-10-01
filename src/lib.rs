@@ -210,6 +210,7 @@ pub mod keystore;
 pub mod monitoring;
 pub mod network_scope;
 pub mod replay;
+pub mod roles;
 pub mod router_merged;
 pub mod sealing;
 pub mod sender_auth;
