@@ -37,7 +37,8 @@ fn init_then_show_round_trips() {
     let first_out = stdout(&first);
     assert_eq!(line(&first_out, "account key id"), account_key_id);
     assert_eq!(line(&first_out, "identity"), "worker@acct");
-    assert_eq!(line(&first_out, "permissions"), "send, request-ack, ack");
+    // Sorted by name: the order a certificate encodes, so a fresh issue and a reload print alike.
+    assert_eq!(line(&first_out, "permissions"), "ack, request-ack, send");
     assert!(line(&first_out, "certificate valid").contains(" to "));
 
     let second = run(home.path(), &["id", "show", "--role", "worker"]);

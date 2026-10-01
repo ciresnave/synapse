@@ -44,7 +44,7 @@ pub enum KeystoreError {
     AccountExists,
     /// `open` found no account; run `init_account` first.
     NoAccount,
-    /// The item is readable by more than its owner.
+    /// The item is accessible to more than its owner (read, or on Windows also write or re-ACL).
     PermissionsTooOpen(&'static str),
     /// The item exists but does not parse.
     Corrupt(&'static str),
@@ -65,7 +65,7 @@ impl fmt::Display for KeystoreError {
             KeystoreError::AccountExists => write!(f, "an account already exists"),
             KeystoreError::NoAccount => write!(f, "no account: run `synapse id init` first"),
             KeystoreError::PermissionsTooOpen(item) => {
-                write!(f, "the {item} is readable by more than its owner")
+                write!(f, "the {item} is accessible to more than its owner")
             }
             KeystoreError::Corrupt(item) => write!(f, "the {item} is corrupt"),
             KeystoreError::Io(item, kind) => write!(f, "cannot access the {item}: {kind}"),
@@ -136,6 +136,14 @@ impl fmt::Debug for Keystore {
     }
 }
 
+/// The grants a role certificate carries (PM-approved, spec §4 Q4), in the order a parsed
+/// certificate holds them (sorted by name), so a reloaded certificate compares equal.
+fn default_permissions() -> Vec<Permission> {
+    let mut permissions = vec![Permission::Send, Permission::RequestAck, Permission::Ack];
+    permissions.sort_by_key(Permission::as_str);
+    permissions
+}
+
 /// A role, loaded: its identity, its keys in a ready [`CryptoManager`], and its certificate.
 pub struct RoleIdentity {
     /// `<role>@<account>`.
@@ -182,17 +190,28 @@ impl Keystore {
         let dir = home.join(ACCOUNT_DIR);
         ensure_dir(&dir, "account directory")?;
         let key_path = dir.join(ACCOUNT_KEY);
-        if exists(&key_path, "account key")? {
+        let name_path = dir.join(ACCOUNT_NAME);
+        let key = if exists(&key_path, "account key")? {
+            // A key with no name is an init that crashed between its two writes (review I1):
+            // complete it rather than strand it. A key with a name is a finished account.
+            if exists(&name_path, "account name")? {
+                return Err(KeystoreError::AccountExists);
+            }
+            load_account_key(&key_path)?
+        } else {
+            let key = SigningKey::from_bytes(&random_bytes::<32>()?);
+            let pem = key
+                .to_pkcs8_pem(LineEnding::LF)
+                .map_err(|_| KeystoreError::Corrupt("account key"))?;
+            if !write_new(&key_path, pem.as_bytes(), "account key")? {
+                return Err(KeystoreError::AccountExists);
+            }
+            key
+        };
+        // Create-only: of two racing inits, exactly one names the account; the other is refused.
+        if !write_new(&name_path, account.as_bytes(), "account name")? {
             return Err(KeystoreError::AccountExists);
         }
-        let key = SigningKey::from_bytes(&random_bytes::<32>()?);
-        let pem = key
-            .to_pkcs8_pem(LineEnding::LF)
-            .map_err(|_| KeystoreError::Corrupt("account key"))?;
-        if !write_new(&key_path, pem.as_bytes(), "account key")? {
-            return Err(KeystoreError::AccountExists);
-        }
-        replace(&dir.join(ACCOUNT_NAME), account.as_bytes(), "account name")?;
         Ok(summary(account, &key))
     }
 
@@ -204,11 +223,13 @@ impl Keystore {
             return Err(KeystoreError::NoAccount);
         }
         check_dir(&dir, "account directory")?;
-        let pem = read_checked(&key_path, "account key")?;
-        let pem = std::str::from_utf8(&pem).map_err(|_| KeystoreError::Corrupt("account key"))?;
-        let account_key =
-            SigningKey::from_pkcs8_pem(pem).map_err(|_| KeystoreError::Corrupt("account key"))?;
-        let name = read_checked(&dir.join(ACCOUNT_NAME), "account name")?;
+        let account_key = load_account_key(&key_path)?;
+        let name_path = dir.join(ACCOUNT_NAME);
+        // A key with no name is an interrupted init; `init` completes it, so point there.
+        if !exists(&name_path, "account name")? {
+            return Err(KeystoreError::NoAccount);
+        }
+        let name = read_checked(&name_path, "account name")?;
         let account = String::from_utf8(name)
             .ok()
             .filter(|n| valid_name(n))
@@ -278,6 +299,9 @@ impl Keystore {
                     && chain[0].subject_signing_key == signing_public
                     && chain[0].subject_sealing_key == sealing_public
                     && chain[0].issuer_key_id == self.account().key_id
+                    && chain[0].may_delegate == 0
+                    && chain[0].permissions == default_permissions()
+                    && chain[0].verify_signature(&self.account_public_key())
                     && chain[0].not_before <= now
                     && chain[0].not_after - now >= RENEW_BELOW
             });
@@ -294,7 +318,7 @@ impl Keystore {
                     subject_sealing_key: sealing_public,
                     not_before: now,
                     not_after: now + CERT_VALIDITY,
-                    permissions: vec![Permission::Send, Permission::RequestAck, Permission::Ack],
+                    permissions: default_permissions(),
                     may_delegate: 0,
                     signature: [0; 64],
                 };
@@ -330,6 +354,12 @@ impl Keystore {
     pub fn account_public_key(&self) -> [u8; 32] {
         self.account_key.verifying_key().to_bytes()
     }
+}
+
+fn load_account_key(path: &Path) -> Result<SigningKey> {
+    let pem = read_checked(path, "account key")?;
+    let pem = std::str::from_utf8(&pem).map_err(|_| KeystoreError::Corrupt("account key"))?;
+    SigningKey::from_pkcs8_pem(pem).map_err(|_| KeystoreError::Corrupt("account key"))
 }
 
 fn summary(account: &str, key: &SigningKey) -> AccountSummary {
@@ -373,7 +403,7 @@ fn check_dir(dir: &Path, item: &'static str) -> Result<()> {
     check_owner_only(dir, item)
 }
 
-/// Refuse anything readable by more than its owner.
+/// Refuse anything accessible to more than its owner.
 fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
     #[cfg(unix)]
     {
@@ -388,7 +418,7 @@ fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        if windows_acl::readable_by_broad_group(path).map_err(io_err(item))? {
+        if windows_acl::accessible_to_broad_group(path).map_err(io_err(item))? {
             return Err(KeystoreError::PermissionsTooOpen(item));
         }
     }
@@ -399,7 +429,8 @@ fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
 
 /// The Windows half of "owner-only" (PM-approved, spec §4 Q2(a)): files live under the user's
 /// `%LOCALAPPDATA%`, whose inherited ACL admits the user, SYSTEM and Administrators. On every load
-/// we refuse a file or directory that `Everyone`, `Users` or `Authenticated Users` can read, the
+/// we refuse a file or directory that `Everyone`, `Users` or `Authenticated Users` can read, write
+/// or re-ACL (write added after final review M1), the
 /// same rule OpenSSH for Windows applies to private keys. A NULL DACL grants everyone everything, so
 /// it is refused too.
 #[cfg(windows)]
@@ -408,19 +439,35 @@ mod windows_acl {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
-    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, LocalFree,
+    };
     use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
         EqualSid, GetAce, PSECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
         WinAuthenticatedUserSid, WinBuiltinUsersSid, WinWorldSid,
     };
-    use windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_READ_DATA, FILE_WRITE_DATA, WRITE_DAC,
+        WRITE_OWNER,
+    };
 
     /// `ACCESS_ALLOWED_ACE_TYPE` (winnt.h), a fixed ABI value; defined here rather than enabling
     /// windows-sys's `System_SystemServices` feature for one constant.
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-    const READ_BITS: u32 = FILE_READ_DATA | GENERIC_READ | GENERIC_ALL;
+    /// Read, or any right that lets the holder replace the key or rewrite who may access it
+    /// (review M1): writing a key is as bad as reading it, because the next load certifies it.
+    const BROAD_ACCESS: u32 = FILE_READ_DATA
+        | GENERIC_READ
+        | GENERIC_ALL
+        | FILE_WRITE_DATA
+        | FILE_APPEND_DATA
+        | FILE_DELETE_CHILD
+        | GENERIC_WRITE
+        | DELETE
+        | WRITE_DAC
+        | WRITE_OWNER;
     const BROAD: [WELL_KNOWN_SID_TYPE; 3] =
         [WinWorldSid, WinBuiltinUsersSid, WinAuthenticatedUserSid];
 
@@ -435,7 +482,7 @@ mod windows_acl {
         }
     }
 
-    pub(super) fn readable_by_broad_group(path: &Path) -> io::Result<bool> {
+    pub(super) fn accessible_to_broad_group(path: &Path) -> io::Result<bool> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut dacl: *mut ACL = std::ptr::null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -493,7 +540,7 @@ mod windows_acl {
             }
             // SAFETY: AceType says this ACE is an ACCESS_ALLOWED_ACE; its SID starts at SidStart.
             let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
-            if allowed.Mask & READ_BITS == 0 {
+            if allowed.Mask & BROAD_ACCESS == 0 {
                 continue;
             }
             let sid = std::ptr::addr_of!(allowed.SidStart) as *mut core::ffi::c_void;

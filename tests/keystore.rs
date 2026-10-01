@@ -362,3 +362,74 @@ fn a_role_key_readable_by_everyone_is_refused() {
         "{got:?}"
     );
 }
+
+// ---- Final-review fixes ----
+
+/// Review I1: a crash between init's two writes left a key with no name, and no command could
+/// recover it ("an account already exists", yet `open` failed). The next init completes it.
+#[test]
+fn an_init_interrupted_before_the_name_is_completed_by_the_next_init() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = Keystore::init_account(dir.path(), "acct").expect("init");
+    let key_before = std::fs::read(account_key_path(dir.path())).unwrap();
+    std::fs::remove_file(dir.path().join("account").join("name")).unwrap();
+
+    let again = Keystore::init_account(dir.path(), "acct").expect("init completes the account");
+    assert_eq!(again.key_id, first.key_id, "the existing key is kept");
+    assert_eq!(
+        std::fs::read(account_key_path(dir.path())).unwrap(),
+        key_before
+    );
+    assert_eq!(
+        Keystore::open(dir.path()).expect("open").account().account,
+        "acct"
+    );
+}
+
+/// Review I3: a reused certificate's signature was never checked, so a damaged cert.pem was
+/// handed to every receiver until renewal. A certificate that does not verify is reissued.
+#[test]
+fn a_certificate_with_a_bad_signature_is_reissued() {
+    let (dir, store) = store_with_account();
+    let first = store.role("r", t0()).expect("role");
+    let mut damaged = first.chain.clone();
+    damaged[0].signature[0] ^= 1;
+    std::fs::write(
+        dir.path().join("roles").join("r").join("cert.pem"),
+        synapse::certificate::chain_to_pem(&damaged),
+    )
+    .unwrap();
+
+    let now = t0() + Duration::minutes(1);
+    let again = store.role("r", now).expect("role");
+    validates(&store, &again.chain, now).expect("a damaged certificate is not reused");
+}
+
+/// Review M1 (re-graded Important): a broad group that can WRITE a key can swap in its own key,
+/// which the next load would certify. Unix refuses group/other write; Windows now does too.
+#[cfg(windows)]
+#[test]
+fn a_key_writable_by_a_broad_group_is_refused() {
+    let (dir, store) = store_with_account();
+    store.role("r", t0()).expect("role");
+    let key = dir.path().join("roles").join("r").join("signing.key.pem");
+    let status = std::process::Command::new("icacls")
+        .arg(&key)
+        .arg("/grant")
+        .arg("*S-1-5-32-545:W")
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("icacls runs");
+    assert!(
+        status.success(),
+        "icacls could not grant Users write: the mutation did not apply"
+    );
+    let got = store.role("r", t0());
+    assert!(
+        matches!(
+            got,
+            Err(KeystoreError::PermissionsTooOpen("role signing key"))
+        ),
+        "{got:?}"
+    );
+}
