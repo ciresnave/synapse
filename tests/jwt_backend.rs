@@ -42,5 +42,8 @@ fn an_hs256_token_round_trips_through_the_jwt_dependency() {
         &DecodingKey::from_secret(b"another-secret"),
         &Validation::new(Algorithm::HS256),
     );
-    assert!(forged.is_err(), "a token signed with another secret must not verify");
+    assert!(
+        forged.is_err(),
+        "a token signed with another secret must not verify"
+    );
 }
