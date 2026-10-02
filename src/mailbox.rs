@@ -540,3 +540,448 @@ impl<S: MailStore> Mailbox<S> {
         Ok(swept)
     }
 }
+
+/// A durable [`MailStore`] on redb (M4 PR 2; D1, CireSnave: *"Redb is fine for now."*).
+///
+/// Every [`MailStore::write`] is exactly one redb write transaction, committed only when the
+/// closure returns `Ok` and aborted otherwise; a process that dies inside it leaves the previous
+/// committed state. Bodies live apart from lease metadata, so leasing a message never rewrites
+/// its body. The file is created owner-only and checked on every open (M2's permission check).
+#[cfg(feature = "mailbox-redb")]
+pub struct RedbStore {
+    db: redb::Database,
+    body_writes: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "mailbox-redb")]
+use redb::ReadableTable;
+
+#[cfg(feature = "mailbox-redb")]
+mod redb_tables {
+    use redb::TableDefinition;
+    /// `(role, seq)` -> serde_json `Meta`.
+    pub const META: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("meta");
+    /// `(role, seq)` -> raw body bytes, written once.
+    pub const BODIES: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("bodies");
+    /// `(role, message_id)` -> `seq`.
+    pub const BY_ID: TableDefinition<(&str, &str), u64> = TableDefinition::new("by_id");
+    /// `(role, message_id)` -> acked-at, unix micros.
+    pub const ACKED: TableDefinition<(&str, &str), i64> = TableDefinition::new("acked");
+    /// `(acked-at micros, role, message_id)` -> nothing: the sweep's time index.
+    pub const ACKED_BY_TIME: TableDefinition<(i64, &str, &str), ()> =
+        TableDefinition::new("acked_by_time");
+    /// `role` -> `(queued count, queued body bytes)`.
+    pub const STATS: TableDefinition<&str, (u64, u64)> = TableDefinition::new("stats");
+    /// `"seq"` -> the last sequence number issued.
+    pub const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
+    /// `"state"` -> serde_json `RolesState`.
+    pub const ROLES: TableDefinition<&str, &[u8]> = TableDefinition::new("roles");
+}
+
+#[cfg(feature = "mailbox-redb")]
+#[derive(Serialize, Deserialize)]
+struct Meta {
+    message_id: String,
+    from: String,
+    enqueued_at: DateTime<Utc>,
+    lease: Option<Lease>,
+    attempts: u32,
+    body_len: u64,
+}
+
+#[cfg(feature = "mailbox-redb")]
+fn store_err(what: &str) -> impl Fn(&dyn fmt::Display) -> StoreError + '_ {
+    move |e| StoreError(format!("{what}: {e}"))
+}
+
+#[cfg(feature = "mailbox-redb")]
+fn micros(at: DateTime<Utc>) -> i64 {
+    at.timestamp_micros()
+}
+
+#[cfg(feature = "mailbox-redb")]
+impl RedbStore {
+    /// Create or open the store at `path`. A new file is made owner-only (Unix `0600`; on Windows
+    /// it inherits the user profile's ACL); every open refuses a file broader than its owner.
+    pub fn open(path: &std::path::Path) -> Result<Self, StoreError> {
+        let existed = path.exists();
+        let db = redb::Database::create(path).map_err(|e| store_err("open")(&e))?;
+        #[cfg(unix)]
+        if !existed {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| store_err("set permissions")(&e))?;
+        }
+        #[cfg(not(unix))]
+        let _ = existed;
+        crate::keystore::check_owner_only(path, "mail store")
+            .map_err(|e| store_err("permissions")(&e))?;
+        // Create every table once, so later read paths can assume they exist.
+        let txn = db.begin_write().map_err(|e| store_err("begin")(&e))?;
+        {
+            use redb_tables::*;
+            txn.open_table(META).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(BODIES).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(BY_ID).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(ACKED).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(ACKED_BY_TIME).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(STATS).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(COUNTERS).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(ROLES).map_err(|e| store_err("table")(&e))?;
+        }
+        txn.commit().map_err(|e| store_err("commit")(&e))?;
+        Ok(RedbStore {
+            db,
+            body_writes: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// How many body rows this handle has written (a diagnostic: lease updates must not add to it).
+    #[must_use]
+    pub fn body_writes(&self) -> u64 {
+        self.body_writes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(feature = "mailbox-redb")]
+impl MailStore for RedbStore {
+    fn write(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| MailError::Store(store_err("begin")(&e)))?;
+        let outcome = {
+            let mut view = RedbTxn {
+                txn: &txn,
+                body_writes: &self.body_writes,
+            };
+            f(&mut view)
+        };
+        match outcome {
+            Ok(()) => txn
+                .commit()
+                .map_err(|e| MailError::Store(store_err("commit")(&e))),
+            Err(e) => {
+                txn.abort()
+                    .map_err(|ae| MailError::Store(store_err("abort")(&ae)))?;
+                Err(e)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "mailbox-redb")]
+struct RedbTxn<'a> {
+    txn: &'a redb::WriteTransaction,
+    body_writes: &'a std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "mailbox-redb")]
+impl RedbTxn<'_> {
+    fn seq_of(&self, role: &str, id: &str) -> Result<Option<u64>, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::BY_ID)
+            .map_err(|e| store_err("by_id")(&e))?;
+        Ok(t.get((role, id))
+            .map_err(|e| store_err("by_id")(&e))?
+            .map(|g| g.value()))
+    }
+
+    fn meta(&self, role: &str, seq: u64) -> Result<Option<Meta>, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::META)
+            .map_err(|e| store_err("meta")(&e))?;
+        let Some(raw) = t.get((role, seq)).map_err(|e| store_err("meta")(&e))? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(raw.value())
+            .map(Some)
+            .map_err(|e| store_err("meta decode")(&e))
+    }
+
+    fn body(&self, role: &str, seq: u64) -> Result<Vec<u8>, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::BODIES)
+            .map_err(|e| store_err("bodies")(&e))?;
+        Ok(t.get((role, seq))
+            .map_err(|e| store_err("bodies")(&e))?
+            .map(|g| g.value().to_vec())
+            .unwrap_or_default())
+    }
+
+    fn assemble(&self, role: &str, seq: u64, meta: Meta) -> Result<Stored, StoreError> {
+        Ok(Stored {
+            envelope: Envelope {
+                message_id: meta.message_id,
+                to: role.to_string(),
+                from: meta.from,
+                body: self.body(role, seq)?,
+            },
+            seq,
+            enqueued_at: meta.enqueued_at,
+            lease: meta.lease,
+            attempts: meta.attempts,
+        })
+    }
+
+    fn adjust_stats(&self, role: &str, count: i64, bytes: i64) -> Result<(), StoreError> {
+        let mut t = self
+            .txn
+            .open_table(redb_tables::STATS)
+            .map_err(|e| store_err("stats")(&e))?;
+        let (c, b) = t
+            .get(role)
+            .map_err(|e| store_err("stats")(&e))?
+            .map(|g| g.value())
+            .unwrap_or((0, 0));
+        let next = (
+            c.checked_add_signed(count).unwrap_or(0),
+            b.checked_add_signed(bytes).unwrap_or(0),
+        );
+        if next == (0, 0) {
+            t.remove(role).map_err(|e| store_err("stats")(&e))?;
+        } else {
+            t.insert(role, next).map_err(|e| store_err("stats")(&e))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "mailbox-redb")]
+impl MailTxn for RedbTxn<'_> {
+    fn stats(&self, role: &str) -> Result<(usize, u64), StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::STATS)
+            .map_err(|e| store_err("stats")(&e))?;
+        let (c, b) = t
+            .get(role)
+            .map_err(|e| store_err("stats")(&e))?
+            .map(|g| g.value())
+            .unwrap_or((0, 0));
+        Ok((usize::try_from(c).unwrap_or(usize::MAX), b))
+    }
+
+    fn scan(&self, role: &str, visit: &mut dyn FnMut(&Stored) -> bool) -> Result<(), StoreError> {
+        let rows: Vec<(u64, Vec<u8>)> = {
+            let t = self
+                .txn
+                .open_table(redb_tables::META)
+                .map_err(|e| store_err("meta")(&e))?;
+            let range = t
+                .range((role, 0u64)..=(role, u64::MAX))
+                .map_err(|e| store_err("meta")(&e))?;
+            let mut rows = Vec::new();
+            for entry in range {
+                let (k, v) = entry.map_err(|e| store_err("meta")(&e))?;
+                rows.push((k.value().1, v.value().to_vec()));
+            }
+            rows
+        };
+        for (seq, raw) in rows {
+            let meta: Meta =
+                serde_json::from_slice(&raw).map_err(|e| store_err("meta decode")(&e))?;
+            let stored = self.assemble(role, seq, meta)?;
+            if !visit(&stored) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError> {
+        let Some(seq) = self.seq_of(role, id)? else {
+            return Ok(None);
+        };
+        match self.meta(role, seq)? {
+            Some(meta) => self.assemble(role, seq, meta).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn put(&mut self, role: &str, stored: Stored) -> Result<(), StoreError> {
+        let id = stored.envelope.message_id.clone();
+        let existing = self.seq_of(role, &id)?;
+        let seq = existing.unwrap_or(stored.seq);
+        let body_len = stored.envelope.body.len() as u64;
+        let meta = Meta {
+            message_id: id.clone(),
+            from: stored.envelope.from.clone(),
+            enqueued_at: stored.enqueued_at,
+            lease: stored.lease.clone(),
+            attempts: stored.attempts,
+            body_len,
+        };
+        let raw = serde_json::to_vec(&meta).map_err(|e| store_err("meta encode")(&e))?;
+        {
+            let mut t = self
+                .txn
+                .open_table(redb_tables::META)
+                .map_err(|e| store_err("meta")(&e))?;
+            t.insert((role, seq), raw.as_slice())
+                .map_err(|e| store_err("meta")(&e))?;
+        }
+        if existing.is_none() {
+            {
+                let mut t = self
+                    .txn
+                    .open_table(redb_tables::BODIES)
+                    .map_err(|e| store_err("bodies")(&e))?;
+                t.insert((role, seq), stored.envelope.body.as_slice())
+                    .map_err(|e| store_err("bodies")(&e))?;
+            }
+            self.body_writes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut t = self
+                    .txn
+                    .open_table(redb_tables::BY_ID)
+                    .map_err(|e| store_err("by_id")(&e))?;
+                t.insert((role, id.as_str()), seq)
+                    .map_err(|e| store_err("by_id")(&e))?;
+            }
+            self.adjust_stats(role, 1, i64::try_from(body_len).unwrap_or(i64::MAX))?;
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, role: &str, id: &str) -> Result<(), StoreError> {
+        let Some(seq) = self.seq_of(role, id)? else {
+            return Ok(());
+        };
+        let body_len = self.meta(role, seq)?.map_or(0, |m| m.body_len);
+        {
+            let mut t = self
+                .txn
+                .open_table(redb_tables::META)
+                .map_err(|e| store_err("meta")(&e))?;
+            t.remove((role, seq)).map_err(|e| store_err("meta")(&e))?;
+        }
+        {
+            let mut t = self
+                .txn
+                .open_table(redb_tables::BODIES)
+                .map_err(|e| store_err("bodies")(&e))?;
+            t.remove((role, seq)).map_err(|e| store_err("bodies")(&e))?;
+        }
+        {
+            let mut t = self
+                .txn
+                .open_table(redb_tables::BY_ID)
+                .map_err(|e| store_err("by_id")(&e))?;
+            t.remove((role, id)).map_err(|e| store_err("by_id")(&e))?;
+        }
+        self.adjust_stats(role, -1, -i64::try_from(body_len).unwrap_or(i64::MAX))
+    }
+
+    fn acked_at(&self, role: &str, id: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::ACKED)
+            .map_err(|e| store_err("acked")(&e))?;
+        Ok(t.get((role, id))
+            .map_err(|e| store_err("acked")(&e))?
+            .and_then(|g| DateTime::from_timestamp_micros(g.value())))
+    }
+
+    fn record_ack(&mut self, role: &str, id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+        {
+            let mut t = self
+                .txn
+                .open_table(redb_tables::ACKED)
+                .map_err(|e| store_err("acked")(&e))?;
+            t.insert((role, id), micros(at))
+                .map_err(|e| store_err("acked")(&e))?;
+        }
+        let mut t = self
+            .txn
+            .open_table(redb_tables::ACKED_BY_TIME)
+            .map_err(|e| store_err("acked_by_time")(&e))?;
+        t.insert((micros(at), role, id), ())
+            .map_err(|e| store_err("acked_by_time")(&e))?;
+        Ok(())
+    }
+
+    fn sweep_acked(&mut self, before: DateTime<Utc>) -> Result<usize, StoreError> {
+        let doomed: Vec<(i64, String, String)> = {
+            let t = self
+                .txn
+                .open_table(redb_tables::ACKED_BY_TIME)
+                .map_err(|e| store_err("acked_by_time")(&e))?;
+            let range = t
+                .range(..(micros(before), "", ""))
+                .map_err(|e| store_err("acked_by_time")(&e))?;
+            let mut out = Vec::new();
+            for entry in range {
+                let (k, _) = entry.map_err(|e| store_err("acked_by_time")(&e))?;
+                let (at, role, id) = k.value();
+                out.push((at, role.to_string(), id.to_string()));
+            }
+            out
+        };
+        {
+            let mut by_time = self
+                .txn
+                .open_table(redb_tables::ACKED_BY_TIME)
+                .map_err(|e| store_err("acked_by_time")(&e))?;
+            let mut acked = self
+                .txn
+                .open_table(redb_tables::ACKED)
+                .map_err(|e| store_err("acked")(&e))?;
+            for (at, role, id) in &doomed {
+                by_time
+                    .remove((*at, role.as_str(), id.as_str()))
+                    .map_err(|e| store_err("acked_by_time")(&e))?;
+                acked
+                    .remove((role.as_str(), id.as_str()))
+                    .map_err(|e| store_err("acked")(&e))?;
+            }
+        }
+        Ok(doomed.len())
+    }
+
+    fn next_seq(&mut self) -> Result<u64, StoreError> {
+        let mut t = self
+            .txn
+            .open_table(redb_tables::COUNTERS)
+            .map_err(|e| store_err("counters")(&e))?;
+        let next = t
+            .get("seq")
+            .map_err(|e| store_err("counters")(&e))?
+            .map_or(0, |g| g.value())
+            + 1;
+        t.insert("seq", next)
+            .map_err(|e| store_err("counters")(&e))?;
+        Ok(next)
+    }
+
+    fn roles(&self) -> Result<RolesState, StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::ROLES)
+            .map_err(|e| store_err("roles")(&e))?;
+        match t.get("state").map_err(|e| store_err("roles")(&e))? {
+            Some(raw) => {
+                serde_json::from_slice(raw.value()).map_err(|e| store_err("roles decode")(&e))
+            }
+            None => Ok(RolesState::default()),
+        }
+    }
+
+    fn set_roles(&mut self, state: &RolesState) -> Result<(), StoreError> {
+        let raw = serde_json::to_vec(state).map_err(|e| store_err("roles encode")(&e))?;
+        let mut t = self
+            .txn
+            .open_table(redb_tables::ROLES)
+            .map_err(|e| store_err("roles")(&e))?;
+        t.insert("state", raw.as_slice())
+            .map_err(|e| store_err("roles")(&e))?;
+        Ok(())
+    }
+}
