@@ -92,7 +92,10 @@ async fn claim(d: &Running, role: &str, nonce: u8) -> (String, u64) {
     let (status, reply, text) = post(d, "/v1/claim", None, claim_body(d, role, nonce)).await;
     assert_eq!(status, 200, "claim refused: {text}");
     (
-        reply["session"].as_str().expect("a session token").to_string(),
+        reply["session"]
+            .as_str()
+            .expect("a session token")
+            .to_string(),
         reply["epoch"].as_u64().expect("an epoch"),
     )
 }
@@ -112,7 +115,14 @@ async fn post(d: &Running, path: &str, token: Option<&str>, body: Value) -> (u16
 #[tokio::test]
 async fn health_answers_without_a_token() {
     let d = start().await;
-    let reply: Value = client().get(d.url("/v1/health")).send().await.unwrap().json().await.unwrap();
+    let reply: Value = client()
+        .get(d.url("/v1/health"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(reply["ok"], true);
     assert!(reply["started_at"].is_string());
     d.stop().await;
@@ -124,7 +134,13 @@ async fn a_round_trip_between_two_roles() {
     let (alpha, _) = claim(&d, "alpha", 1).await;
     let (beta, _) = claim(&d, "beta", 2).await;
     let body = B64.encode(b"hello beta");
-    let (s, sent, _) = post(&d, "/v1/send", Some(&alpha), json!({"to": "beta@acct", "body_b64": body})).await;
+    let (s, sent, _) = post(
+        &d,
+        "/v1/send",
+        Some(&alpha),
+        json!({"to": "beta@acct", "body_b64": body}),
+    )
+    .await;
     assert_eq!(s, 200, "{sent}");
     assert_eq!(sent["outcome"], "queued");
     let id = sent["message_id"].as_str().unwrap().to_string();
@@ -133,8 +149,14 @@ async fn a_round_trip_between_two_roles() {
     assert_eq!(s, 200, "{got}");
     let msg = &got["messages"][0];
     assert_eq!(msg["message_id"], id.as_str());
-    assert_eq!(msg["from"], "alpha@acct", "from is the sender's verified role");
-    assert_eq!(B64.decode(msg["body_b64"].as_str().unwrap()).unwrap(), b"hello beta");
+    assert_eq!(
+        msg["from"], "alpha@acct",
+        "from is the sender's verified role"
+    );
+    assert_eq!(
+        B64.decode(msg["body_b64"].as_str().unwrap()).unwrap(),
+        b"hello beta"
+    );
 
     let (s, acked, _) = post(&d, "/v1/ack", Some(&beta), json!({"message_id": id})).await;
     assert_eq!(s, 200, "{acked}");
@@ -167,7 +189,13 @@ async fn a_bad_or_missing_token_is_401() {
             assert_eq!(s, 401, "{path} with token {token:?}");
         }
     }
-    let s = client().get(d.url("/v1/list")).send().await.unwrap().status().as_u16();
+    let s = client()
+        .get(d.url("/v1/list"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
     assert_eq!(s, 401, "/v1/list without a token");
     d.stop().await;
 }
@@ -178,7 +206,13 @@ async fn an_old_epoch_token_is_409_after_takeover() {
     let (old, first) = claim(&d, "alpha", 1).await;
     let (_new, second) = claim(&d, "alpha", 2).await;
     assert_eq!(second, first + 1);
-    let (s, reply, _) = post(&d, "/v1/send", Some(&old), json!({"to": "beta@acct", "body_b64": ""})).await;
+    let (s, reply, _) = post(
+        &d,
+        "/v1/send",
+        Some(&old),
+        json!({"to": "beta@acct", "body_b64": ""}),
+    )
+    .await;
     assert_eq!(s, 409, "{reply}");
     assert_eq!(reply["error"], "superseded");
     assert_eq!(reply["current"], second);
@@ -195,7 +229,10 @@ async fn a_claim_without_key_proof_issues_no_token() {
     let (s, reply, _) = post(&d, "/v1/claim", None, body).await;
     assert_eq!(s, 403, "{reply}");
     assert_eq!(reply["error"], "claim_refused");
-    assert!(reply.get("session").is_none(), "no token for an unproven claim");
+    assert!(
+        reply.get("session").is_none(),
+        "no token for an unproven claim"
+    );
     d.stop().await;
 }
 
@@ -221,12 +258,20 @@ async fn a_wrong_host_header_is_421() {
     ];
     for host in cases {
         let req = format!("GET /v1/health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-        let reply = tokio::task::spawn_blocking(move || raw(addr, &req)).await.unwrap();
+        let reply = tokio::task::spawn_blocking(move || raw(addr, &req))
+            .await
+            .unwrap();
         assert!(reply.starts_with("HTTP/1.1 421"), "Host {host}: {reply}");
     }
-    let good = format!("GET /v1/health HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n");
-    let reply = tokio::task::spawn_blocking(move || raw(addr, &good)).await.unwrap();
-    assert!(reply.starts_with("HTTP/1.1 200"), "control, localhost:port: {reply}");
+    let good =
+        format!("GET /v1/health HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n");
+    let reply = tokio::task::spawn_blocking(move || raw(addr, &good))
+        .await
+        .unwrap();
+    assert!(
+        reply.starts_with("HTTP/1.1 200"),
+        "control, localhost:port: {reply}"
+    );
     d.stop().await;
 }
 
@@ -235,7 +280,12 @@ async fn no_response_carries_cors_headers() {
     let d = start().await;
     let (alpha, _) = claim(&d, "alpha", 1).await;
     let responses = vec![
-        client().get(d.url("/v1/health")).header("Origin", "https://evil.example").send().await.unwrap(),
+        client()
+            .get(d.url("/v1/health"))
+            .header("Origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap(),
         client()
             .request(reqwest::Method::OPTIONS, d.url("/v1/send"))
             .header("Origin", "https://evil.example")
@@ -293,7 +343,10 @@ fn a_non_loopback_bind_is_refused() {
 #[tokio::test]
 async fn a_second_daemon_on_the_same_home_fails() {
     let d = start().await;
-    assert!(Daemon::open(&config(d.home.path())).is_err(), "the store lock keeps one daemon");
+    assert!(
+        Daemon::open(&config(d.home.path())).is_err(),
+        "the store lock keeps one daemon"
+    );
     d.stop().await;
 }
 
@@ -304,7 +357,10 @@ async fn no_token_or_key_material_leaks() {
     let (_beta, _) = claim(&d, "beta", 2).await;
     let mut bodies = Vec::new();
     for (path, body) in [
-        ("/v1/send", json!({"to": "beta@acct", "body_b64": B64.encode(b"x")})),
+        (
+            "/v1/send",
+            json!({"to": "beta@acct", "body_b64": B64.encode(b"x")}),
+        ),
         ("/v1/fetch", json!({})),
         ("/v1/heartbeat", json!({"summary": "working"})),
         ("/v1/ack", json!({"message_id": "nope"})),
@@ -313,11 +369,25 @@ async fn no_token_or_key_material_leaks() {
         bodies.push(post(&d, path, Some(&alpha), body).await.2);
     }
     bodies.push(
-        client().get(d.url("/v1/list")).bearer_auth(&alpha).send().await.unwrap().text().await.unwrap(),
+        client()
+            .get(d.url("/v1/list"))
+            .bearer_auth(&alpha)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
     );
     for text in bodies {
-        assert!(!text.contains(&alpha), "a response carried the session token: {text}");
-        assert!(!text.contains("PRIVATE KEY"), "a response carried key material: {text}");
+        assert!(
+            !text.contains(&alpha),
+            "a response carried the session token: {text}"
+        );
+        assert!(
+            !text.contains("PRIVATE KEY"),
+            "a response carried key material: {text}"
+        );
     }
     d.stop().await;
 }
@@ -326,11 +396,28 @@ async fn no_token_or_key_material_leaks() {
 async fn list_shows_claimed_roles_with_presence() {
     let d = start().await;
     let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (s, _, _) = post(&d, "/v1/heartbeat", Some(&alpha), json!({"summary": "writing M5"})).await;
+    let (s, _, _) = post(
+        &d,
+        "/v1/heartbeat",
+        Some(&alpha),
+        json!({"summary": "writing M5"}),
+    )
+    .await;
     assert_eq!(s, 200);
-    let reply: Value = client().get(d.url("/v1/list")).bearer_auth(&alpha).send().await.unwrap().json().await.unwrap();
+    let reply: Value = client()
+        .get(d.url("/v1/list"))
+        .bearer_auth(&alpha)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let roles = reply["roles"].as_array().unwrap();
-    let me = roles.iter().find(|r| r["global_id"] == "alpha@acct").expect("alpha listed");
+    let me = roles
+        .iter()
+        .find(|r| r["global_id"] == "alpha@acct")
+        .expect("alpha listed");
     assert_eq!(me["online"], true);
     assert_eq!(me["summary"], "writing M5");
     d.stop().await;

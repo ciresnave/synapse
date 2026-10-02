@@ -198,8 +198,12 @@ async fn host_guard(port: u16, req: Request, next: Next) -> Response {
         .unwrap_or("");
     let ours = host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
     if !ours {
-        return ApiError::new(StatusCode::MISDIRECTED_REQUEST, "wrong_host", "unknown host")
-            .into_response();
+        return ApiError::new(
+            StatusCode::MISDIRECTED_REQUEST,
+            "wrong_host",
+            "unknown host",
+        )
+        .into_response();
     }
     next.run(req).await
 }
@@ -231,9 +235,13 @@ impl From<MailError> for ApiError {
                 status: StatusCode::CONFLICT,
                 body: json!({"error": "superseded", "current": s.current, "message": e.to_string()}),
             },
-            MailError::MailboxFull => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "mailbox_full", e),
+            MailError::MailboxFull => {
+                ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "mailbox_full", e)
+            }
             MailError::Malformed => ApiError::new(StatusCode::BAD_REQUEST, "malformed", e),
-            MailError::LeaseOutOfRange => ApiError::new(StatusCode::BAD_REQUEST, "lease_out_of_range", e),
+            MailError::LeaseOutOfRange => {
+                ApiError::new(StatusCode::BAD_REQUEST, "lease_out_of_range", e)
+            }
             MailError::NotFound => ApiError::new(StatusCode::NOT_FOUND, "not_found", e),
             MailError::NotYourLease => ApiError::new(StatusCode::FORBIDDEN, "not_your_lease", e),
             MailError::Claim(c) => ApiError::new(StatusCode::FORBIDDEN, "claim_refused", c),
@@ -249,8 +257,13 @@ fn malformed(what: &str) -> ApiError {
 }
 
 fn locked<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, ApiError> {
-    m.lock()
-        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable", "lock poisoned"))
+    m.lock().map_err(|_| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "store_unavailable",
+            "lock poisoned",
+        )
+    })
 }
 
 /// A JSON body: `application/json` only (415 otherwise), unknown fields refused (400).
@@ -258,7 +271,11 @@ fn parse<T: DeserializeOwned>(headers: &HeaderMap, body: &Bytes) -> Result<T, Ap
     let json = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(';').next().is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json")));
+        .is_some_and(|v| {
+            v.split(';')
+                .next()
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
+        });
     if !json {
         return Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -295,7 +312,13 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
 /// The caller's session: Bearer token, looked up by its hash, then checked against the role's
 /// current epoch. Every authenticated call also counts as presence.
 fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
-    let unauthorized = || ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "a valid session is required");
+    let unauthorized = || {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "a valid session is required",
+        )
+    };
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -309,10 +332,12 @@ fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
     locked(&shared.mailbox)?.check(&session.global_id, session.epoch)?;
     let now = Utc::now();
     let mut presence = locked(&shared.presence)?;
-    let entry = presence.entry(session.global_id.clone()).or_insert(Presence {
-        last_seen: now,
-        summary: None,
-    });
+    let entry = presence
+        .entry(session.global_id.clone())
+        .or_insert(Presence {
+            last_seen: now,
+            summary: None,
+        });
     entry.last_seen = now;
     Ok(session)
 }
@@ -335,13 +360,19 @@ struct ClaimBody {
     signature_b64: String,
 }
 
-async fn claim(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+async fn claim(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
     let body: ClaimBody = parse(&headers, &body)?;
     let req = ClaimRequest {
         chain: chain_from_pem(&body.chain_pem).map_err(|_| malformed("chain_pem"))?,
         nonce: unhex::<16>(&body.nonce_hex).ok_or_else(|| malformed("nonce_hex"))?,
         signed_at: body.signed_at,
-        signature: B64.decode(&body.signature_b64).map_err(|_| malformed("signature_b64"))?,
+        signature: B64
+            .decode(&body.signature_b64)
+            .map_err(|_| malformed("signature_b64"))?,
     };
     let (key_id, key) = (shared.account_key_id.clone(), shared.account_key);
     let lookup = move |kid: &str| (kid == key_id).then_some(key);
@@ -352,7 +383,13 @@ async fn claim(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Byte
         use ring::rand::SecureRandom;
         ring::rand::SystemRandom::new()
             .fill(&mut token)
-            .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable", "no randomness"))?;
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "store_unavailable",
+                    "no randomness",
+                )
+            })?;
     }
     {
         let mut sessions = locked(&shared.sessions)?;
@@ -385,7 +422,11 @@ struct SendBody {
     body_b64: String,
 }
 
-async fn send(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+async fn send(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
     let body: SendBody = parse(&headers, &body)?;
     let message_id = body
@@ -395,7 +436,9 @@ async fn send(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes
         message_id: message_id.clone(),
         to: body.to,
         from: session.global_id,
-        body: B64.decode(&body.body_b64).map_err(|_| malformed("body_b64"))?,
+        body: B64
+            .decode(&body.body_b64)
+            .map_err(|_| malformed("body_b64"))?,
     };
     let outcome = locked(&shared.mailbox)?.enqueue(envelope, Utc::now())?;
     Ok(axum::Json(json!({
@@ -414,12 +457,22 @@ struct FetchBody {
     lease_secs: Option<i64>,
 }
 
-async fn fetch(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+async fn fetch(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
     let body: FetchBody = parse(&headers, &body)?;
     let max = body.max.unwrap_or(10).min(MAX_FETCH);
     let lease = body.lease_secs.map(chrono::Duration::seconds);
-    let deliveries = locked(&shared.mailbox)?.fetch(&session.global_id, session.epoch, max, lease, Utc::now())?;
+    let deliveries = locked(&shared.mailbox)?.fetch(
+        &session.global_id,
+        session.epoch,
+        max,
+        lease,
+        Utc::now(),
+    )?;
     let messages: Vec<Value> = deliveries
         .into_iter()
         .map(|d| {
@@ -442,10 +495,19 @@ struct AckBody {
     message_id: String,
 }
 
-async fn ack(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+async fn ack(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
     let body: AckBody = parse(&headers, &body)?;
-    let outcome = locked(&shared.mailbox)?.ack(&session.global_id, session.epoch, &body.message_id, Utc::now())?;
+    let outcome = locked(&shared.mailbox)?.ack(
+        &session.global_id,
+        session.epoch,
+        &body.message_id,
+        Utc::now(),
+    )?;
     Ok(axum::Json(json!({
         "outcome": match outcome { Acked::Removed => "removed", Acked::AlreadyAcked => "already_acked" },
     }))
@@ -459,7 +521,11 @@ struct HeartbeatBody {
     summary: Option<String>,
 }
 
-async fn heartbeat(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+async fn heartbeat(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
     let body: HeartbeatBody = parse(&headers, &body)?;
     if let Some(summary) = body.summary {
