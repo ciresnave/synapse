@@ -404,7 +404,7 @@ fn check_dir(dir: &Path, item: &'static str) -> Result<()> {
 }
 
 /// Refuse anything accessible to more than its owner.
-fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
+pub(crate) fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

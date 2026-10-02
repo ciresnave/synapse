@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "5.3.1"
+version = "5.4.0"
 
 [package]
 name = "synapse"
@@ -184,6 +184,9 @@ rcgen = "0.14.10"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 # Development dependencies
+# Durable mailbox store (M4 PR2). D1, CireSnave: "Redb is fine for now."
+redb = { version = "4.3.0", optional = true }
+
 # Windows ACL check for the keystore (M2, spec 4 Q2(a)).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
@@ -390,6 +393,9 @@ auto_discovery = ["dep:auto-discovery", "mdns"]
 cache = ["dep:redis"]
 telemetry = ["dep:tracing-subscriber"]
 
+# Durable mailbox store on redb (M4 PR2).
+mailbox-redb = ["dep:redb"]
+
 # Networking feature (adds network transport capabilities)
 networking = ["core", "http", "mdns", "dep:futures-util"]
 
@@ -422,6 +428,7 @@ auth = ["core", "auth-framework"]
 # Full native platform support (the original working config but with updated deps)
 native = [
     "core",
+    "mailbox-redb",
     "networking",
     "nat_traversal",
     "email",
