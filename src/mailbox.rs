@@ -711,10 +711,18 @@ impl RedbTxn<'_> {
             .txn
             .open_table(redb_tables::BODIES)
             .map_err(|e| store_err("bodies")(&e))?;
-        Ok(t.get((role, seq))
+        // A META row without its body is corruption: serving an empty body would deliver (and let
+        // a consumer ack) a message whose signed content is gone (final review I4).
+        t.get((role, seq))
             .map_err(|e| store_err("bodies")(&e))?
             .map(|g| g.value().to_vec())
-            .unwrap_or_default())
+            .ok_or_else(|| StoreError("a queued message's body is missing".into()))
+    }
+
+    /// The META row for an id the BY_ID index names; a missing one is corruption (review I4).
+    fn indexed_meta(&self, role: &str, seq: u64) -> Result<Meta, StoreError> {
+        self.meta(role, seq)?
+            .ok_or_else(|| StoreError("a queued message's metadata is missing".into()))
     }
 
     fn assemble(&self, role: &str, seq: u64, meta: Meta) -> Result<Stored, StoreError> {
@@ -742,9 +750,12 @@ impl RedbTxn<'_> {
             .map_err(|e| store_err("stats")(&e))?
             .map(|g| g.value())
             .unwrap_or((0, 0));
+        // Underflow means the accounting is wrong; fail the transaction instead of clamping, which
+        // would let a queue silently exceed its bound (final review I3).
+        let underflow = || StoreError("queue statistics underflow".into());
         let next = (
-            c.checked_add_signed(count).unwrap_or(0),
-            b.checked_add_signed(bytes).unwrap_or(0),
+            c.checked_add_signed(count).ok_or_else(underflow)?,
+            b.checked_add_signed(bytes).ok_or_else(underflow)?,
         );
         if next == (0, 0) {
             t.remove(role).map_err(|e| store_err("stats")(&e))?;
@@ -801,17 +812,20 @@ impl MailTxn for RedbTxn<'_> {
         let Some(seq) = self.seq_of(role, id)? else {
             return Ok(None);
         };
-        match self.meta(role, seq)? {
-            Some(meta) => self.assemble(role, seq, meta).map(Some),
-            None => Ok(None),
-        }
+        let meta = self.indexed_meta(role, seq)?;
+        self.assemble(role, seq, meta).map(Some)
     }
 
     fn put(&mut self, role: &str, stored: Stored) -> Result<(), StoreError> {
         let id = stored.envelope.message_id.clone();
         let existing = self.seq_of(role, &id)?;
         let seq = existing.unwrap_or(stored.seq);
-        let body_len = stored.envelope.body.len() as u64;
+        // A body is written once. An update (fetch re-leasing a message) keeps the stored body, so
+        // it must keep the stored length too, or STATS and the byte bound drift (final review I2).
+        let body_len = match existing {
+            Some(seq) => self.indexed_meta(role, seq)?.body_len,
+            None => stored.envelope.body.len() as u64,
+        };
         let meta = Meta {
             message_id: id.clone(),
             from: stored.envelope.from.clone(),
@@ -857,7 +871,7 @@ impl MailTxn for RedbTxn<'_> {
         let Some(seq) = self.seq_of(role, id)? else {
             return Ok(());
         };
-        let body_len = self.meta(role, seq)?.map_or(0, |m| m.body_len);
+        let body_len = self.indexed_meta(role, seq)?.body_len;
         {
             let mut t = self
                 .txn

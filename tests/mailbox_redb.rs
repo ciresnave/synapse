@@ -303,3 +303,43 @@ fn grant_everyone_read(path: &Path) {
 #[cfg(unix)]
 #[allow(dead_code)]
 fn grant_everyone_read(_path: &Path) {}
+
+/// Review I2: an update of an existing id keeps the stored body, so it must also keep the stored
+/// body length; otherwise STATS (the max_bytes bound) drifts. MemoryStore and RedbStore must agree.
+#[test]
+fn an_update_with_another_body_keeps_the_stored_body_and_the_stats() {
+    let store = fresh();
+    let stored = |id: &str, body: &[u8]| Stored {
+        envelope: suite::env(id, LANE, body),
+        seq: 1,
+        enqueued_at: suite::t0(),
+        lease: None,
+        attempts: 0,
+    };
+    store
+        .write(&mut |txn| {
+            txn.put(LANE, stored("m", b"four"))
+                .map_err(MailError::Store)?;
+            let mut other = stored("n", b"xx");
+            other.seq = 2;
+            txn.put(LANE, other).map_err(MailError::Store)
+        })
+        .unwrap();
+    store
+        .write(&mut |txn| {
+            txn.put(LANE, stored("m", b"ten-bytes!"))
+                .map_err(MailError::Store)
+        })
+        .unwrap();
+    store
+        .write(&mut |txn| txn.remove(LANE, "m").map_err(MailError::Store))
+        .unwrap();
+    let mut stats = None;
+    store
+        .write(&mut |txn| {
+            stats = Some(txn.stats(LANE).map_err(MailError::Store)?);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(stats, Some((1, 2)), "only n (2 bytes) remains");
+}

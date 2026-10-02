@@ -38,9 +38,21 @@ impl MailStore for CrashingStore {
         }
         self.inner.write(&mut |txn| {
             f(txn)?;
+            crash_point();
             std::process::abort() // inside the transaction: nothing is committed
         })
     }
+}
+
+/// Printed by a child immediately before it aborts at the intended point. Review I1: "the child
+/// died" alone also holds for a child that panicked early (exit 101) and never reached its write.
+const CRASH_POINT: &str = "SYNAPSE-CRASH-POINT-REACHED";
+
+fn crash_point() {
+    use std::io::Write;
+    let mut err = std::io::stderr();
+    let _ = writeln!(err, "{CRASH_POINT}");
+    let _ = err.flush();
 }
 
 fn fresh_db() -> PathBuf {
@@ -63,16 +75,25 @@ fn open_at(path: &Path, now: DateTime<Utc>) -> Mailbox<RedbStore> {
     Mailbox::open(RedbStore::open(path).unwrap(), MailConfig::default(), now).expect("open")
 }
 
-/// Run this binary's `child_entry` with `op`; returns the child's exit status.
+/// Run this binary's `child_entry` with `op`. Asserts the child reached its intended crash point
+/// (review I1), and returns its exit status.
 fn run_child(op: &str, db: &Path, ids: &suite::Ids, epoch: u64) -> ExitStatus {
-    Command::new(std::env::current_exe().unwrap())
+    let out = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_entry", "--nocapture", "--test-threads=1"])
         .env("SYNAPSE_CRASH_OP", op)
         .env("SYNAPSE_CRASH_DB", db)
         .env("SYNAPSE_CRASH_KEYS", ids.path())
         .env("SYNAPSE_CRASH_EPOCH", epoch.to_string())
-        .status()
-        .expect("spawn the child")
+        .output()
+        .expect("spawn the child");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(CRASH_POINT),
+        "child {op} died without reaching its crash point (status {:?}):
+{stderr}",
+        out.status
+    );
+    out.status
 }
 
 /// The child half. A no-op in a normal test run (the variable is unset).
@@ -97,6 +118,7 @@ fn child_entry() {
         let mut mb = open_at(&db, now);
         mb.enqueue(suite::env("ctl", LANE, b"c"), at)
             .expect("committed enqueue");
+        crash_point();
         std::process::abort();
     }
 
