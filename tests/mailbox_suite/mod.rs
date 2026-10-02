@@ -23,7 +23,8 @@ impl RevocationLookup for NoRevocations {
 
 /// A keystore with account `acct`, and helpers to claim its roles.
 pub struct Ids {
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
+    path: std::path::PathBuf,
     store: Keystore,
     nonce: std::cell::Cell<u8>,
 }
@@ -34,10 +35,27 @@ impl Ids {
         Keystore::init_account(dir.path(), "acct").expect("init");
         let store = Keystore::open(dir.path()).expect("open");
         Ids {
-            _dir: dir,
+            path: dir.path().to_path_buf(),
+            _dir: Some(dir),
             store,
             nonce: std::cell::Cell::new(0),
         }
+    }
+
+    /// The same account, reopened from `path` (a crash test's child process). `nonce_base` keeps
+    /// the child's claim nonces apart from the parent's.
+    pub fn open_existing(path: &std::path::Path, nonce_base: u8) -> Self {
+        Ids {
+            _dir: None,
+            path: path.to_path_buf(),
+            store: Keystore::open(path).expect("reopen keystore"),
+            nonce: std::cell::Cell::new(nonce_base),
+        }
+    }
+
+    /// Where the keystore lives, for handing to a child process.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
     }
 
     pub fn request(&self, role: &str, now: DateTime<Utc>) -> ClaimRequest {
