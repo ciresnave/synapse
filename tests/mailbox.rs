@@ -41,7 +41,8 @@ fn a_failed_write_leaves_the_prior_state() {
         attempts: 0,
     };
     let failed = store.write(&mut |txn| {
-        txn.put("lane@acct", stored.clone()).map_err(MailError::Store)?;
+        txn.put("lane@acct", stored.clone())
+            .map_err(MailError::Store)?;
         Err(MailError::MailboxFull)
     });
     assert_eq!(failed, Err(MailError::MailboxFull));
@@ -52,5 +53,9 @@ fn a_failed_write_leaves_the_prior_state() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(queue_len, Some(0), "the failed transaction's put must not survive");
+    assert_eq!(
+        queue_len,
+        Some(0),
+        "the failed transaction's put must not survive"
+    );
 }

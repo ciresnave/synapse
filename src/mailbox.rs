@@ -290,7 +290,8 @@ impl<S: MailStore> Mailbox<S> {
             state = Some(txn.roles().map_err(MailError::Store)?);
             Ok(())
         })?;
-        let roles = Roles::restore(state.unwrap_or_default(), now).map_err(MailError::InvalidState)?;
+        let roles =
+            Roles::restore(state.unwrap_or_default(), now).map_err(MailError::InvalidState)?;
         Ok(Mailbox {
             store,
             config,
@@ -366,9 +367,9 @@ impl<S: MailStore> Mailbox<S> {
             .claim(req, account_keys, revoked, now)
             .map_err(MailError::Claim)?;
         let snapshot = self.roles.snapshot();
-        let written = self.store.write(&mut |txn| {
-            txn.set_roles(&snapshot).map_err(MailError::Store)
-        });
+        let written = self
+            .store
+            .write(&mut |txn| txn.set_roles(&snapshot).map_err(MailError::Store));
         if let Err(e) = written {
             self.poisoned = true;
             return Err(e);
@@ -387,7 +388,9 @@ impl<S: MailStore> Mailbox<S> {
         now: DateTime<Utc>,
     ) -> Result<Vec<Delivery>, MailError> {
         self.live()?;
-        self.roles.check(role, epoch).map_err(MailError::Superseded)?;
+        self.roles
+            .check(role, epoch)
+            .map_err(MailError::Superseded)?;
         let lease = lease.unwrap_or(self.config.default_lease);
         if lease < self.config.min_lease || lease > self.config.max_lease {
             return Err(MailError::LeaseOutOfRange);
@@ -432,10 +435,16 @@ impl<S: MailStore> Mailbox<S> {
         now: DateTime<Utc>,
     ) -> Result<Acked, MailError> {
         self.live()?;
-        self.roles.check(role, epoch).map_err(MailError::Superseded)?;
+        self.roles
+            .check(role, epoch)
+            .map_err(MailError::Superseded)?;
         let mut outcome = Acked::Removed;
         self.store.write(&mut |txn| {
-            if txn.acked_at(role, message_id).map_err(MailError::Store)?.is_some() {
+            if txn
+                .acked_at(role, message_id)
+                .map_err(MailError::Store)?
+                .is_some()
+            {
                 outcome = Acked::AlreadyAcked;
                 return Ok(());
             }
@@ -448,7 +457,8 @@ impl<S: MailStore> Mailbox<S> {
                 _ => return Err(MailError::NotYourLease),
             }
             txn.remove(role, message_id).map_err(MailError::Store)?;
-            txn.record_ack(role, message_id, now).map_err(MailError::Store)?;
+            txn.record_ack(role, message_id, now)
+                .map_err(MailError::Store)?;
             outcome = Acked::Removed;
             Ok(())
         })?;
