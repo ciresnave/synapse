@@ -49,14 +49,41 @@ impl Default for MailConfig {
     }
 }
 
-/// One message, as the mailbox carries it. `body` is opaque.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One message, as the mailbox carries it. `body` is opaque, and `Debug` shows only its length:
+/// bodies are signed message content and can be large (final review M1).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     pub message_id: String,
     /// The recipient role, `role@account`.
     pub to: String,
     pub from: String,
     pub body: Vec<u8>,
+}
+
+impl fmt::Debug for Envelope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Envelope")
+            .field("message_id", &self.message_id)
+            .field("to", &self.to)
+            .field("from", &self.from)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
+}
+
+/// The longest `message_id` or `from` the mailbox accepts, in bytes.
+pub const MAX_ADDRESS_LEN: usize = 256;
+
+/// Structural checks only (final review I3): the mailbox keys storage on these strings, so it
+/// refuses ones that cannot be sane keys. Whether a sender may write to a role, and whether the
+/// role exists, is the caller's (M5's) decision.
+fn well_formed(env: &Envelope) -> bool {
+    let printable =
+        |s: &str| !s.is_empty() && s.len() <= MAX_ADDRESS_LEN && !s.chars().any(char::is_control);
+    let role_id = env.to.split_once('@').is_some_and(|(role, account)| {
+        crate::keystore::valid_name(role) && crate::keystore::valid_name(account)
+    });
+    role_id && printable(&env.message_id) && printable(&env.from)
 }
 
 /// Who holds a message, and until when.
@@ -125,6 +152,8 @@ pub enum MailError {
     NotYourLease,
     /// A requested lease is outside `[min_lease, max_lease]`.
     LeaseOutOfRange,
+    /// The envelope's `to`, `message_id` or `from` is not well formed or is too long.
+    Malformed,
     Claim(ClaimError),
     InvalidState(InvalidState),
     Store(StoreError),
@@ -140,6 +169,7 @@ impl fmt::Display for MailError {
             MailError::NotFound => write!(f, "no such queued message"),
             MailError::NotYourLease => write!(f, "the message is not leased to this epoch"),
             MailError::LeaseOutOfRange => write!(f, "the requested lease is out of range"),
+            MailError::Malformed => write!(f, "the envelope's addressing is malformed"),
             MailError::Claim(e) => write!(f, "{e}"),
             MailError::InvalidState(e) => write!(f, "{e}"),
             MailError::Store(e) => write!(f, "{e}"),
@@ -152,8 +182,11 @@ impl std::error::Error for MailError {}
 
 /// One write transaction's view of the store.
 pub trait MailTxn {
-    /// The role's queue, ascending `seq`.
-    fn queue(&self, role: &str) -> Result<Vec<Stored>, StoreError>;
+    /// How many messages the role has queued, and their total body bytes.
+    fn stats(&self, role: &str) -> Result<(usize, u64), StoreError>;
+    /// Visit the role's queue in ascending `seq`, stopping when `visit` returns `false`. Lets a
+    /// store stop early instead of loading a whole queue (final review I2).
+    fn scan(&self, role: &str, visit: &mut dyn FnMut(&Stored) -> bool) -> Result<(), StoreError>;
     fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError>;
     /// Insert, or replace by `envelope.message_id`.
     fn put(&mut self, role: &str, stored: Stored) -> Result<(), StoreError>;
@@ -214,14 +247,27 @@ impl MailStore for MemoryStore {
 }
 
 impl MailTxn for MemState {
-    fn queue(&self, role: &str) -> Result<Vec<Stored>, StoreError> {
-        let mut queue: Vec<Stored> = self
-            .queues
-            .get(role)
-            .map(|q| q.values().cloned().collect())
-            .unwrap_or_default();
-        queue.sort_by_key(|s| s.seq);
-        Ok(queue)
+    fn stats(&self, role: &str) -> Result<(usize, u64), StoreError> {
+        Ok(self.queues.get(role).map_or((0, 0), |q| {
+            (
+                q.len(),
+                q.values().map(|s| s.envelope.body.len() as u64).sum(),
+            )
+        }))
+    }
+
+    fn scan(&self, role: &str, visit: &mut dyn FnMut(&Stored) -> bool) -> Result<(), StoreError> {
+        let Some(queue) = self.queues.get(role) else {
+            return Ok(());
+        };
+        let mut ordered: Vec<&Stored> = queue.values().collect();
+        ordered.sort_by_key(|s| s.seq);
+        for stored in ordered {
+            if !visit(stored) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError> {
@@ -314,8 +360,17 @@ impl<S: MailStore> Mailbox<S> {
     }
 
     /// Queue `env` for its recipient. Mail may wait for a role that has never claimed.
+    ///
+    /// **Caller's contract (M5):** the sender is authenticated and allowed to write to `env.to`.
+    /// The mailbox checks only that the addressing is well formed ([`MailError::Malformed`]) and
+    /// bounds each role's queue; it cannot know which roles exist, so the number of roles is the
+    /// caller's to bound. A resend of an acked message is a [`Enqueued::Duplicate`] for as long as
+    /// acked history is retained, and is delivered again after [`Mailbox::sweep`] removes it.
     pub fn enqueue(&mut self, env: Envelope, now: DateTime<Utc>) -> Result<Enqueued, MailError> {
         self.live()?;
+        if !well_formed(&env) {
+            return Err(MailError::Malformed);
+        }
         let config = self.config.clone();
         let mut outcome = Enqueued::Queued;
         self.store.write(&mut |txn| {
@@ -327,10 +382,9 @@ impl<S: MailStore> Mailbox<S> {
                 outcome = Enqueued::Duplicate;
                 return Ok(());
             }
-            let queue = txn.queue(role).map_err(MailError::Store)?;
-            let bytes: u64 = queue.iter().map(|s| s.envelope.body.len() as u64).sum();
-            if queue.len() + 1 > config.max_messages
-                || bytes + env.body.len() as u64 > config.max_bytes
+            let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
+            if count + 1 > config.max_messages
+                || bytes.saturating_add(env.body.len() as u64) > config.max_bytes
             {
                 return Err(MailError::MailboxFull);
             }
@@ -397,19 +451,25 @@ impl<S: MailStore> Mailbox<S> {
         }
         let until = now + lease;
         let mut out = Vec::new();
+        if max == 0 {
+            return Ok(out);
+        }
         self.store.write(&mut |txn| {
             out.clear();
-            for mut stored in txn.queue(role).map_err(MailError::Store)? {
-                if out.len() == max {
-                    break;
-                }
+            // Collect up to `max` free messages in order, stopping the scan early, then lease them.
+            let mut picked: Vec<Stored> = Vec::new();
+            txn.scan(role, &mut |stored| {
                 let free = match &stored.lease {
                     None => true,
                     Some(held) => held.until <= now || held.epoch != epoch,
                 };
-                if !free {
-                    continue;
+                if free {
+                    picked.push(stored.clone());
                 }
+                picked.len() < max
+            })
+            .map_err(MailError::Store)?;
+            for mut stored in picked {
                 stored.lease = Some(Lease { epoch, until });
                 stored.attempts = stored.attempts.saturating_add(1);
                 out.push(Delivery {
@@ -466,6 +526,9 @@ impl<S: MailStore> Mailbox<S> {
     }
 
     /// Delete acked history older than the retention period. Queued mail is never touched.
+    ///
+    /// Acked history is outside the per-role queue bound and grows until swept, so the daemon
+    /// (M5) must call this periodically (final review I4).
     pub fn sweep(&mut self, now: DateTime<Utc>) -> Result<usize, MailError> {
         self.live()?;
         let before = now - self.config.retention;

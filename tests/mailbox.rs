@@ -49,7 +49,7 @@ fn a_failed_write_leaves_the_prior_state() {
     let mut queue_len = None;
     store
         .write(&mut |txn| {
-            queue_len = Some(txn.queue("lane@acct").map_err(MailError::Store)?.len());
+            queue_len = Some(txn.stats("lane@acct").map_err(MailError::Store)?.0);
             Ok(())
         })
         .unwrap();
@@ -57,5 +57,132 @@ fn a_failed_write_leaves_the_prior_state() {
         queue_len,
         Some(0),
         "the failed transaction's put must not survive"
+    );
+}
+
+// ---- Final-review fixes (M4 PR1) ----
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use synapse::mailbox::{Envelope, MailConfig, MailTxn, Mailbox};
+
+/// A store that fails the next write when told to, over a shared MemoryStore (review I1).
+#[derive(Clone)]
+struct FailingStore {
+    inner: Arc<MemoryStore>,
+    fail_next: Arc<AtomicBool>,
+}
+
+impl MailStore for FailingStore {
+    fn write(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(MailError::Store(synapse::mailbox::StoreError(
+                "injected".into(),
+            )));
+        }
+        self.inner.write(f)
+    }
+}
+
+/// Review I1: a claim whose epoch the store did not record poisons the mailbox, every later call
+/// refuses, and a reopen continues from the last persisted epoch.
+#[test]
+fn a_failed_claim_write_poisons_and_a_reopen_continues_from_the_store() {
+    let ids = suite::Ids::new();
+    let store = FailingStore {
+        inner: Arc::new(MemoryStore::new()),
+        fail_next: Arc::new(AtomicBool::new(false)),
+    };
+    let mut mb = suite::open(store.clone());
+    let first = ids.claim(&mut mb, "lane", suite::t0());
+    let later = suite::t0() + chrono::Duration::seconds(5);
+    assert_eq!(
+        ids.claim(&mut mb, "lane", later),
+        first + 1,
+        "persisted normally"
+    );
+
+    // The next store write fails: the claim is granted in memory but not recorded.
+    store.fail_next.store(true, Ordering::SeqCst);
+    let at = later + chrono::Duration::seconds(5);
+    assert!(
+        matches!(ids.try_claim(&mut mb, "lane", at), Err(MailError::Store(_))),
+        "the store write failed"
+    );
+    for result in [
+        mb.enqueue(suite::env("m", "lane@acct", b"x"), at)
+            .map(|_| ()),
+        mb.fetch("lane@acct", first + 2, 1, None, at).map(|_| ()),
+        mb.ack("lane@acct", first + 2, "m", at).map(|_| ()),
+        mb.sweep(at).map(|_| ()),
+    ] {
+        assert_eq!(result, Err(MailError::Poisoned));
+    }
+    assert!(matches!(
+        ids.try_claim(&mut mb, "lane", at),
+        Err(MailError::Poisoned)
+    ));
+
+    // Reopen over the same store: the unrecorded epoch was never handed out, so it is reissued.
+    let reopened_at = at + chrono::Duration::seconds(1);
+    let mut reopened =
+        Mailbox::open(store.clone(), MailConfig::default(), reopened_at).expect("reopen");
+    let next = ids.claim(
+        &mut reopened,
+        "lane",
+        reopened_at + chrono::Duration::seconds(1),
+    );
+    assert_eq!(next, first + 2, "the store's last epoch was first + 1");
+}
+
+/// Review I3: the mailbox keys storage on `to` and `message_id`, so it refuses malformed or
+/// oversized ones. Whether a role may receive is M5's decision; whether a key is sane is ours.
+#[test]
+fn malformed_envelopes_are_refused() {
+    let mut mb = suite::open(MemoryStore::new());
+    let long = "x".repeat(257);
+    let cases = [
+        ("", "m1", "peer@acct"),
+        ("nobody", "m1", "peer@acct"),
+        ("a@b@c", "m1", "peer@acct"),
+        ("bad.label@acct", "m1", "peer@acct"),
+        ("lane@acct", "", "peer@acct"),
+        ("lane@acct", long.as_str(), "peer@acct"),
+        ("lane@acct", "m1", long.as_str()),
+    ];
+    for (to, id, from) in cases {
+        let env = Envelope {
+            message_id: id.into(),
+            to: to.into(),
+            from: from.into(),
+            body: vec![],
+        };
+        assert_eq!(
+            mb.enqueue(env, suite::t0()),
+            Err(MailError::Malformed),
+            "to={to:?} id_len={} from_len={}",
+            id.len(),
+            from.len()
+        );
+    }
+}
+
+/// Review M1 (re-graded Important): bodies are signed message content and may be large; Debug
+/// must show their length, never their bytes.
+#[test]
+fn debug_never_prints_a_body() {
+    let env = suite::env("m1", "lane@acct", b"top-secret-body");
+    let shown = format!("{env:?}");
+    assert!(
+        shown.contains("m1") && shown.contains("15"),
+        "ids and body length shown: {shown}"
+    );
+    let bytes_as_debug = format!("{:?}", b"top-secret-body".to_vec());
+    assert!(
+        !shown.contains("top-secret-body") && !shown.contains(&bytes_as_debug[1..20]),
+        "{shown}"
     );
 }

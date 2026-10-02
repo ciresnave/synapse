@@ -47,6 +47,24 @@ impl Ids {
         sign_claim(&identity, [n; 16], now).expect("sign")
     }
 
+    /// Claim `role` and return the mailbox's result unchanged (for failure-path tests).
+    pub fn try_claim<S: MailStore>(
+        &self,
+        mailbox: &mut Mailbox<S>,
+        role: &str,
+        now: DateTime<Utc>,
+    ) -> Result<synapse::roles::Grant, synapse::mailbox::MailError> {
+        let req = self.request(role, now);
+        let key_id = self.store.account().key_id;
+        let key = self.store.account_public_key();
+        mailbox.claim(
+            &req,
+            &move |kid: &str| (kid == key_id).then_some(key),
+            &NoRevocations,
+            now,
+        )
+    }
+
     /// Claim `role` (e.g. "lane") on `mailbox`; returns the granted epoch.
     pub fn claim<S: MailStore>(
         &self,
