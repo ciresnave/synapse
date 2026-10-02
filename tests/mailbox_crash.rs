@@ -86,13 +86,17 @@ fn child_entry() {
         Path::new(&std::env::var("SYNAPSE_CRASH_KEYS").unwrap()),
         100,
     );
-    let epoch: u64 = std::env::var("SYNAPSE_CRASH_EPOCH").unwrap().parse().unwrap();
+    let epoch: u64 = std::env::var("SYNAPSE_CRASH_EPOCH")
+        .unwrap()
+        .parse()
+        .unwrap();
     let now = child_now();
     let at = now + Duration::seconds(1);
 
     if op == "commit-then-abort" {
         let mut mb = open_at(&db, now);
-        mb.enqueue(suite::env("ctl", LANE, b"c"), at).expect("committed enqueue");
+        mb.enqueue(suite::env("ctl", LANE, b"c"), at)
+            .expect("committed enqueue");
         std::process::abort();
     }
 
@@ -114,11 +118,7 @@ fn child_entry() {
 }
 
 /// Parent setup: claim `lane`, then run `prep`; returns the claimed epoch.
-fn prepare(
-    db: &Path,
-    ids: &suite::Ids,
-    prep: impl FnOnce(&mut Mailbox<RedbStore>, u64),
-) -> u64 {
+fn prepare(db: &Path, ids: &suite::Ids, prep: impl FnOnce(&mut Mailbox<RedbStore>, u64)) -> u64 {
     let mut mb = open_at(db, suite::t0() - Duration::seconds(1));
     let epoch = ids.claim(&mut mb, "lane", suite::t0());
     prep(&mut mb, epoch);
@@ -144,28 +144,47 @@ fn queued_lease_epoch(db: &Path, id: &str) -> Option<Option<u64>> {
 fn a_death_mid_enqueue_leaves_no_message() {
     let (db, ids) = (fresh_db(), suite::Ids::new());
     let epoch = prepare(&db, &ids, |_, _| {});
-    assert!(!run_child("enqueue", &db, &ids, epoch).success(), "the child must die");
-    assert_eq!(queued_lease_epoch(&db, "x"), None, "the enqueue was not committed");
+    assert!(
+        !run_child("enqueue", &db, &ids, epoch).success(),
+        "the child must die"
+    );
+    assert_eq!(
+        queued_lease_epoch(&db, "x"),
+        None,
+        "the enqueue was not committed"
+    );
 }
 
 #[test]
 fn a_death_mid_fetch_leaves_no_lease() {
     let (db, ids) = (fresh_db(), suite::Ids::new());
     let epoch = prepare(&db, &ids, |mb, _| {
-        mb.enqueue(suite::env("x", LANE, b"x"), suite::t0()).unwrap();
+        mb.enqueue(suite::env("x", LANE, b"x"), suite::t0())
+            .unwrap();
     });
-    assert!(!run_child("fetch", &db, &ids, epoch).success(), "the child must die");
-    assert_eq!(queued_lease_epoch(&db, "x"), Some(None), "still queued, still unleased");
+    assert!(
+        !run_child("fetch", &db, &ids, epoch).success(),
+        "the child must die"
+    );
+    assert_eq!(
+        queued_lease_epoch(&db, "x"),
+        Some(None),
+        "still queued, still unleased"
+    );
 }
 
 #[test]
 fn a_death_mid_ack_leaves_the_message_queued() {
     let (db, ids) = (fresh_db(), suite::Ids::new());
     let epoch = prepare(&db, &ids, |mb, epoch| {
-        mb.enqueue(suite::env("x", LANE, b"x"), suite::t0()).unwrap();
+        mb.enqueue(suite::env("x", LANE, b"x"), suite::t0())
+            .unwrap();
         mb.fetch(LANE, epoch, 1, None, suite::t0()).unwrap();
     });
-    assert!(!run_child("ack", &db, &ids, epoch).success(), "the child must die");
+    assert!(
+        !run_child("ack", &db, &ids, epoch).success(),
+        "the child must die"
+    );
     assert_eq!(
         queued_lease_epoch(&db, "x"),
         Some(Some(epoch)),
@@ -177,18 +196,28 @@ fn a_death_mid_ack_leaves_the_message_queued() {
 fn a_death_mid_claim_leaves_the_old_epoch() {
     let (db, ids) = (fresh_db(), suite::Ids::new());
     let epoch = prepare(&db, &ids, |_, _| {});
-    assert!(!run_child("claim", &db, &ids, epoch).success(), "the child must die");
+    assert!(
+        !run_child("claim", &db, &ids, epoch).success(),
+        "the child must die"
+    );
     let later = child_now() + Duration::minutes(1);
     let mut mb = open_at(&db, later);
     let next = ids.claim(&mut mb, "lane", later + Duration::seconds(1));
-    assert_eq!(next, epoch + 1, "the child's uncommitted epoch was never recorded");
+    assert_eq!(
+        next,
+        epoch + 1,
+        "the child's uncommitted epoch was never recorded"
+    );
 }
 
 #[test]
 fn the_control_commit_then_abort_keeps_the_write() {
     let (db, ids) = (fresh_db(), suite::Ids::new());
     let epoch = prepare(&db, &ids, |_, _| {});
-    assert!(!run_child("commit-then-abort", &db, &ids, epoch).success(), "the child must die");
+    assert!(
+        !run_child("commit-then-abort", &db, &ids, epoch).success(),
+        "the child must die"
+    );
     assert_eq!(
         queued_lease_epoch(&db, "ctl"),
         Some(None),

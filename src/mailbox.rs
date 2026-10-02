@@ -624,9 +624,11 @@ impl RedbStore {
             txn.open_table(BODIES).map_err(|e| store_err("table")(&e))?;
             txn.open_table(BY_ID).map_err(|e| store_err("table")(&e))?;
             txn.open_table(ACKED).map_err(|e| store_err("table")(&e))?;
-            txn.open_table(ACKED_BY_TIME).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(ACKED_BY_TIME)
+                .map_err(|e| store_err("table")(&e))?;
             txn.open_table(STATS).map_err(|e| store_err("table")(&e))?;
-            txn.open_table(COUNTERS).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(COUNTERS)
+                .map_err(|e| store_err("table")(&e))?;
             txn.open_table(ROLES).map_err(|e| store_err("table")(&e))?;
         }
         txn.commit().map_err(|e| store_err("commit")(&e))?;

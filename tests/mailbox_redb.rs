@@ -81,21 +81,31 @@ fn a_reopen_keeps_queue_acks_and_epochs() {
         )
         .unwrap();
         let epoch = ids.claim(&mut mb, "lane", suite::t0());
-        mb.enqueue(suite::env("acked", LANE, b"a"), suite::t0()).unwrap();
-        mb.enqueue(suite::env("kept", LANE, b"k"), suite::t0()).unwrap();
+        mb.enqueue(suite::env("acked", LANE, b"a"), suite::t0())
+            .unwrap();
+        mb.enqueue(suite::env("kept", LANE, b"k"), suite::t0())
+            .unwrap();
         mb.fetch(LANE, epoch, 1, None, suite::t0()).unwrap();
         mb.ack(LANE, epoch, "acked", suite::t0()).unwrap();
         epoch
     }; // dropped: the database file is closed
 
     let later = suite::t0() + Duration::minutes(5);
-    let mut mb = Mailbox::open(RedbStore::open(&path).unwrap(), MailConfig::default(), later)
-        .expect("reopen");
+    let mut mb = Mailbox::open(
+        RedbStore::open(&path).unwrap(),
+        MailConfig::default(),
+        later,
+    )
+    .expect("reopen");
     let next = ids.claim(&mut mb, "lane", later + Duration::seconds(1));
     assert_eq!(next, first + 1, "epochs continue across a reopen");
-    let got = mb.fetch(LANE, next, 10, None, later + Duration::seconds(1)).unwrap();
+    let got = mb
+        .fetch(LANE, next, 10, None, later + Duration::seconds(1))
+        .unwrap();
     assert_eq!(
-        got.iter().map(|d| d.envelope.message_id.as_str()).collect::<Vec<_>>(),
+        got.iter()
+            .map(|d| d.envelope.message_id.as_str())
+            .collect::<Vec<_>>(),
         ["kept"]
     );
     assert_eq!(
@@ -117,9 +127,12 @@ fn stats_agree_with_a_scan_after_mixed_operations() {
     };
     store
         .write(&mut |txn| {
-            txn.put(LANE, stored("a", 1, b"aaaa")).map_err(MailError::Store)?;
-            txn.put(LANE, stored("b", 2, b"bb")).map_err(MailError::Store)?;
-            txn.put(LANE, stored("c", 3, b"c")).map_err(MailError::Store)?;
+            txn.put(LANE, stored("a", 1, b"aaaa"))
+                .map_err(MailError::Store)?;
+            txn.put(LANE, stored("b", 2, b"bb"))
+                .map_err(MailError::Store)?;
+            txn.put(LANE, stored("c", 3, b"c"))
+                .map_err(MailError::Store)?;
             Ok(())
         })
         .unwrap();
@@ -136,7 +149,8 @@ fn stats_agree_with_a_scan_after_mixed_operations() {
         .unwrap();
     // A failed transaction changes nothing.
     let _ = store.write(&mut |txn| {
-        txn.put(LANE, stored("d", 4, b"dddddd")).map_err(MailError::Store)?;
+        txn.put(LANE, stored("d", 4, b"dddddd"))
+            .map_err(MailError::Store)?;
         Err(MailError::MailboxFull)
     });
 
@@ -181,7 +195,11 @@ fn a_lease_update_does_not_rewrite_the_body() {
     store
         .write(&mut |txn| txn.put(LANE, s.clone()).map_err(MailError::Store))
         .unwrap();
-    assert_eq!(store.body_writes(), after_insert, "a lease update rewrote the body");
+    assert_eq!(
+        store.body_writes(),
+        after_insert,
+        "a lease update rewrote the body"
+    );
     let mut seen = None;
     store
         .write(&mut |txn| {
@@ -227,8 +245,16 @@ fn a_failed_write_leaves_the_file_unchanged() {
             Err(MailError::NotFound) // read-only: abort
         })
         .unwrap_err();
-    assert_eq!(stats, Some((0, 0)), "the aborted put did not survive a reopen");
-    assert_eq!(seq, Some(1), "the aborted next_seq did not advance the counter");
+    assert_eq!(
+        stats,
+        Some((0, 0)),
+        "the aborted put did not survive a reopen"
+    );
+    assert_eq!(
+        seq,
+        Some(1),
+        "the aborted next_seq did not advance the counter"
+    );
 }
 
 #[cfg(unix)]
@@ -240,7 +266,10 @@ fn the_store_file_is_owner_only() {
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(RedbStore::open(&path).is_err(), "a widened store file is refused");
+    assert!(
+        RedbStore::open(&path).is_err(),
+        "a widened store file is refused"
+    );
 }
 
 #[cfg(windows)]
@@ -248,9 +277,15 @@ fn the_store_file_is_owner_only() {
 fn the_store_file_is_owner_only() {
     let path = fresh_path();
     drop(RedbStore::open(&path).unwrap());
-    assert!(RedbStore::open(&path).is_ok(), "control: a fresh store reopens");
+    assert!(
+        RedbStore::open(&path).is_ok(),
+        "control: a fresh store reopens"
+    );
     grant_everyone_read(&path);
-    assert!(RedbStore::open(&path).is_err(), "a store Everyone can read is refused");
+    assert!(
+        RedbStore::open(&path).is_err(),
+        "a store Everyone can read is refused"
+    );
 }
 
 #[cfg(windows)]
