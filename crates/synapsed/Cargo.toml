@@ -1,0 +1,32 @@
+[package]
+name = "synapsed"
+version.workspace = true
+edition = "2024"
+rust-version = "1.88"
+authors = ["Eric Evans <ciresnave@gmail.com>"]
+description = "The Synapse daemon: one per user, on loopback, serving a durable role mailbox to any agent."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ciresnave/synapse"
+
+[lib]
+name = "synapsed"
+path = "src/lib.rs"
+
+[[bin]]
+name = "synapsed"
+path = "src/main.rs"
+
+[dependencies]
+synapse = { path = "../..", version = "5.4.0" }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
+tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+ring = "0.17"
+uuid = { version = "1.6", features = ["v4"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13.5", features = ["json"] }
+tempfile = "3.0"
