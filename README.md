@@ -146,6 +146,29 @@ Synapse operates on multiple layers to provide maximum flexibility and performan
 message_routing_system = "0.1.0"
 ```
 
+#### Command-line tools
+
+| crate | installs | what it is |
+|---|---|---|
+| `synapsectl` | `synapse` | the `synapse` command: identity (`synapse id …`) and mail over `synapsed` (`claim`, `send`, `inbox`, `ack`, `list`) |
+| `synapsed` | `synapsed` | the per-user loopback daemon; `synapse` starts it on demand |
+| `synapse-mcp-server` | `synapse-mcp` | the MCP stdio adapter, for any MCP client |
+
+```sh
+cargo install synapsectl synapsed synapse-mcp-server
+```
+
+These three crates are not on crates.io yet. Until they are, install from a checkout with
+`cargo install --path crates/<crate>`.
+
+These crates are named `synapsectl` and `synapse-mcp-server` because `synapse-cli` and `synapse-mcp`
+on crates.io belong to other, unrelated projects. The commands you type, and any MCP client
+configuration, still use `synapse` and `synapse-mcp`.
+
+**Binary name clash:** the unrelated `synapse-cli` crate also installs a binary called `synapse`. If
+it is installed, `cargo install synapsectl` refuses to overwrite it; uninstall it first
+(`cargo uninstall synapse-cli`), or pass `--force` to replace it.
+
 ### Basic Usage
 
 ```rust

@@ -115,16 +115,16 @@ fn the_core_names_no_vendor_and_no_mcp() {
 #[test]
 fn the_scan_finds_mcp_in_the_adapter() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    if !root.join("crates/synapse-mcp").exists() {
+    if !root.join("crates/synapse-mcp-server").exists() {
         eprintln!(
-            "CONTROL NOT RUN: crates/synapse-mcp is absent (core-only job); the full job runs it"
+            "CONTROL NOT RUN: crates/synapse-mcp-server is absent (core-only job); the full job runs it"
         );
         return;
     }
-    let files = tracked(root, &["crates/synapse-mcp/"]);
+    let files = tracked(root, &["crates/synapse-mcp-server/"]);
     assert!(
         !files.is_empty(),
-        "crates/synapse-mcp exists but git ls-files lists nothing in it"
+        "crates/synapse-mcp-server exists but git ls-files lists nothing in it"
     );
     assert!(
         !hits(root, &files).is_empty(),

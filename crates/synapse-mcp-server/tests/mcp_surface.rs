@@ -13,7 +13,7 @@ use synapse::CryptoManager;
 use synapse::sealing::SealingKeyPair;
 use synapse::sender_auth::key_id;
 use synapse::types::{SecureMessage, SecurityLevel};
-use synapse_mcp::{AckArgs, McpConfig, SendArgs, SynapseMcpServer};
+use synapse_mcp_server::{AckArgs, McpConfig, SendArgs, SynapseMcpServer};
 
 const ALICE: &str = "alice@synapse.test";
 const BOB: &str = "bob@synapse.test";

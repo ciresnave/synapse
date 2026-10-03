@@ -851,7 +851,7 @@ waits on the rest of the 2.0 set and on CireSnave's approval.
 #### What this means for a non-Rust agent runtime
 
 > **An MCP stdio surface: PR #39 (P2 slice c), on `main` as `a9dd1d1`.**
-> It is the `synapse-mcp` binary, in its own crate `crates/synapse-mcp` since M0 (the core crate has no MCP code). Any MCP client, in any language, can `send`, `poll`, `list` and
+> It is the `synapse-mcp` binary, in its own crate `crates/synapse-mcp-server` (package `synapse-mcp-server`; renamed from `synapse-mcp`, whose crates.io name belongs to another project) since M0 (the core crate has no MCP code). Any MCP client, in any language, can `send`, `poll`, `list` and
 > `ack` through synapse, and gets sender verdicts and receiver acknowledgement. Keys and peers can
 > only be changed in the config file. Design: `docs/superpowers/specs/2026-09-17-mcp-surface-design.md`.
 > Before #39, `main` had no agent-facing surface.
