@@ -141,6 +141,9 @@ impl Daemon {
     pub fn connect(home: &Path) -> Result<Daemon, MailError> {
         let http = reqwest::blocking::Client::builder()
             .no_proxy()
+            // synapsed never redirects; following one would re-send a claim body where a squatter
+            // points it (review, #74).
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(CALL_TIMEOUT)
             .build()
             .map_err(|e| MailError::Transport(e.to_string()))?;
@@ -426,10 +429,12 @@ enum Health {
 
 /// Ask the announced address for health with `challenge`, and check the reply's `proof`:
 /// HMAC-SHA256 keyed by the announced instance id over the same bytes `synapsed` signs
-/// (`synapsed::health_proof_message`), compared in constant time by `ring`. A reply that is not an
-/// ok health is `Silent`; an ok health without a valid proof is `Unproven`.
+/// (`synapsed::health_proof_message`), compared in constant time by `ring`. Only a failed connection
+/// is `Silent`: any HTTP reply at all means something holds the announced port, so a reply that is
+/// not an ok health with a valid proof is `Unproven` (review: a squatter answering `ok: false` must
+/// be reported too).
 fn health(http: &reqwest::blocking::Client, announce: &Announce, challenge: &[u8; 16]) -> Health {
-    let reply = http
+    let Ok(resp) = http
         .get(format!(
             "http://{}/v1/health?challenge={}",
             announce.addr,
@@ -437,10 +442,11 @@ fn health(http: &reqwest::blocking::Client, announce: &Announce, challenge: &[u8
         ))
         .timeout(HEALTH_TIMEOUT)
         .send()
-        .ok()
-        .and_then(|r| r.json::<Value>().ok());
-    let Some(reply) = reply.filter(|r| r["ok"] == true) else {
+    else {
         return Health::Silent;
+    };
+    let Some(reply) = resp.json::<Value>().ok().filter(|r| r["ok"] == true) else {
+        return Health::Unproven;
     };
     let proven = unhex::<16>(&announce.instance_id)
         .zip(reply["proof"].as_str().and_then(unhex::<32>))

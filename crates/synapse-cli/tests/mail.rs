@@ -432,7 +432,7 @@ fn a_dead_daemons_port_is_not_trusted() {
     let first = home.announced_pid().unwrap();
     home.kill_daemon(); // a kill runs no shutdown handler, so the announce file stays (#74)
 
-    let squatter = Squatter::bind(&addr);
+    let squatter = Squatter::bind(&addr, None);
     let out = home.run(&["send", "--role", "alpha", "--to", "alpha", "secret"]);
     let seen = squatter.stop();
 
@@ -455,7 +455,10 @@ struct Squatter {
 }
 
 impl Squatter {
-    fn bind(addr: &str) -> Squatter {
+    /// With `relay`, a challenged health request is forwarded to the live daemon at `relay` and its
+    /// genuine reply, proof included, is returned: the relay attack the address in the MAC defeats.
+    /// Each relayed reply is also logged, prefixed `relayed:`.
+    fn bind(addr: &str, relay: Option<String>) -> Squatter {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind(addr).expect("the dead daemon's port is free");
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -472,8 +475,24 @@ impl Squatter {
                 if request.starts_with("stop") {
                     return;
                 }
-                log.lock().unwrap().push(request);
-                let body = r#"{"ok":true,"started_at":"2020-01-01T00:00:00Z","global_id":"alpha@acct","epoch":1,"session":"00","outcome":"queued","message_id":"m","messages":[]}"#;
+                log.lock().unwrap().push(request.clone());
+                let canned = r#"{"ok":true,"started_at":"2020-01-01T00:00:00Z","global_id":"alpha@acct","epoch":1,"session":"00","outcome":"queued","message_id":"m","messages":[]}"#;
+                let body = match (&relay, request.split_whitespace().nth(1)) {
+                    (Some(to), Some(path)) if path.starts_with("/v1/health?challenge=") => {
+                        let mut live = std::net::TcpStream::connect(to).unwrap();
+                        write!(
+                            live,
+                            "GET {path} HTTP/1.1\r\nHost: {to}\r\nConnection: close\r\n\r\n"
+                        )
+                        .unwrap();
+                        let mut reply = String::new();
+                        live.read_to_string(&mut reply).unwrap();
+                        let body = reply.split_once("\r\n\r\n").unwrap().1.to_string();
+                        log.lock().unwrap().push(format!("relayed:{body}"));
+                        body
+                    }
+                    _ => canned.to_string(),
+                };
                 let _ = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -521,10 +540,23 @@ fn a_squatter_on_a_live_pids_port_gets_no_credential() {
     announce["pid"] = Value::from(live_pid);
     std::fs::write(&announce_path, announce.to_string()).unwrap();
 
-    let squatter = Squatter::bind(&addr);
+    // The squatter relays every challenge to that live daemon, so it answers with a genuine,
+    // well-formed proof, just not one for this address and instance (review: a canned reply with
+    // no proof never exercised the HMAC compare).
+    let text = std::fs::read_to_string(other.path().join("synapsed.json")).unwrap();
+    let live_addr = serde_json::from_str::<Value>(&text).unwrap()["addr"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let squatter = Squatter::bind(&addr, Some(live_addr));
     let out = home.run(&["send", "--role", "alpha", "--to", "alpha", "secret"]);
     let seen = squatter.stop();
 
+    assert!(
+        seen.iter()
+            .any(|r| r.starts_with("relayed:") && r.contains("\"proof\":\"")),
+        "no genuine proof was relayed, so the compare was not exercised: {seen:?}"
+    );
     assert!(
         !seen
             .iter()

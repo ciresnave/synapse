@@ -162,6 +162,15 @@ instead:
     further, but nothing guarantees that.
   - Accepted and documented. Closing it fully needs a channel-bound credential, which this design does
     not add.
+- **Redirects are refused** (from the Opus review). A squatter that wins that window could answer a
+  claim with a 307 and point it elsewhere. The client's HTTP client follows no redirects, and synapsed
+  never sends one.
+- **Any HTTP reply counts as an attempt at proof** (from the Opus review). Only a failed connection is
+  "nothing there". A listener that answers `ok: false`, or anything else, is warned about as a failed
+  proof, so condition 2's immediate failure applies to it too.
+- **The proof is per command, not per connection.**
+- **Health is public to any local user:** `started_at` and `version`. It reveals no instance id and
+  no MAC key.
 
 ---
 
