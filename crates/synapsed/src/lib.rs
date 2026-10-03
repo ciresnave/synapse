@@ -733,3 +733,40 @@ async fn list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<R
         .collect();
     Ok(axum::Json(json!({ "roles": out })).into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #77 D2: `locked` on a poisoned mutex is 503 `store_unavailable`; on a healthy one it yields
+    /// the guard. A poisoned lock is unreachable over HTTP without a test hook, so it is poisoned
+    /// directly here: a thread panics while holding the guard.
+    #[test]
+    fn locked_maps_a_poisoned_mutex_to_503_store_unavailable() {
+        let healthy = Mutex::new(1u8);
+        let Ok(guard) = locked(&healthy) else {
+            panic!("a healthy mutex must lock");
+        };
+        assert_eq!(*guard, 1);
+        drop(guard);
+
+        let poisoned = Arc::new(Mutex::new(1u8));
+        let holder = Arc::clone(&poisoned);
+        let joined = std::thread::spawn(move || {
+            let _guard = holder.lock().unwrap();
+            panic!("poison the mutex on purpose");
+        })
+        .join();
+        assert!(joined.is_err(), "precondition: the thread panicked");
+        assert!(
+            poisoned.is_poisoned(),
+            "precondition: the mutex is poisoned"
+        );
+
+        let Err(error) = locked(&poisoned) else {
+            panic!("a poisoned mutex must not lock");
+        };
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body["error"], "store_unavailable");
+    }
+}

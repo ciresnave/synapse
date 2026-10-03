@@ -637,3 +637,39 @@ fn a_leftover_lock_file_does_not_block_a_claim() {
         started.elapsed()
     );
 }
+
+/// #77 M1: while another process holds the role's lock, `claim` gives up after the lock timeout
+/// (about 10 s) with an error naming the role; once the lock is released the same claim succeeds.
+/// The holder here is the test itself, via `File::lock` on `<home>/sessions/<role>.lock`.
+#[test]
+fn a_claim_times_out_while_another_holds_the_role_lock_and_succeeds_after() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "beta"]); // the daemon is up
+    let sessions = home.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(sessions.join("alpha.lock"))
+        .unwrap();
+    lock.lock().expect("the test takes the exclusive lock");
+
+    let started = Instant::now();
+    let out = home.run(&["claim", "--role", "alpha"]);
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("is claiming") && err.contains("alpha"),
+        "the refusal should name the role: {err}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(5),
+        "the claim gave up after {:?}: it did not wait on the lock",
+        started.elapsed()
+    );
+
+    lock.unlock().expect("the test releases the lock");
+    home.ok(&["claim", "--role", "alpha"]);
+}

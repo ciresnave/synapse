@@ -155,6 +155,31 @@ fn level_and_marker_must_agree() {
     assert_eq!(sealing::open(&private, Some(&bob)), opened(b"p"));
 }
 
+/// #77 L1: a sealed-level message whose marker is present but not the supported value is refused as
+/// `UnsupportedVersion` (the check on the MARKER, not on the body's version byte, which stays
+/// valid here). The genuine marker opens the same message.
+#[test]
+fn an_unknown_sealed_marker_value_is_unsupported_version() {
+    let alice = signer();
+    let bob = SealingKeyPair::generate();
+    let mut message = sealed_signed(&alice, bob.public_key(), b"secret");
+    assert_eq!(sealing::open(&message, Some(&bob)), opened(b"secret"));
+    assert_eq!(message.encrypted_content[0], 1, "the body version is valid");
+
+    message
+        .metadata
+        .insert(SEALED_KEY.to_string(), "v2".to_string());
+    assert_eq!(
+        sealing::open(&message, Some(&bob)),
+        Payload::CouldNotOpen(OpenError::UnsupportedVersion)
+    );
+
+    message
+        .metadata
+        .insert(SEALED_KEY.to_string(), "v1".to_string());
+    assert_eq!(sealing::open(&message, Some(&bob)), opened(b"secret"));
+}
+
 // §8 test 6 (a, b)
 #[test]
 fn sealing_refuses_plain_levels_and_double_sealing() {
