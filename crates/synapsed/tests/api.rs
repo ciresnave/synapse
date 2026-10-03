@@ -141,7 +141,96 @@ async fn health_answers_without_a_token() {
         .unwrap();
     assert_eq!(reply["ok"], true);
     assert!(reply["started_at"].is_string());
+    assert!(reply.get("proof").is_none(), "no challenge, no proof");
     d.stop().await;
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// Whether `proof` is HMAC-SHA256(instance id, message for `addr` and `challenge`).
+fn proof_holds(instance_id: &str, addr: SocketAddr, challenge: &[u8; 16], proof: &str) -> bool {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &unhex(instance_id));
+    let msg = synapsed::health_proof_message(addr, challenge);
+    ring::hmac::verify(&key, &msg, &unhex(proof)).is_ok()
+}
+
+/// #74: a challenged health proves the daemon holds the announced instance id, bound to the
+/// challenge and to the address it serves on.
+#[tokio::test]
+async fn health_proves_the_instance_id() {
+    let d = start().await;
+    let id = instance_id(&d);
+    let challenge = [0x5a; 16];
+    let hexed: String = challenge.iter().map(|b| format!("{b:02x}")).collect();
+    let reply: Value = client()
+        .get(d.url(&format!("/v1/health?challenge={hexed}")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let proof = reply["proof"].as_str().expect("a proof");
+    assert!(proof_holds(&id, d.addr, &challenge, proof), "{reply}");
+    // The same proof is worthless for another challenge, another address, or another instance.
+    assert!(!proof_holds(&id, d.addr, &[0xa5; 16], proof));
+    let elsewhere: SocketAddr = format!("127.0.0.1:{}", d.addr.port() ^ 1).parse().unwrap();
+    assert!(!proof_holds(&id, elsewhere, &challenge, proof));
+    assert!(!proof_holds(&"00".repeat(16), d.addr, &challenge, proof));
+
+    for bad in [
+        "challenge=",
+        "challenge=zz",
+        "challenge=+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "challenge=5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "other=1",
+    ] {
+        let resp = client()
+            .get(d.url(&format!("/v1/health?{bad}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{bad}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "malformed", "{bad}");
+    }
+    d.stop().await;
+}
+
+/// #74: the daemon removes its announce file when it stops, but only while the file still names it.
+#[tokio::test]
+async fn stopping_removes_only_its_own_announce_file() {
+    // Stop by hand rather than with `Running::stop`, which would drop the home with the file.
+    async fn stop_keeping_home(d: Running) -> tempfile::TempDir {
+        let Running {
+            home, stop, task, ..
+        } = d;
+        stop.unwrap().send(()).unwrap();
+        task.unwrap().await.unwrap().unwrap();
+        home
+    }
+
+    let d = start().await;
+    let path = d.home.path().join("synapsed.json");
+    assert!(path.exists(), "announced while serving");
+    let home = stop_keeping_home(d).await;
+    assert!(!path.exists(), "removed on graceful stop");
+    drop(home);
+
+    // A file that names another instance is not ours to remove.
+    let d = start().await;
+    let path = d.home.path().join("synapsed.json");
+    let other =
+        json!({"addr": "127.0.0.1:1", "instance_id": "00".repeat(16), "pid": 1}).to_string();
+    std::fs::write(&path, &other).unwrap();
+    let home = stop_keeping_home(d).await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), other);
+    drop(home);
 }
 
 #[tokio::test]

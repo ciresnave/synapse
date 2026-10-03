@@ -1,6 +1,6 @@
 # M5c: daemon authentication (#74) and rejection-branch tests (#77) (design)
 
-**Status:** DRAFT for PM approval. Nothing is built.
+**Status:** APPROVED by the PM (2026-10-03 05:46Z), §1.4 option (A) with conditions; see §1.4.
 **Tasked:** PM, 2026-10-03 05:38Z: spec first as [READY], then one PR per item; nothing publishes and no
 lane relies on `synapsed` until both land; no M6.
 **Measured at:** `origin/main@274cfed` (5.6.2). Every `file:line` below is at that ref. For `src/` and
@@ -59,7 +59,7 @@ daemon's MAC covers B and the client expects A.
   (`mail.rs:17–20`) and `daemon_alive`'s comment are rewritten: the pid check is no longer the interim
   stand-in.
 
-### 1.4 What the client does when the proof fails — **PM decision**
+### 1.4 What the client does when the proof fails — **PM ruled (A), with conditions**
 
 A failed proof means the listener is not this home's daemon.
 
@@ -76,11 +76,26 @@ A failed proof means the listener is not this home's daemon.
   - Stricter, but a stale file whose port an unrelated service now uses would then block the CLI until
     the user deletes the file by hand.
 
+**PM's conditions on (A), 2026-10-03:**
+1. **The warning always reaches stderr.** It is printed in every output mode and never swallowed. It
+   reads `daemon at <addr> failed its proof; possible port squat; not sending credentials`. The CLI has
+   no `--json` switch today: `inbox` and `list` print JSON to stdout, and the warning goes to stderr
+   regardless. It is printed once per command, however many health probes hit the squatter.
+2. **At most one auto-start per command, with no retry loop.** If the spawned daemon exits (for
+   example, because the squatter holds 7920), the command fails at once, non-zero. The `NoDaemon` error
+   names that reason and includes the proof failure. It does not wait out `START_TIMEOUT`.
+3. **The key assertion:** after a failed proof, the squatter has received **zero** requests carrying a
+   claim or a Bearer. The squatter records every request.
+   - **Positive control:** on current main the same test shows a Bearer reaching it, which is red for
+     the right reason.
+4. **The compare is constant-time** (`ring::hmac::verify`), and the challenge is fresh and random for
+   every health request.
+
 #74's test text says "`send` must fail". That was written for the fixed port. Under (A) the test asserts
 instead:
 - no `Authorization` header and no claim body reached the squatter;
 - the squatter did receive a challenged health request (positive control: the squatter was really asked);
-- the warning line appeared;
+- the warning line appeared, once;
 - a fresh daemon took over.
 
 ### 1.5 `synapsed` removes its announce file when it stops

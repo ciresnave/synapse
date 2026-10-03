@@ -422,8 +422,6 @@ fn a_too_open_session_or_announce_file_is_refused() {
 /// trusted, even when something answers health on its port, so no token reaches that listener.
 #[test]
 fn a_dead_daemons_port_is_not_trusted() {
-    use std::io::{Read, Write};
-    use std::sync::{Arc, Mutex};
     let home = Home::new();
     home.ok(&["claim", "--role", "alpha"]);
     let text = std::fs::read_to_string(home.path().join("synapsed.json")).unwrap();
@@ -432,41 +430,12 @@ fn a_dead_daemons_port_is_not_trusted() {
         .unwrap()
         .to_string();
     let first = home.announced_pid().unwrap();
-    home.kill_daemon(); // synapsed leaves its announce file behind (#74)
+    home.kill_daemon(); // a kill runs no shutdown handler, so the announce file stays (#74)
 
-    let squatter = std::net::TcpListener::bind(&addr).expect("the dead daemon's port is free");
-    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
-    let log = Arc::clone(&seen);
-    let fake = std::thread::spawn(move || {
-        for stream in squatter.incoming() {
-            let mut stream = stream.unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_millis(500)))
-                .unwrap();
-            let mut buf = vec![0u8; 65536];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
-            if request.starts_with("stop") {
-                return;
-            }
-            log.lock().unwrap().push(request);
-            let body = r#"{"ok":true,"started_at":"2020-01-01T00:00:00Z","outcome":"queued","message_id":"m","messages":[]}"#;
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-        }
-    });
-
+    let squatter = Squatter::bind(&addr);
     let out = home.run(&["send", "--role", "alpha", "--to", "alpha", "secret"]);
-    std::net::TcpStream::connect(&addr)
-        .unwrap()
-        .write_all(b"stop")
-        .unwrap();
-    fake.join().unwrap();
+    let seen = squatter.stop();
 
-    let seen = seen.lock().unwrap();
     assert!(
         !seen.iter().any(|r| r.contains("authorization:")),
         "the token went to the squatter: {seen:?}"
@@ -475,6 +444,125 @@ fn a_dead_daemons_port_is_not_trusted() {
     let second = home.announced_pid().unwrap();
     assert_ne!(first, second);
     assert_eq!(spawned_pids(&out), vec![second], "a fresh daemon took over");
+}
+
+/// A fake daemon on a port: it answers every request with an ok health and canned mail replies,
+/// and records every request it received (lowercased) so a test can check what reached it.
+struct Squatter {
+    addr: String,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Squatter {
+    fn bind(addr: &str) -> Squatter {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(addr).expect("the dead daemon's port is free");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = std::sync::Arc::clone(&seen);
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(500)))
+                    .unwrap();
+                let mut buf = vec![0u8; 65536];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                if request.starts_with("stop") {
+                    return;
+                }
+                log.lock().unwrap().push(request);
+                let body = r#"{"ok":true,"started_at":"2020-01-01T00:00:00Z","global_id":"alpha@acct","epoch":1,"session":"00","outcome":"queued","message_id":"m","messages":[]}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        Squatter {
+            addr: addr.to_string(),
+            seen,
+            thread,
+        }
+    }
+
+    /// Stop the fake and return every request it received.
+    fn stop(self) -> Vec<String> {
+        use std::io::Write;
+        std::net::TcpStream::connect(&self.addr)
+            .unwrap()
+            .write_all(b"stop")
+            .unwrap();
+        self.thread.join().unwrap();
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+/// #74: a squatter on the announced port gets no credential even while the announced pid is a live
+/// `synapsed` (a reused pid), which the pid-liveness check alone cannot catch. Only the daemon that
+/// holds the announced instance id can answer the health challenge.
+#[test]
+fn a_squatter_on_a_live_pids_port_gets_no_credential() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let announce_path = home.path().join("synapsed.json");
+    let mut announce: Value =
+        serde_json::from_str(&std::fs::read_to_string(&announce_path).unwrap()).unwrap();
+    let addr = announce["addr"].as_str().unwrap().to_string();
+    home.kill_daemon();
+
+    // Another home's live synapsed stands in for a process that reused the dead daemon's pid.
+    let other = Home::new();
+    other.ok(&["claim", "--role", "beta"]);
+    let live_pid = other.announced_pid().unwrap();
+    assert!(alive(live_pid));
+    announce["pid"] = Value::from(live_pid);
+    std::fs::write(&announce_path, announce.to_string()).unwrap();
+
+    let squatter = Squatter::bind(&addr);
+    let out = home.run(&["send", "--role", "alpha", "--to", "alpha", "secret"]);
+    let seen = squatter.stop();
+
+    assert!(
+        !seen
+            .iter()
+            .any(|r| r.contains("authorization:") || r.contains("/v1/claim")),
+        "a credential went to the squatter: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|r| r.starts_with("get /v1/health?challenge=")),
+        "the squatter was never challenged, so the test proved nothing: {seen:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let warning =
+        format!("daemon at {addr} failed its proof; possible port squat; not sending credentials");
+    assert_eq!(stderr.matches(&warning).count(), 1, "{stderr}");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let fresh = home.announced_pid().unwrap();
+    assert_ne!(fresh, live_pid);
+    assert_eq!(spawned_pids(&out), vec![fresh], "a fresh daemon took over");
+}
+
+/// #74: `kill` (SIGTERM) stops synapsed gracefully, and it removes its announce file on the way out.
+#[cfg(unix)]
+#[test]
+fn sigterm_removes_the_announce_file() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let path = home.path().join("synapsed.json");
+    assert!(path.exists(), "announced while running");
+    let pid = home.announced_pid().unwrap();
+    let sent = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    wait_dead(pid);
+    assert!(!alive(pid), "synapsed exited on SIGTERM");
+    assert!(!path.exists(), "the announce file was removed");
 }
 
 /// A refusal whose body is not JSON (axum's own 413 for an oversized body) still names its status.
