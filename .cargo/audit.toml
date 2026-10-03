@@ -1,0 +1,23 @@
+# cargo-audit configuration. `cargo audit` reads this file from the project root.
+#
+# Every ignore here must say why it is safe, which dependency path it covers, and when it
+# should be revisited. cargo-audit can only ignore by advisory ID, not by path, so the
+# path is recorded in the comment and must be re-checked with
+# `cargo tree --workspace --all-features -i <crate>` whenever this file is touched.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 -- rsa: Marvin timing side-channel on RSA private-key operations.
+    # No fixed release of `rsa` exists.
+    # Path: jsonwebtoken 11.1.0 (feature `rust_crypto`) -> rsa. That is the ONLY path:
+    # synapse's own direct `rsa` dependency was removed (synapse's RSA operations all
+    # return `rsa_not_implemented`).
+    # Safe because synapse uses jsonwebtoken for HS256 only, and pins it with
+    # `Validation::new(Algorithm::HS256)` (src/synapse/auth/mod.rs), so no RSA key is
+    # ever loaded and no RS*/PS* token is accepted.
+    # Board 104 governs the alternative backend: `aws_lc_rs` is the tracked non-Rust
+    # exception, and no new non-Rust dependency may be added to dodge this advisory.
+    # Revisit when jsonwebtoken can be built without `rsa`, or when synapse adopts
+    # any RSA-based JWT algorithm (then this ignore is no longer true and must go).
+    "RUSTSEC-2023-0071",
+]
