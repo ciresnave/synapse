@@ -334,13 +334,43 @@ jobs:
 
     # The reports are built from the run above even if a test failed, so a
     # failure there still leaves a number, and the job still goes red.
+    #
+    # `report` has no --workspace, and with no -p it selects the ROOT package only
+    # (cargo's default for a root package with members), so it silently drops every
+    # file under crates/: measured on this PR's first run, 77 files, 0 from crates/,
+    # while the synapsed and synapse-cli tests had run. Every member is therefore
+    # named, taken from cargo metadata rather than a hand-written list.
+    - name: Select every workspace member for the reports
+      if: always()
+      run: |
+        set -o pipefail
+        pkgs=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sed 's/^/-p /' | tr '\n' ' ')
+        echo "members: $pkgs"
+        test -n "$pkgs"
+        echo "COV_PKGS=$pkgs" >> "$GITHUB_ENV"
+
     - name: Coverage summary
       if: always()
-      run: cargo llvm-cov report --summary-only
+      run: cargo llvm-cov report --summary-only $COV_PKGS
 
     - name: Write lcov
       if: always()
-      run: cargo llvm-cov report --lcov --output-path lcov.info
+      run: cargo llvm-cov report --lcov --output-path lcov.info $COV_PKGS
+
+    # Positive control for the trap above: each member with a src/ directory must
+    # contribute files to the report. A member with no executed code would still
+    # appear (with zero hits), so absence means it was never selected.
+    - name: Every workspace member is in the report
+      if: always()
+      run: |
+        set -o pipefail
+        missing=0
+        for dir in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].manifest_path' | xargs -n1 dirname); do
+          n=$(grep -c "^SF:$dir/src/" lcov.info || true)
+          echo "$n files from $dir/src"
+          if [ "$n" -eq 0 ]; then missing=1; fi
+        done
+        test "$missing" -eq 0
 
     - name: Keep lcov as an artifact
       if: always()
