@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-/// `cargo test -p synapse-cli` does not build another package's binary, so build `synapsed` into
+/// `cargo test -p synapsectl` does not build another package's binary, so build `synapsed` into
 /// the directory the CLI looks in first: next to the `synapse` executable.
 fn ensure_synapsed_built() {
     static BUILT: OnceLock<()> = OnceLock::new();

@@ -169,7 +169,7 @@ jobs:
       # --no-fail-fast: without it cargo stops at the first failing test binary, and
       # every target that sorts after it (including all doc-tests) never runs here.
       # --workspace: a root package with members tests only itself by default, which would
-      # silently drop crates/synapse-mcp's tests.
+      # silently drop crates/synapse-mcp-server's tests.
       run: cargo test --workspace --verbose --no-fail-fast
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
@@ -230,8 +230,8 @@ jobs:
     - name: Positive control -- the MCP adapter does depend on rmcp
       run: |
         set -o pipefail
-        n=$(cargo tree -p synapse-mcp -e normal --prefix none | { grep -c '^rmcp ' || true; })
-        echo "rmcp lines in synapse-mcp's tree: $n"
+        n=$(cargo tree -p synapse-mcp-server -e normal --prefix none | { grep -c '^rmcp ' || true; })
+        echo "rmcp lines in synapse-mcp-server's tree: $n"
         test "$n" -ge 1
 
     - name: The core's dependency tree has no rmcp (all features)
@@ -338,7 +338,7 @@ jobs:
     # `report` has no --workspace, and with no -p it selects the ROOT package only
     # (cargo's default for a root package with members), so it silently drops every
     # file under crates/: measured on this PR's first run, 77 files, 0 from crates/,
-    # while the synapsed and synapse-cli tests had run. Every member is therefore
+    # while the synapsed and synapsectl tests had run. Every member is therefore
     # named, taken from cargo metadata rather than a hand-written list.
     - name: Select every workspace member for the reports
       if: always()

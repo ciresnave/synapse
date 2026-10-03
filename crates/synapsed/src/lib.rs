@@ -402,7 +402,7 @@ impl Drop for Announced {
 /// What the health proof signs (#74): a domain tag, the address this daemon is bound to, and the
 /// client's challenge. The address makes a relayed proof useless: a squatter on a stale port that
 /// forwards the challenge to a live daemon elsewhere gets back a MAC over the wrong address.
-/// `synapse-cli` builds the same bytes; its tests run against this daemon, so the two must agree.
+/// `synapsectl` builds the same bytes; its tests run against this daemon, so the two must agree.
 #[must_use]
 pub fn health_proof_message(bound: SocketAddr, challenge: &[u8; 16]) -> Vec<u8> {
     let mut msg = format!("synapsed-health-v1\n{bound}\n").into_bytes();
