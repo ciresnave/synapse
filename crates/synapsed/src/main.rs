@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! `synapsed`: serve the Synapse mailbox on loopback until Ctrl-C.
+//! `synapsed`: serve the Synapse mailbox on loopback until Ctrl-C or a termination signal, then
+//! remove its announce file (#74). On Unix that is SIGTERM or SIGHUP; on Windows, Ctrl-Break and the
+//! console's close, logoff and shutdown events. Those last three are best-effort: Windows ends the
+//! process soon after the handler returns, which may be before the file is removed. A kill
+//! (SIGKILL, `taskkill /F`) runs no handler at all. Clients never rely on the file being gone: the
+//! health proof decides.
 //!
 //! Home: `SYNAPSE_HOME` (else the platform default, as for `synapse id`). Address: `SYNAPSE_ADDR`
 //! (default `127.0.0.1:7920`), loopback only. Logs never carry tokens or key material.
@@ -50,14 +55,47 @@ async fn main() -> ExitCode {
         }
     };
     eprintln!("synapsed: listening on {addr}");
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    match daemon.serve(listener, shutdown).await {
+    match daemon.serve(listener, shutdown_signal()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("synapsed: {}", e.kind());
             ExitCode::from(1)
         }
+    }
+}
+
+/// Resolves on the first stop request. A handler that cannot be installed just never fires.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).ok();
+        let mut hup = signal(SignalKind::hangup()).ok();
+        tokio::select! {
+            Ok(()) = tokio::signal::ctrl_c() => {}
+            Some(()) = async { term.as_mut()?.recv().await } => {}
+            Some(()) = async { hup.as_mut()?.recv().await } => {}
+            else => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        let mut brk = windows::ctrl_break().ok();
+        let mut close = windows::ctrl_close().ok();
+        let mut logoff = windows::ctrl_logoff().ok();
+        let mut down = windows::ctrl_shutdown().ok();
+        tokio::select! {
+            Ok(()) = tokio::signal::ctrl_c() => {}
+            Some(()) = async { brk.as_mut()?.recv().await } => {}
+            Some(()) = async { close.as_mut()?.recv().await } => {}
+            Some(()) = async { logoff.as_mut()?.recv().await } => {}
+            Some(()) = async { down.as_mut()?.recv().await } => {}
+            else => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }

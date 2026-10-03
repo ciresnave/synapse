@@ -14,10 +14,13 @@
 //! supersession is only ever reported to holders outside this home's cache. Per-holder sessions are
 //! M5c.
 //!
-//! **The daemon is not yet authenticated (#74).** The announce file is trusted only if it, the
-//! session cache and its directory pass the keystore's owner-only check, and only while its `pid`
-//! is a live process (on Windows, a live `synapsed`). That stops a stale port, left by a crashed
-//! daemon, from receiving tokens, but proof that the listener holds the instance id is M5c.
+//! **The daemon proves itself before any credential is sent (#74).** The announce file is trusted
+//! only if it, the session cache and its directory pass the keystore's owner-only check, and only
+//! while its `pid` is a live process (on Windows, a live `synapsed`). Then the listener must answer a
+//! fresh random health challenge with HMAC-SHA256 keyed by the announced instance id, which only
+//! the owner-only file and the real daemon know. A [`Daemon`] exists only after that proof, and
+//! every claim and Bearer token goes through one, so a process squatting a stale announced port
+//! gets neither. A listener that fails the proof is reported on stderr and ignored.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -138,23 +141,36 @@ impl Daemon {
     pub fn connect(home: &Path) -> Result<Daemon, MailError> {
         let http = reqwest::blocking::Client::builder()
             .no_proxy()
+            // synapsed never redirects; following one would re-send a claim body where a squatter
+            // points it (review, #74).
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(CALL_TIMEOUT)
             .build()
             .map_err(|e| MailError::Transport(e.to_string()))?;
+        let mut squat = Squat::default();
         // Two tries, so one slow answer from a live daemon doesn't start a doomed second one.
         for _ in 0..2 {
-            if let Some(found) = answering(&http, home)? {
+            if let Some(found) = squat.check(answering(&http, home)?) {
                 return Ok(Daemon::new(http, home, found));
             }
         }
+        // Started at most once per command (PM, #74).
         let mut child = spawn_daemon(home)?;
         eprintln!("synapse: started synapsed (pid {})", child.id());
         let deadline = Instant::now() + START_TIMEOUT;
         loop {
             // Whichever daemon answers will do: ours, or, if two CLIs raced, the one holding the
             // store (ours then exits on its lock), or a live one that was only slow to answer.
-            if let Some(found) = answering(&http, home)? {
+            if let Some(found) = squat.check(answering(&http, home)?) {
                 return Ok(Daemon::new(http, home, found));
+            }
+            // A squatter that failed the proof still holds its port, so a daemon of ours that has
+            // exited is not coming back: say why now rather than wait out the deadline.
+            if let (Some(addr), Ok(Some(status))) = (&squat.0, child.try_wait()) {
+                return Err(MailError::NoDaemon(format!(
+                    "synapsed exited ({status}); {}",
+                    squat_warning(addr)
+                )));
             }
             if Instant::now() >= deadline {
                 let why = match child.try_wait() {
@@ -286,15 +302,55 @@ impl Daemon {
     }
 }
 
-/// The announced daemon and its start time, if it is alive and answers health.
-fn answering(
-    http: &reqwest::blocking::Client,
-    home: &Path,
-) -> Result<Option<(Announce, DateTime<Utc>)>, MailError> {
+/// What the announced address said to a challenged health request.
+enum Answer {
+    /// No announce file, a dead daemon, or nothing answering.
+    Nothing,
+    /// The listener answered without a valid proof of the announced instance id.
+    Unproven(String),
+    /// The real daemon, and its start time.
+    Proven(Announce, DateTime<Utc>),
+}
+
+/// The first listener in this command that failed the proof. It is warned about once, however many
+/// times it is probed.
+#[derive(Default)]
+struct Squat(Option<String>);
+
+impl Squat {
+    fn check(&mut self, answer: Answer) -> Option<(Announce, DateTime<Utc>)> {
+        match answer {
+            Answer::Proven(announce, started_at) => Some((announce, started_at)),
+            Answer::Unproven(addr) => {
+                if self.0.is_none() {
+                    eprintln!("synapse: {}", squat_warning(&addr));
+                    self.0 = Some(addr);
+                }
+                None
+            }
+            Answer::Nothing => None,
+        }
+    }
+}
+
+fn squat_warning(addr: &str) -> String {
+    format!(
+        "daemon at {} failed its proof; possible port squat; not sending credentials",
+        printable(addr)
+    )
+}
+
+/// The announced daemon, if it is alive and proves it holds the announced instance id.
+fn answering(http: &reqwest::blocking::Client, home: &Path) -> Result<Answer, MailError> {
     let Some(announce) = read_announce(home)? else {
-        return Ok(None);
+        return Ok(Answer::Nothing);
     };
-    Ok(health(http, &announce.addr).map(|started_at| (announce, started_at)))
+    let challenge = random_bytes::<16>()?;
+    Ok(match health(http, &announce, &challenge) {
+        Health::Silent => Answer::Nothing,
+        Health::Unproven => Answer::Unproven(announce.addr),
+        Health::Proven(started_at) => Answer::Proven(announce, started_at),
+    })
 }
 
 /// The announce file, if present, owner-only, readable, and naming a live daemon. A file left by a
@@ -314,9 +370,9 @@ fn read_announce(home: &Path) -> Result<Option<Announce>, MailError> {
         .filter(|a| daemon_alive(a.pid)))
 }
 
-/// Whether `pid` is a live process of this user (on Windows, a live `synapsed`). This is the
-/// interim stand-in for #74's proof of the instance id: it catches a stale announce file, not a
-/// reused pid on Unix.
+/// Whether `pid` is a live process of this user (on Windows, a live `synapsed`). Defence in depth
+/// in front of the health proof (#74): it skips a stale announce file without probing its port, but
+/// a reused pid passes it, which is why the proof is what decides.
 #[cfg(unix)]
 fn daemon_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
@@ -365,19 +421,45 @@ fn daemon_alive(_pid: u32) -> bool {
     true
 }
 
-/// The daemon's start time if `/v1/health` at `addr` answers ok.
-fn health(http: &reqwest::blocking::Client, addr: &str) -> Option<DateTime<Utc>> {
-    let reply: Value = http
-        .get(format!("http://{addr}/v1/health"))
+enum Health {
+    Silent,
+    Unproven,
+    Proven(DateTime<Utc>),
+}
+
+/// Ask the announced address for health with `challenge`, and check the reply's `proof`:
+/// HMAC-SHA256 keyed by the announced instance id over the same bytes `synapsed` signs
+/// (`synapsed::health_proof_message`), compared in constant time by `ring`. Only a failed connection
+/// is `Silent`: any HTTP reply at all means something holds the announced port, so a reply that is
+/// not an ok health with a valid proof is `Unproven` (review: a squatter answering `ok: false` must
+/// be reported too).
+fn health(http: &reqwest::blocking::Client, announce: &Announce, challenge: &[u8; 16]) -> Health {
+    let Ok(resp) = http
+        .get(format!(
+            "http://{}/v1/health?challenge={}",
+            announce.addr,
+            hex(challenge)
+        ))
         .timeout(HEALTH_TIMEOUT)
         .send()
-        .ok()?
-        .json()
-        .ok()?;
-    if reply["ok"] != true {
-        return None;
+    else {
+        return Health::Silent;
+    };
+    let Some(reply) = resp.json::<Value>().ok().filter(|r| r["ok"] == true) else {
+        return Health::Unproven;
+    };
+    let proven = unhex::<16>(&announce.instance_id)
+        .zip(reply["proof"].as_str().and_then(unhex::<32>))
+        .is_some_and(|(key, proof)| {
+            let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &key);
+            let mut msg = format!("synapsed-health-v1\n{}\n", announce.addr).into_bytes();
+            msg.extend_from_slice(challenge);
+            ring::hmac::verify(&key, &msg, &proof).is_ok()
+        });
+    match reply["started_at"].as_str().and_then(|t| t.parse().ok()) {
+        Some(started_at) if proven => Health::Proven(started_at),
+        _ => Health::Unproven,
     }
-    reply["started_at"].as_str()?.parse().ok()
 }
 
 /// `synapsed` next to this executable, else from PATH.
@@ -598,6 +680,18 @@ fn save_session(home: &Path, role: &str, cached: &Cached) -> Result<(), MailErro
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Strict hex of exactly `N` bytes (no sign, no whitespace), as `synapsed` parses it.
+fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    if s.len() != N * 2 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(out)
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N], MailError> {

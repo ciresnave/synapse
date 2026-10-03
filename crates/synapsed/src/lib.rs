@@ -11,6 +11,9 @@
 //!   CORS headers are ever sent. POST bodies must be `application/json` (415), which forces a
 //!   browser preflight that this daemon never answers. Every route except `/v1/health` and
 //!   `/v1/claim` needs `Authorization: Bearer <token>` (401).
+//! - `/v1/health?challenge=<hex>` proves this daemon holds the instance id from the owner-only
+//!   announce file (#74): clients send no claim or token to a listener that cannot prove it, so a
+//!   process that squats a stale announced port learns nothing.
 //! - Tokens are kept only as SHA-256 hashes and looked up by hash: the secret is never compared
 //!   byte-wise, stored, or logged.
 //! - A message's sender is always the session's verified role; a client-supplied `from` is refused.
@@ -25,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -109,8 +112,9 @@ struct Shared {
     account_key_id: String,
     account_key: [u8; 32],
     /// Random per daemon start, hex. Claims must be signed for it (review I3); it is published only
-    /// in the owner-only announce file, never over HTTP.
+    /// in the owner-only announce file, never over HTTP. Its raw bytes key the health proof (#74).
     instance_id: String,
+    proof_key: ring::hmac::Key,
     home: PathBuf,
     started_at: DateTime<Utc>,
     sweep_every: std::time::Duration,
@@ -144,7 +148,8 @@ impl Daemon {
         let started_at = Utc::now();
         let mailbox =
             Mailbox::open(store, MailConfig::default(), started_at).map_err(DaemonError::Mail)?;
-        let instance_id = hex(&random_bytes::<16>().ok_or(DaemonError::NoRandomness)?);
+        let instance = random_bytes::<16>().ok_or(DaemonError::NoRandomness)?;
+        let instance_id = hex(&instance);
         let summary = keystore.account();
         Ok(Daemon {
             shared: Arc::new(Shared {
@@ -155,6 +160,7 @@ impl Daemon {
                 account_key_id: summary.key_id,
                 account_key: keystore.account_public_key(),
                 instance_id,
+                proof_key: ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &instance),
                 home: cfg.home.clone(),
                 started_at,
                 sweep_every: cfg.sweep_every,
@@ -184,6 +190,12 @@ impl Daemon {
             ));
         }
         write_announce(&self.shared.home, bound, &self.shared.instance_id)?;
+        // Removed however `serve` ends: shutdown, error or unwind (#74). A kill runs no code, which
+        // is why clients rely on the health proof, not on the file's absence.
+        let _announced = Announced {
+            home: self.shared.home.clone(),
+            instance_id: self.shared.instance_id.clone(),
+        };
         let sweeper = {
             let shared = self.shared.clone();
             tokio::spawn(async move {
@@ -198,7 +210,10 @@ impl Daemon {
             })
         };
         let app = Router::new()
-            .route("/v1/health", get(health))
+            .route(
+                "/v1/health",
+                get(move |state: State<Arc<Shared>>, uri: Uri| health(state, bound, uri)),
+            )
             .route("/v1/claim", post(claim))
             .route("/v1/send", post(send))
             .route("/v1/fetch", post(fetch))
@@ -364,6 +379,37 @@ fn write_announce(
     std::fs::rename(&temp, home.join(ANNOUNCE_FILE))
 }
 
+/// The announce file's owner: removes it when dropped, but only while it still names this daemon
+/// instance, so a newer daemon's announcement is never deleted.
+struct Announced {
+    home: PathBuf,
+    instance_id: String,
+}
+
+impl Drop for Announced {
+    fn drop(&mut self) {
+        let path = self.home.join(ANNOUNCE_FILE);
+        let ours = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .is_some_and(|v| v["instance_id"] == self.instance_id.as_str());
+        if ours {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// What the health proof signs (#74): a domain tag, the address this daemon is bound to, and the
+/// client's challenge. The address makes a relayed proof useless: a squatter on a stale port that
+/// forwards the challenge to a live daemon elsewhere gets back a MAC over the wrong address.
+/// `synapse-cli` builds the same bytes; its tests run against this daemon, so the two must agree.
+#[must_use]
+pub fn health_proof_message(bound: SocketAddr, challenge: &[u8; 16]) -> Vec<u8> {
+    let mut msg = format!("synapsed-health-v1\n{bound}\n").into_bytes();
+    msg.extend_from_slice(challenge);
+    msg
+}
+
 /// Strict lowercase-or-uppercase hex only: `u8::from_str_radix` alone would also accept `+a`,
 /// giving tokens and nonces alternative encodings (review M8).
 fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -411,13 +457,27 @@ fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
     Ok(session)
 }
 
-async fn health(State(shared): State<Arc<Shared>>) -> Response {
-    axum::Json(json!({
+/// Liveness, and with `?challenge=<32 hex>` proof that this daemon holds the announced instance id:
+/// `proof` = HMAC-SHA256(instance id, [`health_proof_message`]). Any other query is malformed.
+async fn health(
+    State(shared): State<Arc<Shared>>,
+    bound: SocketAddr,
+    uri: Uri,
+) -> Result<Response, ApiError> {
+    let mut reply = json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": shared.started_at.to_rfc3339(),
-    }))
-    .into_response()
+    });
+    if let Some(query) = uri.query() {
+        let challenge = query
+            .strip_prefix("challenge=")
+            .and_then(unhex::<16>)
+            .ok_or_else(|| malformed("challenge"))?;
+        let tag = ring::hmac::sign(&shared.proof_key, &health_proof_message(bound, &challenge));
+        reply["proof"] = Value::String(hex(tag.as_ref()));
+    }
+    Ok(axum::Json(reply).into_response())
 }
 
 #[derive(Deserialize)]
