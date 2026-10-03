@@ -613,19 +613,12 @@ fn micros(at: DateTime<Utc>) -> i64 {
 
 #[cfg(feature = "mailbox-redb")]
 impl RedbStore {
-    /// Create or open the store at `path`. A new file is made owner-only (Unix `0600`; on Windows
-    /// it inherits the user profile's ACL); every open refuses a file broader than its owner.
+    /// Create or open the store at `path`. A new file is created owner-only (Unix `0600`; on
+    /// Windows it inherits the user profile's ACL); every open refuses a file broader than its owner.
     pub fn open(path: &std::path::Path) -> Result<Self, StoreError> {
-        let existed = path.exists();
-        let db = redb::Database::create(path).map_err(|e| store_err("open")(&e))?;
         #[cfg(unix)]
-        if !existed {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| store_err("set permissions")(&e))?;
-        }
-        #[cfg(not(unix))]
-        let _ = existed;
+        create_owner_only(path).map_err(|e| store_err("create")(&e))?;
+        let db = redb::Database::create(path).map_err(|e| store_err("open")(&e))?;
         crate::keystore::check_owner_only(path, "mail store")
             .map_err(|e| store_err("permissions")(&e))?;
         // Create every table once, so later read paths can assume they exist.
@@ -654,6 +647,71 @@ impl RedbStore {
     #[must_use]
     pub fn body_writes(&self) -> u64 {
         self.body_writes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Create `path` empty and `0600` if it is absent, before redb opens it (redb initialises an empty
+/// file). A file redb creates gets the umask's mode, often `0644`, and the creator may then lose
+/// redb's lock to a racing daemon: the winner, finding a file it did not create, refused it as too
+/// open, and both daemons exited. An M5a bug, found by M5b's concurrent-start test on Linux. An
+/// existing file is opened without truncation and left as it is.
+#[cfg(all(feature = "mailbox-redb", unix))]
+fn create_owner_only(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
+}
+
+#[cfg(all(test, feature = "mailbox-redb", unix))]
+mod redb_create_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// Two daemons racing to open one new store: the one that creates the file loses redb's lock,
+    /// and the winner must still accept the file. The creator's part is simulated by the step it
+    /// takes before locking (and then dropping the handle, as a lock loser exits).
+    #[test]
+    fn a_store_file_created_by_a_racing_opener_is_owner_only_and_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Positive control, the M5a path: redb creates the file with the umask's mode (0644 under
+        // the usual 022), and the winner refuses it.
+        let old = dir.path().join("old.redb");
+        drop(redb::Database::create(&old).unwrap());
+        assert_ne!(
+            mode(&old) & 0o077,
+            0,
+            "control: expected a umask-mode file, got {:o}",
+            mode(&old)
+        );
+        assert!(
+            RedbStore::open(&old).is_err(),
+            "control: the winner refuses a file it found too open"
+        );
+
+        // The fix: the loser's first step creates the file 0600, so the winner opens it.
+        let new = dir.path().join("new.redb");
+        create_owner_only(&new).unwrap();
+        assert_eq!(mode(&new), 0o600);
+        RedbStore::open(&new).expect("the winner opens the file the loser created");
+        assert_eq!(mode(&new), 0o600);
+    }
+
+    #[test]
+    fn a_fresh_store_file_is_never_created_looser_than_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mailbox.redb");
+        drop(RedbStore::open(&path).unwrap());
+        assert_eq!(mode(&path), 0o600);
     }
 }
 
