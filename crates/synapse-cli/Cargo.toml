@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version = "1.88"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
-description = "The `synapse` command line: a plain adapter for any agent or person (M2: identity)."
+description = "The `synapse` command line: a plain adapter for any agent or person (M2: identity; M5b: mail over synapsed)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ciresnave/synapse"
 
@@ -14,8 +14,20 @@ path = "src/main.rs"
 
 [dependencies]
 synapse = { path = "../..", version = "5.5.1" }
-clap = { version = "4.5.41", features = ["derive"] }
+clap = { version = "4.5.41", features = ["derive", "env"] }
 chrono = "0.4"
+# Loopback HTTP only: no TLS stack and no system proxy (board 104: no new non-Rust deps).
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+ring = "0.17"
+uuid = { version = "1.6", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+# Only to stop the auto-started daemon inheriting this process's stdio handles (see mail.rs).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
 tempfile = "3.0"
+serde_json = "1.0"
