@@ -364,3 +364,24 @@ fn a_claim_past_the_last_epoch_is_refused() {
     );
     assert_eq!(roles.current("lane@acct"), Some(u64::MAX));
 }
+
+/// M5a review I3: an audience-bound (v2) claim signs its audience, so a captured claim can't be
+/// re-addressed to another daemon by editing the field.
+#[test]
+fn an_audience_is_covered_by_the_signature() {
+    let f = Fixture::new();
+    let lane = f.role("lane");
+    let req = synapse::roles::sign_claim_for(&lane, "daemon-a", nonce(1), t0()).unwrap();
+    let mut readdressed = req.clone();
+    readdressed.audience = Some("daemon-b".into());
+    let mut roles = table();
+    assert_eq!(
+        f.claim(&mut roles, &readdressed, t0()),
+        Err(ClaimError::BadSignature)
+    );
+    assert_eq!(
+        f.claim(&mut roles, &req, t0()).unwrap().epoch,
+        1,
+        "the unedited claim is valid"
+    );
+}

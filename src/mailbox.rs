@@ -346,6 +346,18 @@ impl<S: MailStore> Mailbox<S> {
         })
     }
 
+    /// `Ok` only for the role's current epoch; the daemon checks every session with this (M5).
+    pub fn check(&self, role: &str, epoch: u64) -> Result<(), MailError> {
+        self.live()?;
+        self.roles.check(role, epoch).map_err(MailError::Superseded)
+    }
+
+    /// Every claimed role and its current epoch (the daemon's `list`, M5).
+    #[must_use]
+    pub fn roles_snapshot(&self) -> RolesState {
+        self.roles.snapshot()
+    }
+
     /// The underlying store (tests and the daemon's diagnostics).
     pub fn store(&self) -> &S {
         &self.store

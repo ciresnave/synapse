@@ -24,6 +24,10 @@ use crate::replay::{Decision, Freshness, ReplayConfig, ReplayGuard};
 /// replayed as) a signature over anything else.
 pub const CLAIM_DOMAIN_TAG: &str = "synapse/role-claim/v1";
 
+/// The domain tag of a claim bound to an audience (a specific daemon instance, M5a): the audience
+/// is part of what is signed, so a claim made for one daemon cannot be relayed to another.
+pub const CLAIM_DOMAIN_TAG_V2: &str = "synapse/role-claim/v2";
+
 /// The longest certificate chain a claim may carry. `validate_chain` leaves the cap to callers
 /// that take chains from untrusted input, and the claim path is one (final review I2).
 pub const MAX_CLAIM_CHAIN: usize = 8;
@@ -36,9 +40,53 @@ pub struct ClaimRequest {
     /// Fresh for every claim; a nonce is accepted once.
     pub nonce: [u8; 16],
     pub signed_at: DateTime<Utc>,
-    /// Ed25519 by the leaf's signing key over [`claim_signing_input`]. A `Vec`, not `[u8; 64]`,
-    /// because a request off the wire may carry any length and a wrong one must be refused.
+    /// Ed25519 by the leaf's signing key over [`claim_signing_input`] (or, with an audience,
+    /// [`claim_signing_input_v2`]). A `Vec`, not `[u8; 64]`, because a request off the wire may
+    /// carry any length and a wrong one must be refused.
     pub signature: Vec<u8>,
+    /// Who this claim is for (e.g. a daemon's instance id). Signed when present; a verifier that
+    /// requires an audience compares it before accepting the claim.
+    pub audience: Option<String>,
+}
+
+/// The exact text an audience-bound claim signs.
+#[must_use]
+pub fn claim_signing_input_v2(
+    global_id: &str,
+    audience: &str,
+    nonce: &[u8; 16],
+    signed_at: DateTime<Utc>,
+) -> String {
+    format!(
+        "{CLAIM_DOMAIN_TAG_V2}\n{global_id}\n{audience}\n{}\n{}",
+        hex(nonce),
+        signed_at.to_rfc3339_opts(SecondsFormat::Secs, true)
+    )
+}
+
+/// Sign a claim for `identity`'s role bound to `audience` (M5a: the daemon's instance id).
+pub fn sign_claim_for(
+    identity: &RoleIdentity,
+    audience: &str,
+    nonce: [u8; 16],
+    now: DateTime<Utc>,
+) -> Result<ClaimRequest, ClaimError> {
+    let signature = identity
+        .crypto
+        .sign_message(&claim_signing_input_v2(
+            &identity.global_id,
+            audience,
+            &nonce,
+            now,
+        ))
+        .map_err(|_| ClaimError::NoSigningKey)?;
+    Ok(ClaimRequest {
+        chain: identity.chain.clone(),
+        nonce,
+        signed_at: now,
+        signature,
+        audience: Some(audience.to_string()),
+    })
 }
 
 /// The exact text a claim signs.
@@ -66,6 +114,7 @@ pub fn sign_claim(
         nonce,
         signed_at: now,
         signature,
+        audience: None,
     })
 }
 
@@ -200,7 +249,10 @@ impl Roles {
         // part is unsigned, and an attacker could otherwise nudge a captured claim past a
         // restart's horizon within its second (final review I1).
         let signed_at = req.signed_at.trunc_subsecs(0);
-        let text = claim_signing_input(&global_id, &req.nonce, signed_at);
+        let text = match &req.audience {
+            None => claim_signing_input(&global_id, &req.nonce, signed_at),
+            Some(audience) => claim_signing_input_v2(&global_id, audience, &req.nonce, signed_at),
+        };
         UnparsedPublicKey::new(&ED25519, &leaf.subject_signing_key)
             .verify(text.as_bytes(), &req.signature)
             .map_err(|_| ClaimError::BadSignature)?;
