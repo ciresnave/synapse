@@ -448,6 +448,13 @@ fn a_taken_account_name_is_refused_and_a_fresh_home_is_created() {
     let taken = tempfile::tempdir().unwrap();
     let account_dir = taken.path().join("account");
     std::fs::create_dir_all(&account_dir).unwrap();
+    // Owner-only, as the keystore creates it; otherwise it refuses the directory before the name
+    // write is ever reached.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&account_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     std::fs::write(account_dir.join("name"), b"someone").unwrap();
     assert!(!account_key_path(taken.path()).exists());
     let got = Keystore::init_account(taken.path(), "acct");
