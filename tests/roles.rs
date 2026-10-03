@@ -375,6 +375,13 @@ fn an_audience_is_covered_by_the_signature() {
     let mut readdressed = req.clone();
     readdressed.audience = Some("daemon-b".into());
     let mut roles = table();
-    assert_eq!(f.claim(&mut roles, &readdressed, t0()), Err(ClaimError::BadSignature));
-    assert_eq!(f.claim(&mut roles, &req, t0()).unwrap().epoch, 1, "the unedited claim is valid");
+    assert_eq!(
+        f.claim(&mut roles, &readdressed, t0()),
+        Err(ClaimError::BadSignature)
+    );
+    assert_eq!(
+        f.claim(&mut roles, &req, t0()).unwrap().epoch,
+        1,
+        "the unedited claim is valid"
+    );
 }
