@@ -254,6 +254,113 @@ jobs:
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
+  # COVERAGE IS A SIGNAL, NOT A GATE (agreed with CireSnave 2026-10-03; a pilot with
+  # mlmf and coderipper). This job is NOT a required check, sets no threshold, and
+  # codecov.yml makes Codecov's own statuses informational. A separate job, not a
+  # step of `build`, so that `Build and Test` is untouched and an instrumentation
+  # problem here can never be mistaken for a build or test failure there.
+  #
+  # WHAT THE NUMBER COVERS: lines and regions of the workspace crates executed by
+  # `cargo test --workspace` under the DEFAULT features (`native`), on ubuntu,
+  # including code run in child processes the tests spawn from this build's own
+  # instrumented binaries (the `synapse` CLI and `synapsed`).
+  #
+  # WHAT IT DOES NOT COVER, so a high number must not be read as these:
+  #   - non-default features (`enhanced-auth`, `auth`, `database`, wasm, ...);
+  #   - `cfg(windows)` code: the Windows ACL check, LockFileEx, the daemon's
+  #     Windows spawn flags. It is never compiled here;
+  #   - doc-tests (stable cargo-llvm-cov does not run them);
+  #   - whether any executed line was ASSERTED on. Coverage counts execution,
+  #     not checking.
+  #
+  # The test run here is `--no-fail-fast` and its result is reported, but
+  # `Build and Test` remains the test gate: a red here with a green there means
+  # instrumentation, not a regression.
+  coverage:
+    name: Coverage (signal, not a gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: synapse_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Cache Cargo dependencies
+      uses: actions/cache@v4
+      with:
+        # A key of its own: instrumented artifacts must not mix with `build`'s.
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-cov-
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libpq-dev protobuf-compiler
+
+    - name: Install stable toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+        components: llvm-tools-preview
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Run the tests under instrumentation
+      run: cargo llvm-cov --workspace --no-fail-fast --no-report
+      env:
+        DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
+
+    # The reports are built from the run above even if a test failed, so a
+    # failure there still leaves a number, and the job still goes red.
+    - name: Coverage summary
+      if: always()
+      run: cargo llvm-cov report --summary-only
+
+    - name: Write lcov
+      if: always()
+      run: cargo llvm-cov report --lcov --output-path lcov.info
+
+    - name: Keep lcov as an artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: lcov
+        path: lcov.info
+        if-no-files-found: error
+
+    - name: Upload to Codecov
+      if: always()
+      uses: codecov/codecov-action@v5
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: lcov.info
+        disable_search: true
+        # An upload that silently fails would leave a stale number on the
+        # dashboard, which reads as a fresh one.
+        fail_ci_if_error: true
+
   # The WebAssembly package has its own job so that `Build and Test` can be a
   # required check. While it was a step of that job, it failed on every run with
   # `cd: wasm: No such file or directory` -- there is no `wasm/` directory in this
