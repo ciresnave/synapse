@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use synapse::certificate::chain_to_pem;
 use synapse::keystore::Keystore;
-use synapse::roles::sign_claim;
+use synapse::roles::{sign_claim, sign_claim_for};
 use synapsed::{Daemon, DaemonConfig, DaemonError};
 
 struct Running {
@@ -58,6 +58,14 @@ async fn start() -> Running {
     let task = tokio::spawn(daemon.serve(listener, async move {
         let _ = rx.await;
     }));
+    // The daemon announces its address and instance id before serving; claims need the id.
+    let announce = home.path().join("synapsed.json");
+    for _ in 0..200 {
+        if announce.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     Running {
         addr,
         home,
@@ -79,13 +87,21 @@ fn claim_body(d: &Running, role: &str, nonce: u8) -> Value {
     // start (a certificate issued in the daemon's future would be "not yet valid").
     let identity = store.role(role, Utc::now()).unwrap();
     let signed_at = Utc::now().max(d.started_at + chrono::Duration::seconds(1));
-    let req = sign_claim(&identity, [nonce; 16], signed_at).unwrap();
+    let req = sign_claim_for(&identity, &instance_id(d), [nonce; 16], signed_at).unwrap();
     json!({
+        "audience": req.audience,
         "chain_pem": chain_to_pem(&req.chain),
         "nonce_hex": req.nonce.iter().map(|b| format!("{b:02x}")).collect::<String>(),
         "signed_at": req.signed_at.to_rfc3339(),
         "signature_b64": B64.encode(&req.signature),
     })
+}
+
+/// The daemon's instance id, as a same-user client learns it: from the owner-only announce file.
+fn instance_id(d: &Running) -> String {
+    let text = std::fs::read_to_string(d.home.path().join("synapsed.json")).expect("announce file");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    v["instance_id"].as_str().unwrap().to_string()
 }
 
 async fn claim(d: &Running, role: &str, nonce: u8) -> (String, u64) {
@@ -184,7 +200,13 @@ async fn a_bad_or_missing_token_is_401() {
     let d = start().await;
     let bad = "00".repeat(32);
     for path in ["/v1/send", "/v1/fetch", "/v1/ack", "/v1/heartbeat"] {
-        for token in [None, Some(bad.as_str()), Some("not-hex")] {
+        let plus = format!("+a{}", "0".repeat(62)); // u8::from_str_radix accepts "+a"
+        for token in [
+            None,
+            Some(bad.as_str()),
+            Some("not-hex"),
+            Some(plus.as_str()),
+        ] {
             let (s, _, _) = post(&d, path, token, json!({})).await;
             assert_eq!(s, 401, "{path} with token {token:?}");
         }
@@ -420,5 +442,168 @@ async fn list_shows_claimed_roles_with_presence() {
         .expect("alpha listed");
     assert_eq!(me["online"], true);
     assert_eq!(me["summary"], "writing M5");
+    d.stop().await;
+}
+
+// ---- Final-review fixes (Opus review of M5a) ----
+
+/// Review I3: a claim is bound to this daemon's instance id. A claim for another audience, or an
+/// unbound v1 claim, gets no token, so a claim captured by a port-squatter can't be relayed here.
+#[tokio::test]
+async fn a_claim_for_another_daemon_or_no_daemon_is_refused() {
+    let d = start().await;
+    let store = Keystore::open(d.home.path()).unwrap();
+    let identity = store.role("alpha", Utc::now()).unwrap();
+    let signed_at = Utc::now().max(d.started_at + chrono::Duration::seconds(1));
+    for req in [
+        sign_claim_for(&identity, "another-daemon", [7; 16], signed_at).unwrap(),
+        sign_claim(&identity, [8; 16], signed_at).unwrap(),
+    ] {
+        let body = json!({
+            "audience": req.audience,
+            "chain_pem": chain_to_pem(&req.chain),
+            "nonce_hex": req.nonce.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "signed_at": req.signed_at.to_rfc3339(),
+            "signature_b64": B64.encode(&req.signature),
+        });
+        let (s, reply, _) = post(&d, "/v1/claim", None, body).await;
+        assert_eq!(s, 403, "audience {:?}: {reply}", req.audience);
+        assert!(reply.get("session").is_none());
+    }
+    d.stop().await;
+}
+
+/// Review I3: the instance id is announced only through an owner-only file, never over HTTP.
+#[tokio::test]
+async fn the_instance_id_is_announced_only_in_an_owner_only_file() {
+    let d = start().await;
+    let id = instance_id(&d);
+    assert_eq!(id.len(), 32);
+    let health = client()
+        .get(d.url("/v1/health"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !health.contains(&id),
+        "health must not reveal the instance id"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(d.home.path().join("synapsed.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    d.stop().await;
+}
+
+/// Review I1: message ids are scoped by sender, so one role can't take another's id first.
+#[tokio::test]
+async fn a_squatted_message_id_does_not_suppress_another_senders_message() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (beta, _) = claim(&d, "beta", 2).await;
+    let (gamma, _) = claim(&d, "gamma", 3).await;
+    let send = |token: String, body: &'static [u8]| {
+        let d = &d;
+        async move {
+            post(
+                d,
+                "/v1/send",
+                Some(&token),
+                json!({"to": "beta@acct", "message_id": "m1", "body_b64": B64.encode(body)}),
+            )
+            .await
+        }
+    };
+    let (_, g, _) = send(gamma.clone(), b"forged").await;
+    let (_, a, _) = send(alpha.clone(), b"real").await;
+    assert_eq!(g["outcome"], "queued");
+    assert_eq!(
+        a["outcome"], "queued",
+        "alpha's m1 must not be a duplicate of gamma's: {a}"
+    );
+    assert_ne!(a["message_id"], g["message_id"]);
+    let (_, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
+    let froms: Vec<&str> = got["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["from"].as_str().unwrap())
+        .collect();
+    assert_eq!(froms.len(), 2, "{got}");
+    assert!(froms.contains(&"alpha@acct") && froms.contains(&"gamma@acct"));
+    // A resend by the same sender with the same id is still a duplicate.
+    let (_, again, _) = send(alpha, b"real").await;
+    assert_eq!(again["outcome"], "duplicate");
+    d.stop().await;
+}
+
+/// Review I2: the daemon serves its own account's claimed roles only; anything else would let one
+/// role fill the disk with queues nobody can ever read.
+#[tokio::test]
+async fn mail_for_a_foreign_account_or_an_unclaimed_role_is_refused() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    for to in ["x@other", "never-claimed@acct"] {
+        let (s, reply, _) = post(
+            &d,
+            "/v1/send",
+            Some(&alpha),
+            json!({"to": to, "body_b64": B64.encode(b"x")}),
+        )
+        .await;
+        assert_eq!(s, 404, "{to}: {reply}");
+        assert_eq!(reply["error"], "unknown_recipient");
+    }
+    d.stop().await;
+}
+
+/// Review M1: an absurd lease is a 400, not a panic in the handler.
+#[tokio::test]
+async fn an_oversized_lease_is_400_not_a_panic() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (s, reply, _) = post(
+        &d,
+        "/v1/fetch",
+        Some(&alpha),
+        json!({"lease_secs": i64::MAX}),
+    )
+    .await;
+    assert_eq!(s, 400, "{reply}");
+    d.stop().await;
+}
+
+/// Review M2: serve() itself refuses a non-loopback listener, whatever the config said.
+#[tokio::test]
+async fn serve_refuses_a_non_loopback_listener() {
+    let home = tempfile::tempdir().unwrap();
+    Keystore::init_account(home.path(), "acct").unwrap();
+    let daemon = Daemon::open(&config(home.path())).unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let result = daemon.serve(listener, async {}).await;
+    assert!(result.is_err(), "serving on 0.0.0.0 must fail");
+}
+
+/// Review M3: more than one Host header is refused, whichever comes first.
+#[tokio::test]
+async fn duplicate_host_headers_are_421() {
+    let d = start().await;
+    let addr = d.addr;
+    let port = addr.port();
+    let req = format!(
+        "GET /v1/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nHost: evil.example:{port}\r\nConnection: close\r\n\r\n"
+    );
+    let reply = tokio::task::spawn_blocking(move || raw(addr, &req))
+        .await
+        .unwrap();
+    assert!(reply.starts_with("HTTP/1.1 421"), "{reply}");
     d.stop().await;
 }

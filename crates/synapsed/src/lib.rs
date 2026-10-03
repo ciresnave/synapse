@@ -57,6 +57,8 @@ pub struct DaemonConfig {
 pub enum DaemonError {
     /// The configured address is not loopback.
     NotLoopback,
+    /// The system random source failed.
+    NoRandomness,
     Keystore(KeystoreError),
     Store(StoreError),
     Mail(MailError),
@@ -66,6 +68,7 @@ impl fmt::Display for DaemonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DaemonError::NotLoopback => write!(f, "synapsed listens on loopback addresses only"),
+            DaemonError::NoRandomness => write!(f, "the system random source failed"),
             DaemonError::Keystore(e) => write!(f, "keystore: {e}"),
             DaemonError::Store(e) => write!(f, "{e}"),
             DaemonError::Mail(e) => write!(f, "{e}"),
@@ -78,6 +81,8 @@ impl std::error::Error for DaemonError {}
 /// How recently a role must have been heard from to count as online.
 const ONLINE_WINDOW: chrono::Duration = chrono::Duration::seconds(90);
 const MAX_FETCH: usize = 100;
+/// The longest client-chosen message id; the stored id is `<sender>/<client id>` (review I1).
+const MAX_CLIENT_ID: usize = 100;
 const MAX_SUMMARY: usize = 500;
 /// How many superseded sessions per role still answer `superseded` instead of `unauthorized`.
 const KEEP_SUPERSEDED: u64 = 8;
@@ -99,11 +104,21 @@ struct Shared {
     /// SHA-256(token) -> session.
     sessions: Mutex<HashMap<[u8; 32], Session>>,
     presence: Mutex<HashMap<String, Presence>>,
+    /// This daemon's account name: it serves `<role>@<account>` only.
+    account: String,
     account_key_id: String,
     account_key: [u8; 32],
+    /// Random per daemon start, hex. Claims must be signed for it (review I3); it is published only
+    /// in the owner-only announce file, never over HTTP.
+    instance_id: String,
+    home: PathBuf,
     started_at: DateTime<Utc>,
     sweep_every: std::time::Duration,
 }
+
+/// The owner-only file in the home where a daemon announces its address and instance id. Only the
+/// same user can read it, so only that user's clients learn which daemon is real (review I3).
+pub const ANNOUNCE_FILE: &str = "synapsed.json";
 
 /// An opened daemon, ready to serve.
 pub struct Daemon {
@@ -129,13 +144,18 @@ impl Daemon {
         let started_at = Utc::now();
         let mailbox =
             Mailbox::open(store, MailConfig::default(), started_at).map_err(DaemonError::Mail)?;
+        let instance_id = hex(&random_bytes::<16>().ok_or(DaemonError::NoRandomness)?);
+        let summary = keystore.account();
         Ok(Daemon {
             shared: Arc::new(Shared {
                 mailbox: Mutex::new(mailbox),
                 sessions: Mutex::new(HashMap::new()),
                 presence: Mutex::new(HashMap::new()),
-                account_key_id: keystore.account().key_id,
+                account: summary.account,
+                account_key_id: summary.key_id,
                 account_key: keystore.account_public_key(),
+                instance_id,
+                home: cfg.home.clone(),
                 started_at,
                 sweep_every: cfg.sweep_every,
             }),
@@ -155,7 +175,15 @@ impl Daemon {
         listener: tokio::net::TcpListener,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
-        let port = listener.local_addr()?.port();
+        let bound = listener.local_addr()?;
+        if !bound.ip().is_loopback() {
+            // Review M2: whatever the config said, never serve off loopback.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "synapsed serves on loopback addresses only",
+            ));
+        }
+        write_announce(&self.shared.home, bound, &self.shared.instance_id)?;
         let sweeper = {
             let shared = self.shared.clone();
             tokio::spawn(async move {
@@ -178,7 +206,7 @@ impl Daemon {
             .route("/v1/heartbeat", post(heartbeat))
             .route("/v1/list", get(list))
             .layer(middleware::from_fn(move |req: Request, next: Next| {
-                host_guard(port, req, next)
+                host_guard(bound, req, next)
             }))
             .with_state(self.shared.clone());
         let result = axum::serve(listener, app)
@@ -189,14 +217,16 @@ impl Daemon {
     }
 }
 
-/// DNS-rebinding and drive-by protection: only our own loopback Host is served.
-async fn host_guard(port: u16, req: Request, next: Next) -> Response {
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let ours = host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
+/// DNS-rebinding and drive-by protection: exactly one `Host`, naming the address we are bound to
+/// (or `localhost` on its port). Duplicate Host headers are refused outright (review M3).
+async fn host_guard(bound: SocketAddr, req: Request, next: Next) -> Response {
+    let mut hosts = req.headers().get_all(header::HOST).iter();
+    let host = match (hosts.next(), hosts.next()) {
+        (Some(only), None) => only.to_str().unwrap_or(""),
+        _ => "",
+    };
+    let port = bound.port();
+    let ours = host == bound.to_string() || host == format!("localhost:{port}");
     if !ours {
         return ApiError::new(
             StatusCode::MISDIRECTED_REQUEST,
@@ -297,8 +327,47 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn random_bytes<const N: usize>() -> Option<[u8; N]> {
+    use ring::rand::SecureRandom;
+    let mut out = [0u8; N];
+    ring::rand::SystemRandom::new().fill(&mut out).ok()?;
+    Some(out)
+}
+
+/// Write `<home>/synapsed.json` (address and instance id) atomically and owner-only: a temp file
+/// created `0600` on Unix (on Windows it inherits the user-profile ACL of the home), then renamed.
+fn write_announce(
+    home: &std::path::Path,
+    bound: SocketAddr,
+    instance_id: &str,
+) -> std::io::Result<()> {
+    let body = json!({
+        "addr": bound.to_string(),
+        "instance_id": instance_id,
+        "pid": std::process::id(),
+    })
+    .to_string();
+    let temp = home.join(format!(".tmp-synapsed-{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write;
+        let mut file = options.open(&temp)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temp, home.join(ANNOUNCE_FILE))
+}
+
+/// Strict lowercase-or-uppercase hex only: `u8::from_str_radix` alone would also accept `+a`,
+/// giving tokens and nonces alternative encodings (review M8).
 fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
-    if s.len() != N * 2 {
+    if s.len() != N * 2 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0u8; N];
@@ -354,6 +423,8 @@ async fn health(State(shared): State<Arc<Shared>>) -> Response {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClaimBody {
+    #[serde(default)]
+    audience: Option<String>,
     chain_pem: String,
     nonce_hex: String,
     signed_at: DateTime<Utc>,
@@ -373,24 +444,28 @@ async fn claim(
         signature: B64
             .decode(&body.signature_b64)
             .map_err(|_| malformed("signature_b64"))?,
+        audience: body.audience,
     };
+    // Review I3: the claim must be signed for THIS daemon instance. Checked before the claim is
+    // verified, so a claim for another audience never consumes its nonce here.
+    if req.audience.as_deref() != Some(shared.instance_id.as_str()) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "claim_refused",
+            "the claim is not addressed to this daemon",
+        ));
+    }
     let (key_id, key) = (shared.account_key_id.clone(), shared.account_key);
     let lookup = move |kid: &str| (kid == key_id).then_some(key);
     let grant = locked(&shared.mailbox)?.claim(&req, &lookup, &NoRevocations, Utc::now())?;
 
-    let mut token = [0u8; 32];
-    {
-        use ring::rand::SecureRandom;
-        ring::rand::SystemRandom::new()
-            .fill(&mut token)
-            .map_err(|_| {
-                ApiError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "store_unavailable",
-                    "no randomness",
-                )
-            })?;
-    }
+    let token = random_bytes::<32>().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "store_unavailable",
+            "no randomness",
+        )
+    })?;
     {
         let mut sessions = locked(&shared.sessions)?;
         // Superseded sessions are kept so their calls answer 409 `superseded` (telling the old
@@ -429,18 +504,50 @@ async fn send(
 ) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
     let body: SendBody = parse(&headers, &body)?;
-    let message_id = body
-        .message_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Review I1: ids are scoped by the verified sender, so no role can take another's id first.
+    // A client id stays useful for its own idempotent resends.
+    let client_id = match body.message_id {
+        Some(id) => {
+            if id.is_empty()
+                || id.len() > MAX_CLIENT_ID
+                || id.contains('/')
+                || id.chars().any(char::is_control)
+            {
+                return Err(malformed("message_id"));
+            }
+            id
+        }
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let message_id = format!("{}/{client_id}", session.global_id);
     let envelope = Envelope {
         message_id: message_id.clone(),
         to: body.to,
-        from: session.global_id,
+        from: session.global_id.clone(),
         body: B64
             .decode(&body.body_b64)
             .map_err(|_| malformed("body_b64"))?,
     };
-    let outcome = locked(&shared.mailbox)?.enqueue(envelope, Utc::now())?;
+    let outcome = {
+        let mut mailbox = locked(&shared.mailbox)?;
+        // Review M5: re-check the sender's epoch under the same lock as the enqueue.
+        mailbox.check(&session.global_id, session.epoch)?;
+        // Review I2: serve this daemon's account and roles that have claimed at least once, so no
+        // role can fill the disk with queues for recipients that can never read them.
+        let known = envelope
+            .to
+            .split_once('@')
+            .is_some_and(|(_, account)| account == shared.account)
+            && mailbox.roles_snapshot().roles.contains_key(&envelope.to);
+        if !known {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "unknown_recipient",
+                "no such role on this daemon",
+            ));
+        }
+        mailbox.enqueue(envelope, Utc::now())?
+    };
     Ok(axum::Json(json!({
         "message_id": message_id,
         "outcome": match outcome { Enqueued::Queued => "queued", Enqueued::Duplicate => "duplicate" },
@@ -465,7 +572,13 @@ async fn fetch(
     let session = authed(&shared, &headers)?;
     let body: FetchBody = parse(&headers, &body)?;
     let max = body.max.unwrap_or(10).min(MAX_FETCH);
-    let lease = body.lease_secs.map(chrono::Duration::seconds);
+    // Review M1: `Duration::seconds` panics on huge values; an absurd lease is a 400.
+    let lease = match body.lease_secs {
+        None => None,
+        Some(secs) => {
+            Some(chrono::Duration::try_seconds(secs).ok_or_else(|| malformed("lease_secs"))?)
+        }
+    };
     let deliveries = locked(&shared.mailbox)?.fetch(
         &session.global_id,
         session.epoch,
