@@ -403,8 +403,11 @@ fn check_dir(dir: &Path, item: &'static str) -> Result<()> {
     check_owner_only(dir, item)
 }
 
-/// Refuse anything accessible to more than its owner.
-pub(crate) fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
+/// Refuse anything accessible to more than its owner: any `0o077` mode bit on Unix; on Windows, any
+/// access for `Everyone`, `Users` or `Authenticated Users` (see `windows_acl`). Public so that the
+/// keystore's neighbours in the home (the CLI's session cache, the daemon's announce file) are held
+/// to the same rule.
+pub fn check_owner_only(path: &Path, item: &'static str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

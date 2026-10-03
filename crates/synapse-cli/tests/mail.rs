@@ -379,3 +379,141 @@ fn a_role_is_required() {
         "a usage error starts no daemon"
     );
 }
+
+/// Open `path` to the broad Users group: what the keystore's owner-only check refuses.
+fn loosen(path: &Path) {
+    #[cfg(windows)]
+    {
+        let out = Command::new("icacls")
+            .arg(path)
+            .args(["/grant", "*S-1-5-32-545:(R)"])
+            .output()
+            .expect("icacls runs");
+        assert!(out.status.success(), "{out:?}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if path.is_dir() { 0o755 } else { 0o644 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+/// Opus review I3: a session directory, session file or announce file that others can read is
+/// refused, not used.
+#[test]
+fn a_too_open_session_or_announce_file_is_refused() {
+    for target in ["sessions", "sessions/alpha.json", "synapsed.json"] {
+        let home = Home::new();
+        home.ok(&["claim", "--role", "alpha"]);
+        home.ok(&["send", "--role", "alpha", "--to", "alpha", "before"]);
+        loosen(&home.path().join(target));
+        let out = home.run(&["send", "--role", "alpha", "--to", "alpha", "after"]);
+        assert_ne!(out.status.code(), Some(0), "{target}: {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("accessible to more than its owner"),
+            "{target}: {err}"
+        );
+    }
+}
+
+/// Opus review I1 (#74), the client-only mitigation: an announce file whose daemon is dead is not
+/// trusted, even when something answers health on its port, so no token reaches that listener.
+#[test]
+fn a_dead_daemons_port_is_not_trusted() {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let text = std::fs::read_to_string(home.path().join("synapsed.json")).unwrap();
+    let addr = serde_json::from_str::<Value>(&text).unwrap()["addr"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first = home.announced_pid().unwrap();
+    home.kill_daemon(); // synapsed leaves its announce file behind (#74)
+
+    let squatter = std::net::TcpListener::bind(&addr).expect("the dead daemon's port is free");
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = Arc::clone(&seen);
+    let fake = std::thread::spawn(move || {
+        for stream in squatter.incoming() {
+            let mut stream = stream.unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            if request.starts_with("stop") {
+                return;
+            }
+            log.lock().unwrap().push(request);
+            let body = r#"{"ok":true,"started_at":"2020-01-01T00:00:00Z","outcome":"queued","message_id":"m","messages":[]}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+
+    let out = home.run(&["send", "--role", "alpha", "--to", "alpha", "secret"]);
+    std::net::TcpStream::connect(&addr)
+        .unwrap()
+        .write_all(b"stop")
+        .unwrap();
+    fake.join().unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert!(
+        !seen.iter().any(|r| r.contains("authorization:")),
+        "the token went to the squatter: {seen:?}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let second = home.announced_pid().unwrap();
+    assert_ne!(first, second);
+    assert_eq!(spawned_pids(&out), vec![second], "a fresh daemon took over");
+}
+
+/// A refusal whose body is not JSON (axum's own 413 for an oversized body) still names its status.
+#[test]
+fn a_non_json_refusal_reports_its_http_status() {
+    use std::io::Write;
+    let home = Home::new();
+    home.ok(&["claim", "--role", "beta"]);
+    let mut child = home
+        .command(&["send", "--role", "beta", "--to", "beta"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&vec![b'x'; 1_700_000])
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("413"), "{err}");
+}
+
+/// Opus review (stale-lock race): the role lock is an OS lock, so a lock file left behind blocks
+/// nobody, and no lock is ever broken out from under a live holder.
+#[test]
+fn a_leftover_lock_file_does_not_block_a_claim() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "beta"]);
+    std::fs::write(home.path().join("sessions").join("alpha.lock"), b"").unwrap();
+    let started = Instant::now();
+    home.ok(&["claim", "--role", "alpha"]);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the claim waited {:?} on a lock nobody holds",
+        started.elapsed()
+    );
+}

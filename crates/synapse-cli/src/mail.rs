@@ -8,6 +8,16 @@
 //! claim happens only when there is no cached session for the running daemon instance, under a
 //! per-role lock so concurrent first commands claim once. A 409 `superseded` or a 401 is reported,
 //! never answered by re-claiming: taking a role back is always an explicit `synapse claim`.
+//!
+//! **One holder per (home, role).** The cache is keyed by role, not by holder, so every `synapse`
+//! command for a role in a home shares one session: a `synapse claim` re-points all of them, and
+//! supersession is only ever reported to holders outside this home's cache. Per-holder sessions are
+//! M5c.
+//!
+//! **The daemon is not yet authenticated (#74).** The announce file is trusted only if it, the
+//! session cache and its directory pass the keystore's owner-only check, and only while its `pid`
+//! is a live process (on Windows, a live `synapsed`). That stops a stale port, left by a crashed
+//! daemon, from receiving tokens, but proof that the listener holds the instance id is M5c.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -20,7 +30,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use synapse::certificate::chain_to_pem;
-use synapse::keystore::{Keystore, KeystoreError};
+use synapse::keystore::{Keystore, KeystoreError, check_owner_only};
 use synapse::roles::sign_claim_for;
 
 /// The daemon's announce file in the home, written by `synapsed` (M5a).
@@ -31,8 +41,6 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a command waits for another command's claim of the same role.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-/// A role lock older than this was left by a crashed command and is broken.
-const STALE_LOCK: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum MailError {
@@ -71,7 +79,9 @@ impl fmt::Display for MailError {
                 "unauthorized: the daemon no longer knows this session (another holder may have \
                  claimed the role); run `synapse claim` to claim it"
             ),
-            MailError::Api { kind, message, .. } => write!(f, "{kind}: {message}"),
+            MailError::Api { kind, message, .. } => {
+                write!(f, "{}: {}", printable(kind), printable(message))
+            }
             MailError::Io(e) => write!(f, "{e}"),
             MailError::Usage(why) => write!(f, "{why}"),
         }
@@ -96,6 +106,7 @@ impl From<std::io::Error> for MailError {
 struct Announce {
     addr: String,
     instance_id: String,
+    pid: u32,
 }
 
 /// A session as cached on disk: valid only for the daemon instance that issued it.
@@ -132,7 +143,7 @@ impl Daemon {
             .map_err(|e| MailError::Transport(e.to_string()))?;
         // Two tries, so one slow answer from a live daemon doesn't start a doomed second one.
         for _ in 0..2 {
-            if let Some(found) = answering(&http, home) {
+            if let Some(found) = answering(&http, home)? {
                 return Ok(Daemon::new(http, home, found));
             }
         }
@@ -142,7 +153,7 @@ impl Daemon {
         loop {
             // Whichever daemon answers will do: ours, or, if two CLIs raced, the one holding the
             // store (ours then exits on its lock), or a live one that was only slow to answer.
-            if let Some(found) = answering(&http, home) {
+            if let Some(found) = answering(&http, home)? {
                 return Ok(Daemon::new(http, home, found));
             }
             if Instant::now() >= deadline {
@@ -228,11 +239,11 @@ impl Daemon {
     /// first commands for one role claim once rather than superseding each other (review I4).
     fn session(&self, role: &str) -> Result<Cached, MailError> {
         let current = |c: &Cached| c.instance_id == self.instance_id;
-        if let Some(c) = load_session(&self.home, role).filter(current) {
+        if let Some(c) = load_session(&self.home, role)?.filter(current) {
             return Ok(c);
         }
         let _lock = RoleLock::acquire(&self.home, role)?;
-        match load_session(&self.home, role).filter(current) {
+        match load_session(&self.home, role)?.filter(current) {
             Some(c) => Ok(c),
             None => self.claim_session(role),
         }
@@ -256,12 +267,14 @@ impl Daemon {
         let resp = req
             .send()
             .map_err(|e| MailError::Transport(e.without_url().to_string()))?;
-        let ok = resp.status().is_success();
+        let status = resp.status();
         let text = resp
             .text()
             .map_err(|e| MailError::Transport(e.without_url().to_string()))?;
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| MailError::Transport("the reply is not JSON".to_string()))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            MailError::Transport(format!("HTTP {status}, and the reply is not JSON"))
+        })?;
+        let ok = status.is_success();
         if ok {
             return Ok(value);
         }
@@ -273,16 +286,83 @@ impl Daemon {
     }
 }
 
-/// The announced daemon and its start time, if it answers health.
-fn answering(http: &reqwest::blocking::Client, home: &Path) -> Option<(Announce, DateTime<Utc>)> {
-    let announce = read_announce(home)?;
-    let started_at = health(http, &announce.addr)?;
-    Some((announce, started_at))
+/// The announced daemon and its start time, if it is alive and answers health.
+fn answering(
+    http: &reqwest::blocking::Client,
+    home: &Path,
+) -> Result<Option<(Announce, DateTime<Utc>)>, MailError> {
+    let Some(announce) = read_announce(home)? else {
+        return Ok(None);
+    };
+    Ok(health(http, &announce.addr).map(|started_at| (announce, started_at)))
 }
 
-fn read_announce(home: &Path) -> Option<Announce> {
-    let text = std::fs::read_to_string(home.join(ANNOUNCE_FILE)).ok()?;
-    serde_json::from_str(&text).ok()
+/// The announce file, if present, owner-only, readable, and naming a live daemon. A file left by a
+/// dead daemon is ignored, so a process that took its port gets no token (#74); a file others can
+/// reach is an error, since whoever can write it chooses where the token goes.
+fn read_announce(home: &Path) -> Result<Option<Announce>, MailError> {
+    let path = home.join(ANNOUNCE_FILE);
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    check_owner_only(&path, "daemon announce file")?;
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str::<Announce>(&text)
+        .ok()
+        .filter(|a| daemon_alive(a.pid)))
+}
+
+/// Whether `pid` is a live process of this user (on Windows, a live `synapsed`). This is the
+/// interim stand-in for #74's proof of the instance id: it catches a stale announce file, not a
+/// reused pid on Unix.
+#[cfg(unix)]
+fn daemon_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks that `pid` exists and may be signalled by us; it sends nothing.
+    // EPERM (another user's process) is a failure here, which is what we want.
+    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+}
+
+#[cfg(windows)]
+fn daemon_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    // SAFETY: OpenProcess takes no pointers; a null result is handled.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut code = 0u32;
+    let mut name = [0u16; 1024];
+    let mut len = name.len() as u32;
+    // SAFETY: `handle` is open until the CloseHandle below; `code`, `name` and `len` are valid for
+    // writes, and `len` is `name`'s capacity in u16s.
+    let (running, named) = unsafe {
+        (
+            GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32,
+            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, name.as_mut_ptr(), &mut len)
+                != 0,
+        )
+    };
+    // SAFETY: opened above and closed exactly once.
+    unsafe { CloseHandle(handle) };
+    let image = String::from_utf16_lossy(&name[..len as usize]);
+    let file = Path::new(&image)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_ascii_lowercase());
+    running && named && file.as_deref() == Some("synapsed.exe")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn daemon_alive(_pid: u32) -> bool {
+    true
 }
 
 /// The daemon's start time if `/v1/health` at `addr` answers ok.
@@ -385,36 +465,29 @@ fn sessions_dir(home: &Path) -> Result<PathBuf, MailError> {
         builder.mode(0o700);
     }
     builder.create(&dir)?;
+    // `mode` applies only to a directory created now, so an existing one is checked too.
+    check_owner_only(&dir, "session directory")?;
     Ok(dir)
 }
 
-/// An exclusive per-role lock file, `<home>/sessions/<role>.lock`, removed on drop. A lock older
-/// than [`STALE_LOCK`] was left by a crashed command and is broken.
-struct RoleLock(PathBuf);
+/// An exclusive per-role OS lock on `<home>/sessions/<role>.lock`, held while this value lives.
+/// The OS releases it when the holder exits, crashed or not, so a leftover file blocks nobody and
+/// no lock is ever broken out from under a live holder. The file itself is left in place.
+struct RoleLock(#[allow(dead_code)] std::fs::File);
 
 impl RoleLock {
     fn acquire(home: &Path, role: &str) -> Result<RoleLock, MailError> {
         let path = sessions_dir(home)?.join(format!("{role}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
         let deadline = Instant::now() + LOCK_TIMEOUT;
         loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(_) => return Ok(RoleLock(path)),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age > STALE_LOCK);
-                    if stale {
-                        let _ = std::fs::remove_file(&path);
-                        continue;
-                    }
-                }
-                Err(e) => return Err(e.into()),
+            if try_lock(&file)? {
+                return Ok(RoleLock(file));
             }
             if Instant::now() >= deadline {
                 return Err(MailError::Usage(format!(
@@ -426,24 +499,84 @@ impl RoleLock {
     }
 }
 
-impl Drop for RoleLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+/// Take an exclusive lock on `file` without waiting: `Ok(false)` if another process holds it.
+/// (`File::try_lock` would do, but it needs Rust 1.89 and this crate's MSRV is 1.88.)
+#[cfg(unix)]
+fn try_lock(file: &std::fs::File) -> Result<bool, MailError> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: the descriptor is open for `file`'s lifetime; flock takes no pointers.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+    let e = std::io::Error::last_os_error();
+    if e.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(false)
+    } else {
+        Err(e.into())
     }
 }
 
-fn load_session(home: &Path, role: &str) -> Option<Cached> {
-    let text = std::fs::read_to_string(session_path(home, role)).ok()?;
-    serde_json::from_str(&text).ok()
+#[cfg(windows)]
+fn try_lock(file: &std::fs::File) -> Result<bool, MailError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    // SAFETY: an all-zero OVERLAPPED (offset 0, no event) is valid for a synchronous handle.
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is open for `file`'s lifetime and `overlapped` outlives the call, which
+    // does not wait (FAIL_IMMEDIATELY). The lock is released when the handle closes.
+    let locked = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    } != 0;
+    if locked {
+        return Ok(true);
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        Ok(false)
+    } else {
+        Err(e.into())
+    }
 }
 
-/// Write the session atomically and owner-only: a temp file created `0600` on Unix (on Windows it
-/// inherits the home's user-profile ACL, as the announce file does), then renamed.
+#[cfg(not(any(unix, windows)))]
+fn try_lock(_file: &std::fs::File) -> Result<bool, MailError> {
+    Ok(true)
+}
+
+/// The cached session, if any. A cache others can reach is an error: anyone who can read it holds
+/// the role, and anyone who can write it chooses the token.
+fn load_session(home: &Path, role: &str) -> Result<Option<Cached>, MailError> {
+    sessions_dir(home)?;
+    let path = session_path(home, role);
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    check_owner_only(&path, "session file")?;
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str(&text).ok())
+}
+
+/// Write the session atomically and owner-only: a fresh temp file (`create_new`, so nothing planted
+/// at its name is followed) created `0600` on Unix (on Windows it inherits the checked session
+/// directory's ACL), then renamed.
 fn save_session(home: &Path, role: &str, cached: &Cached) -> Result<(), MailError> {
     let dir = sessions_dir(home)?;
-    let temp = dir.join(format!(".tmp-{role}-{}", std::process::id()));
+    let temp = dir.join(format!(".tmp-{role}-{}", hex(&random_bytes::<8>()?)));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -492,4 +625,36 @@ pub fn inbox_line(message: &Value) -> Value {
 /// Encode a message body for the wire.
 pub fn encode_body(body: &[u8]) -> String {
     B64.encode(body)
+}
+
+/// Daemon text made safe for a terminal: control characters (escape sequences included) are shown
+/// escaped, not sent raw. Only JSON-escaped output (`inbox`, `list`) can skip this.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_text_reaches_the_terminal_without_control_characters() {
+        assert_eq!(printable("queued"), "queued");
+        assert_eq!(printable("a\u{1b}[2Jb\r\n"), "a\\u{1b}[2Jb\\r\\n");
+        let refused = MailError::Api {
+            kind: "malformed\u{7}".into(),
+            message: "\u{1b}]0;owned\u{7}".into(),
+            current: None,
+        }
+        .to_string();
+        assert!(!refused.chars().any(char::is_control), "{refused:?}");
+    }
 }

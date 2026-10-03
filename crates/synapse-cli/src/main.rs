@@ -34,6 +34,9 @@ enum Command {
     #[command(subcommand)]
     Id(IdCommand),
     /// Claim a role on the daemon (taking it over if another holder has it).
+    ///
+    /// The session is cached per role in this home, so every `synapse` command for the role here
+    /// uses the new claim: one holder per (home, role).
     Claim {
         #[command(flatten)]
         role: RoleArg,
@@ -137,7 +140,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
         Command::Claim { role } => {
             let daemon = connect(&home, &role)?;
             let claimed = daemon.claim(&role.role)?;
-            println!("identity: {}", claimed.global_id);
+            println!("identity: {}", mail::printable(&claimed.global_id));
             println!("epoch: {}", claimed.epoch);
         }
         Command::Send {
@@ -173,8 +176,9 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 "/v1/send",
                 Some(&json!({"to": to, "message_id": id, "body_b64": mail::encode_body(&body)})),
             )?;
-            println!("message id: {}", reply["message_id"].as_str().unwrap_or(""));
-            println!("outcome: {}", reply["outcome"].as_str().unwrap_or(""));
+            let field = |name: &str| mail::printable(reply[name].as_str().unwrap_or(""));
+            println!("message id: {}", field("message_id"));
+            println!("outcome: {}", field("outcome"));
         }
         Command::Inbox {
             role,
@@ -198,7 +202,10 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 "/v1/ack",
                 Some(&json!({"message_id": message_id})),
             )?;
-            println!("outcome: {}", reply["outcome"].as_str().unwrap_or(""));
+            println!(
+                "outcome: {}",
+                mail::printable(reply["outcome"].as_str().unwrap_or(""))
+            );
         }
         Command::List { role } => {
             let daemon = connect(&home, &role)?;
