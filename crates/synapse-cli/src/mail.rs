@@ -4,8 +4,10 @@
 //!
 //! Design: `docs/superpowers/specs/2026-10-02-m5-synapsed-design.md` (Q2, Q4) and the M5b plan.
 //! Session tokens are cached owner-only in `<home>/sessions/<role>.json`, so commands after a claim
-//! reuse it instead of re-claiming (which would supersede the role's other holder). A 409
-//! `superseded` is reported, never answered by re-claiming: taking a role back is `synapse claim`.
+//! reuse it instead of re-claiming (which would supersede the role's other holder). An implicit
+//! claim happens only when there is no cached session for the running daemon instance, under a
+//! per-role lock so concurrent first commands claim once. A 409 `superseded` or a 401 is reported,
+//! never answered by re-claiming: taking a role back is always an explicit `synapse claim`.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -27,6 +29,10 @@ const ANNOUNCE_FILE: &str = "synapsed.json";
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a command waits for another command's claim of the same role.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+/// A role lock older than this was left by a crashed command and is broken.
+const STALE_LOCK: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum MailError {
@@ -59,6 +65,11 @@ impl fmt::Display for MailError {
                 f,
                 "superseded: another holder claimed this role (now epoch {current}); \
                  run `synapse claim` to take it back"
+            ),
+            MailError::Api { kind, .. } if kind == "unauthorized" => write!(
+                f,
+                "unauthorized: the daemon no longer knows this session (another holder may have \
+                 claimed the role); run `synapse claim` to claim it"
             ),
             MailError::Api { kind, message, .. } => write!(f, "{kind}: {message}"),
             MailError::Io(e) => write!(f, "{e}"),
@@ -119,25 +130,20 @@ impl Daemon {
             .timeout(CALL_TIMEOUT)
             .build()
             .map_err(|e| MailError::Transport(e.to_string()))?;
-        let stale = read_announce(home);
-        if let Some(a) = &stale
-            && let Some(started_at) = health(&http, &a.addr)
-        {
-            return Ok(Daemon::new(http, home, a, started_at));
+        // Two tries, so one slow answer from a live daemon doesn't start a doomed second one.
+        for _ in 0..2 {
+            if let Some(found) = answering(&http, home) {
+                return Ok(Daemon::new(http, home, found));
+            }
         }
         let mut child = spawn_daemon(home)?;
         eprintln!("synapse: started synapsed (pid {})", child.id());
         let deadline = Instant::now() + START_TIMEOUT;
         loop {
-            // Any daemon that announced after the stale one will do: if two CLIs raced, the other
-            // one's daemon holds the store and ours has exited on its lock.
-            if let Some(a) = read_announce(home)
-                && stale
-                    .as_ref()
-                    .is_none_or(|s| s.instance_id != a.instance_id)
-                && let Some(started_at) = health(&http, &a.addr)
-            {
-                return Ok(Daemon::new(http, home, &a, started_at));
+            // Whichever daemon answers will do: ours, or, if two CLIs raced, the one holding the
+            // store (ours then exits on its lock), or a live one that was only slow to answer.
+            if let Some(found) = answering(&http, home) {
+                return Ok(Daemon::new(http, home, found));
             }
             if Instant::now() >= deadline {
                 let why = match child.try_wait() {
@@ -155,20 +161,20 @@ impl Daemon {
     fn new(
         http: reqwest::blocking::Client,
         home: &Path,
-        announce: &Announce,
-        started_at: DateTime<Utc>,
+        (announce, started_at): (Announce, DateTime<Utc>),
     ) -> Daemon {
         Daemon {
             http,
             home: home.to_path_buf(),
-            addr: announce.addr.clone(),
-            instance_id: announce.instance_id.clone(),
+            addr: announce.addr,
+            instance_id: announce.instance_id,
             started_at,
         }
     }
 
     /// Claim `role` afresh (a takeover if someone holds it) and cache the session.
     pub fn claim(&self, role: &str) -> Result<Claimed, MailError> {
+        let _lock = RoleLock::acquire(&self.home, role)?;
         let cached = self.claim_session(role)?;
         Ok(Claimed {
             global_id: cached.global_id,
@@ -210,19 +216,25 @@ impl Daemon {
     }
 
     /// An authenticated call as `role`: the cached session if it belongs to this daemon instance,
-    /// else a fresh claim. A 401 (the daemon no longer knows the session) re-claims once; a 409
-    /// `superseded` is returned as an error.
+    /// else a fresh claim. Any refusal, 401 and 409 included, is returned as an error: a 401 for
+    /// this instance's session means the daemon dropped it, which happens after enough takeovers,
+    /// so re-claiming then would silently steal the role back (review I1).
     pub fn call(&self, role: &str, path: &str, body: Option<&Value>) -> Result<Value, MailError> {
-        let (session, fresh) = match load_session(&self.home, role) {
-            Some(c) if c.instance_id == self.instance_id => (c, false),
-            _ => (self.claim_session(role)?, true),
-        };
-        match self.request(path, Some(&session.token), body) {
-            Err(MailError::Api { kind, .. }) if kind == "unauthorized" && !fresh => {
-                let session = self.claim_session(role)?;
-                self.request(path, Some(&session.token), body)
-            }
-            other => other,
+        let session = self.session(role)?;
+        self.request(path, Some(&session.token), body)
+    }
+
+    /// The cached session for this daemon instance, else a claim. Under the role lock, so two
+    /// first commands for one role claim once rather than superseding each other (review I4).
+    fn session(&self, role: &str) -> Result<Cached, MailError> {
+        let current = |c: &Cached| c.instance_id == self.instance_id;
+        if let Some(c) = load_session(&self.home, role).filter(current) {
+            return Ok(c);
+        }
+        let _lock = RoleLock::acquire(&self.home, role)?;
+        match load_session(&self.home, role).filter(current) {
+            Some(c) => Ok(c),
+            None => self.claim_session(role),
         }
     }
 
@@ -259,6 +271,13 @@ impl Daemon {
             current: value["current"].as_u64(),
         })
     }
+}
+
+/// The announced daemon and its start time, if it answers health.
+fn answering(http: &reqwest::blocking::Client, home: &Path) -> Option<(Announce, DateTime<Utc>)> {
+    let announce = read_announce(home)?;
+    let started_at = health(http, &announce.addr)?;
+    Some((announce, started_at))
 }
 
 fn read_announce(home: &Path) -> Option<Announce> {
@@ -312,7 +331,17 @@ fn spawn_daemon(home: &Path) -> Result<std::process::Child, MailError> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        // SAFETY: runs in the forked child before exec; `setsid` is async-signal-safe and touches
+        // no memory of ours. A new session takes the daemon out of the terminal's job control, so
+        // neither Ctrl-C nor the terminal closing (SIGHUP) reaches it.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     cmd.spawn()
         .map_err(|e| MailError::NoDaemon(format!("cannot start synapsed: {e}")))
@@ -345,14 +374,8 @@ fn session_path(home: &Path, role: &str) -> PathBuf {
     home.join("sessions").join(format!("{role}.json"))
 }
 
-fn load_session(home: &Path, role: &str) -> Option<Cached> {
-    let text = std::fs::read_to_string(session_path(home, role)).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// Write the session atomically and owner-only: a temp file created `0600` on Unix (on Windows it
-/// inherits the home's user-profile ACL, as the announce file does), then renamed.
-fn save_session(home: &Path, role: &str, cached: &Cached) -> Result<(), MailError> {
+/// `<home>/sessions`, created owner-only if missing.
+fn sessions_dir(home: &Path) -> Result<PathBuf, MailError> {
     let dir = home.join("sessions");
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -362,6 +385,62 @@ fn save_session(home: &Path, role: &str, cached: &Cached) -> Result<(), MailErro
         builder.mode(0o700);
     }
     builder.create(&dir)?;
+    Ok(dir)
+}
+
+/// An exclusive per-role lock file, `<home>/sessions/<role>.lock`, removed on drop. A lock older
+/// than [`STALE_LOCK`] was left by a crashed command and is broken.
+struct RoleLock(PathBuf);
+
+impl RoleLock {
+    fn acquire(home: &Path, role: &str) -> Result<RoleLock, MailError> {
+        let path = sessions_dir(home)?.join(format!("{role}.lock"));
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(RoleLock(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age > STALE_LOCK);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+            if Instant::now() >= deadline {
+                return Err(MailError::Usage(format!(
+                    "another synapse command is claiming `{role}`; try again"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Drop for RoleLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn load_session(home: &Path, role: &str) -> Option<Cached> {
+    let text = std::fs::read_to_string(session_path(home, role)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Write the session atomically and owner-only: a temp file created `0600` on Unix (on Windows it
+/// inherits the home's user-profile ACL, as the announce file does), then renamed.
+fn save_session(home: &Path, role: &str, cached: &Cached) -> Result<(), MailError> {
+    let dir = sessions_dir(home)?;
     let temp = dir.join(format!(".tmp-{role}-{}", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);

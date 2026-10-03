@@ -24,6 +24,10 @@ base64 = "0.22"
 ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+# Only for `setsid` when auto-starting the daemon (see mail.rs).
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # Only to stop the auto-started daemon inheriting this process's stdio handles (see mail.rs).
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation"] }

@@ -11,7 +11,7 @@
 
 mod mail;
 
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -146,6 +146,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
             id,
             message,
         } => {
+            check_role(&role)?;
             let to = if to.contains('@') {
                 to
             } else {
@@ -153,13 +154,18 @@ fn run(cli: Cli) -> Result<(), MailError> {
             };
             let body = match message {
                 Some(text) => text.into_bytes(),
+                None if std::io::stdin().is_terminal() => {
+                    return Err(MailError::Usage(
+                        "give the message as an argument, or pipe it on standard input".into(),
+                    ));
+                }
                 None => {
                     let mut bytes = Vec::new();
                     std::io::stdin().read_to_end(&mut bytes)?;
                     bytes
                 }
             };
-            // Chosen here, not by the daemon, so a send retried after a re-claim is a duplicate.
+            // Chosen here, not by the daemon, so resending with `--id` is a duplicate, not a copy.
             let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let daemon = connect(&home, &role)?;
             let reply = daemon.call(
@@ -207,11 +213,17 @@ fn run(cli: Cli) -> Result<(), MailError> {
 
 /// Validate the role before it names a file or starts a daemon, then connect.
 fn connect(home: &std::path::Path, role: &RoleArg) -> Result<Daemon, MailError> {
-    if !valid_name(&role.role) {
-        return Err(MailError::Usage(format!(
+    check_role(role)?;
+    Daemon::connect(home)
+}
+
+fn check_role(role: &RoleArg) -> Result<(), MailError> {
+    if valid_name(&role.role) {
+        Ok(())
+    } else {
+        Err(MailError::Usage(format!(
             "`{}` is not a role name: use [A-Za-z0-9_-], at most 64 characters",
             role.role
-        )));
+        )))
     }
-    Daemon::connect(home)
 }

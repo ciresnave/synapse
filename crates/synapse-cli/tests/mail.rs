@@ -100,7 +100,7 @@ fn kill(pid: u32) {
         .args(["/PID", &pid.to_string(), "/F"])
         .output();
     #[cfg(unix)]
-    let _ = Command::new("kill").arg(pid.to_string()).output();
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
 }
 
 fn alive(pid: u32) -> bool {
@@ -179,36 +179,73 @@ fn a_command_against_a_stopped_daemon_starts_it() {
     assert!(alive(pid));
 }
 
+/// Start both commands back to back (not via `output()`, which runs each to completion in turn
+/// on its thread), so their auto-starts overlap. Several fresh homes, since a race need not
+/// happen on any one try; how many tries really raced is printed.
 #[test]
 fn two_concurrent_first_commands_leave_one_daemon() {
-    let home = Home::new();
-    let a = home.command(&["claim", "--role", "alpha"]);
-    let b = home.command(&["claim", "--role", "beta"]);
-    let (out_a, out_b) = std::thread::scope(|s| {
-        let a = s.spawn(move || { a }.output().unwrap());
-        let b = s.spawn(move || { b }.output().unwrap());
-        (a.join().unwrap(), b.join().unwrap())
-    });
-    assert_eq!(out_a.status.code(), Some(0), "{out_a:?}");
-    assert_eq!(out_b.status.code(), Some(0), "{out_b:?}");
+    let mut raced = 0;
+    for _ in 0..5 {
+        let home = Home::new();
+        let piped = |mut cmd: Command| {
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let a = piped(home.command(&["claim", "--role", "alpha"]));
+        let b = piped(home.command(&["claim", "--role", "beta"]));
+        let out_a = a.wait_with_output().unwrap();
+        let out_b = b.wait_with_output().unwrap();
+        assert_eq!(out_a.status.code(), Some(0), "{out_a:?}");
+        assert_eq!(out_b.status.code(), Some(0), "{out_b:?}");
 
-    let winner = home.announced_pid().expect("a daemon announced itself");
-    let spawned: Vec<u32> = spawned_pids(&out_a)
-        .into_iter()
-        .chain(spawned_pids(&out_b))
-        .collect();
-    assert!(!spawned.is_empty(), "someone started the daemon");
-    assert!(
-        spawned.contains(&winner),
-        "{spawned:?} vs announced {winner}"
-    );
-    for pid in spawned.iter().filter(|&&p| p != winner) {
-        wait_dead(*pid);
-        assert!(!alive(*pid), "a second daemon (pid {pid}) is still running");
+        let winner = home.announced_pid().expect("a daemon announced itself");
+        let spawned: Vec<u32> = spawned_pids(&out_a)
+            .into_iter()
+            .chain(spawned_pids(&out_b))
+            .collect();
+        assert!(!spawned.is_empty(), "someone started the daemon");
+        assert!(
+            spawned.contains(&winner),
+            "{spawned:?} vs announced {winner}"
+        );
+        if spawned.len() > 1 {
+            raced += 1;
+        }
+        for pid in spawned.iter().filter(|&&p| p != winner) {
+            wait_dead(*pid);
+            assert!(!alive(*pid), "a second daemon (pid {pid}) is still running");
+        }
+        assert!(alive(winner));
+        // Both roles were claimed on the one daemon.
+        assert_eq!(role_epoch(&home, "alpha", "beta@acct"), 1);
     }
-    assert!(alive(winner));
-    // Both roles were claimed on the one daemon.
-    assert_eq!(role_epoch(&home, "alpha", "beta@acct"), 1);
+    eprintln!("both commands started a daemon in {raced} of 5 tries");
+}
+
+/// Two first commands for one role, at once, on a running daemon: one claim, not two that
+/// supersede each other (review I4).
+#[test]
+fn concurrent_first_commands_for_one_role_claim_once() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "beta"]); // the daemon is up
+    for role in ["g1", "g2", "g3"] {
+        let start = |args: &[&str]| {
+            home.command(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let a = start(&["send", "--role", role, "--to", role, "one"]);
+        let b = start(&["inbox", "--role", role]);
+        let out_a = a.wait_with_output().unwrap();
+        let out_b = b.wait_with_output().unwrap();
+        assert_eq!(out_a.status.code(), Some(0), "{out_a:?}");
+        assert_eq!(out_b.status.code(), Some(0), "{out_b:?}");
+        assert_eq!(role_epoch(&home, "beta", &format!("{role}@acct")), 1);
+    }
 }
 
 #[test]
@@ -291,6 +328,27 @@ fn a_superseded_session_is_reported_not_stolen() {
     // Nothing re-claimed behind the user's back. (`list` itself must use a current session.)
     home.ok(&["claim", "--role", "beta"]);
     assert_eq!(role_epoch(&home, "beta", "alpha@acct"), 2);
+}
+
+/// The daemon forgets sessions more than a few takeovers old, so their calls get 401, not 409.
+/// That must not be answered by re-claiming either (review I1).
+#[test]
+fn a_long_superseded_session_is_not_reclaimed_on_401() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    let cache = home.path().join("sessions").join("alpha.json");
+    let stale = std::fs::read(&cache).expect("the session is cached");
+    for _ in 0..10 {
+        home.ok(&["claim", "--role", "alpha"]);
+    }
+    std::fs::write(&cache, stale).unwrap();
+
+    let out = home.run(&["send", "--role", "alpha", "--to", "alpha", "late"]);
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unauthorized"), "{err}");
+    home.ok(&["claim", "--role", "beta"]);
+    assert_eq!(role_epoch(&home, "beta", "alpha@acct"), 11);
 }
 
 #[test]
