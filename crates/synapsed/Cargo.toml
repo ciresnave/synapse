@@ -2,7 +2,7 @@
 name = "synapsed"
 version.workspace = true
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "The Synapse daemon: one per user, on loopback, serving a durable role mailbox to any agent."
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ name = "synapsed"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "5.6.1" }
+synapse = { path = "../..", version = "5.6.2" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }

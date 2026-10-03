@@ -2,7 +2,7 @@
 name = "synapse-mcp"
 version.workspace = true
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "MCP stdio adapter for Synapse: lets any MCP client send, poll, list and ack."
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ name = "synapse-mcp"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "5.6.1" }
+synapse = { path = "../..", version = "5.6.2" }
 rmcp = { version = "3.4.0", features = ["server", "macros", "transport-io", "schemars"] }
 schemars = "1.2.2"
 serde = { version = "1.0", features = ["derive"] }
