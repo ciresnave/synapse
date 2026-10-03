@@ -410,3 +410,180 @@ async fn verdicts_survive_a_real_udp_hop() {
         }
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #77: rejection branches no test used to execute. Each test pairs the rejection (negative
+// control) with the same path accepting the good input (positive control).
+// ---------------------------------------------------------------------------------------------
+
+fn account(seed: u8) -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+}
+
+/// A revocation from `issuer`, serial derived from `n`, issued `n` seconds after a fixed epoch so
+/// "oldest" is well defined.
+fn revocation_from(issuer: &ed25519_dalek::SigningKey, n: u32) -> synapse::certificate::Revocation {
+    let mut serial = [0u8; 16];
+    serial[..4].copy_from_slice(&n.to_be_bytes());
+    synapse::certificate::Revocation::sign(
+        synapse::certificate::Revocation {
+            version: 1,
+            serial,
+            issuer_key_id: key_id(&issuer.verifying_key().to_bytes()),
+            issued_at: chrono::DateTime::from_timestamp(1_700_000_000 + i64::from(n), 0)
+                .expect("valid timestamp"),
+            reason: "test".to_string(),
+            signature: [0u8; 64],
+        },
+        issuer,
+    )
+}
+
+fn serial_of(n: u32) -> [u8; 16] {
+    let mut serial = [0u8; 16];
+    serial[..4].copy_from_slice(&n.to_be_bytes());
+    serial
+}
+
+/// Guards `add_revocation` refusing a revocation whose signature does not verify against the
+/// pinned issuer key: it returns `false` and the serial is not revoked. The genuine one is stored.
+#[test]
+fn a_revocation_with_a_bad_signature_is_refused_and_a_genuine_one_is_stored() {
+    let issuer = account(50);
+    let issuer_id = key_id(&issuer.verifying_key().to_bytes());
+    let mut store = TrustStore::new();
+    store.pin_account_key("acct", issuer.verifying_key().to_bytes());
+
+    let mut forged = revocation_from(&issuer, 1);
+    forged.signature[0] ^= 1;
+    assert!(!store.add_revocation(forged));
+    assert!(!store.is_revoked(&issuer_id, &serial_of(1)));
+    assert_eq!(store.revocation_count(), 0);
+
+    assert!(store.add_revocation(revocation_from(&issuer, 1)));
+    assert!(store.is_revoked(&issuer_id, &serial_of(1)));
+    assert_eq!(store.revocation_count(), 1);
+}
+
+/// Guards the store-wide `MAX_REVOCATIONS` (4096) eviction: with nine issuers, one at the
+/// per-issuer cap (512) and eight holding 448, the store is exactly full (4096). The next
+/// revocation, from another issuer, evicts the OLDEST entry of the biggest issuer, and the total
+/// stays at the cap. Below the cap nothing is evicted.
+#[test]
+fn the_total_revocation_cap_evicts_the_biggest_issuers_oldest() {
+    // Control below the cap: nothing is evicted.
+    let small = account(60);
+    let mut few = TrustStore::new();
+    few.pin_account_key("small", small.verifying_key().to_bytes());
+    for n in 0..5 {
+        assert!(few.add_revocation(revocation_from(&small, n)));
+    }
+    assert_eq!(few.revocation_count(), 5);
+    for n in 0..5 {
+        assert!(few.is_revoked(&key_id(&small.verifying_key().to_bytes()), &serial_of(n)));
+    }
+
+    let issuers: Vec<_> = (0..9u8).map(|i| account(100 + i)).collect();
+    let ids: Vec<_> = issuers
+        .iter()
+        .map(|k| key_id(&k.verifying_key().to_bytes()))
+        .collect();
+    let mut store = TrustStore::new();
+    for (i, k) in issuers.iter().enumerate() {
+        store.pin_account_key(format!("acct{i}"), k.verifying_key().to_bytes());
+    }
+    // Serial numbers are globally unique so `n` also orders issued_at: issuer 0 is the biggest and
+    // its entries are the oldest of all. Every insert stays within the per-issuer cap.
+    let mut next = 0u32;
+    for _ in 0..512 {
+        assert!(store.add_revocation(revocation_from(&issuers[0], next)));
+        next += 1;
+    }
+    for issuer in &issuers[1..] {
+        for _ in 0..448 {
+            assert!(store.add_revocation(revocation_from(issuer, next)));
+            next += 1;
+        }
+    }
+    assert_eq!(store.revocation_count(), 4096, "precondition: exactly full");
+    assert!(
+        store.is_revoked(&ids[0], &serial_of(0)),
+        "nothing evicted yet"
+    );
+
+    // One more from issuer 1 (448 -> 449 entries; issuer 0 still holds the most, 512).
+    assert!(store.add_revocation(revocation_from(&issuers[1], next)));
+    assert_eq!(store.revocation_count(), 4096, "the total stays at the cap");
+    assert!(
+        !store.is_revoked(&ids[0], &serial_of(0)),
+        "the biggest issuer's oldest entry was evicted"
+    );
+    assert!(
+        store.is_revoked(&ids[0], &serial_of(1)),
+        "only its oldest entry was evicted"
+    );
+    assert!(
+        store.is_revoked(&ids[1], &serial_of(512)),
+        "other issuers keep theirs"
+    );
+    assert!(
+        store.is_revoked(&ids[1], &serial_of(next)),
+        "and the new entry is stored"
+    );
+}
+
+/// Guards the chain LINK-count limit (`max_chain_links`, 64) as distinct from the byte limit: with
+/// `max_chain_bytes` raised so the byte check passes, 65 links are refused as `ChainTooLarge`,
+/// while 64 links are not refused for size (they reach validation and fail there as
+/// `InvalidChain`, since these links are not a real chain).
+#[test]
+fn a_chain_over_the_link_limit_is_refused_by_link_count_not_bytes() {
+    let acct = account(70);
+    let holder = account(71);
+    let link = synapse::certificate::AgentCertificate::sign(
+        synapse::certificate::AgentCertificate {
+            version: 1,
+            serial: [1u8; 16],
+            issuer_key_id: key_id(&acct.verifying_key().to_bytes()),
+            subject_label: "agent".to_string(),
+            subject_global_id: "agent@alice.test".to_string(),
+            subject_signing_key: holder.verifying_key().to_bytes(),
+            subject_sealing_key: [0u8; 32],
+            not_before: chrono::Utc::now() - chrono::Duration::minutes(1),
+            not_after: chrono::Utc::now() + chrono::Duration::hours(1),
+            permissions: vec![synapse::certificate::Permission::Send],
+            may_delegate: 0,
+            signature: [0u8; 64],
+        },
+        &acct,
+    );
+
+    let mut store = TrustStore::new();
+    store.pin_account_key("acct", acct.verifying_key().to_bytes());
+    store.max_chain_bytes = 10 * 1024 * 1024;
+
+    let verdict_for = |links: usize| {
+        let chain = vec![link.clone(); links];
+        let text = synapse::certificate::chain_to_pem(&chain);
+        assert!(
+            text.len() > 16 * 1024 && text.len() <= store.max_chain_bytes,
+            "precondition: the default byte limit would refuse this chain, the raised one passes"
+        );
+        let mut message = unsigned_message();
+        message.add_metadata(synapse::certificate::CHAIN_KEY, text);
+        store.verify(&message)
+    };
+
+    assert_eq!(
+        verdict_for(65),
+        SenderVerdict::Unverifiable {
+            reason: UnverifiableReason::ChainTooLarge
+        }
+    );
+    assert_eq!(
+        verdict_for(64),
+        SenderVerdict::Unverifiable {
+            reason: UnverifiableReason::InvalidChain
+        }
+    );
+}

@@ -696,3 +696,162 @@ async fn duplicate_host_headers_are_421() {
     assert!(reply.starts_with("HTTP/1.1 421"), "{reply}");
     d.stop().await;
 }
+
+/// Queue one message to `to` with the session `token`'s role as sender; returns its full id.
+async fn send_to(d: &Running, token: &str, to: &str, body: &[u8]) -> String {
+    let (s, sent, text) = post(
+        d,
+        "/v1/send",
+        Some(token),
+        json!({"to": to, "body_b64": B64.encode(body)}),
+    )
+    .await;
+    assert_eq!(s, 200, "{text}");
+    assert_eq!(sent["outcome"], "queued");
+    sent["message_id"].as_str().unwrap().to_string()
+}
+
+/// #77 D1: acking a message the caller's epoch does not hold the lease on is 403 `not_your_lease`.
+/// Negative: a queued-but-never-fetched message, and a message leased by a superseded epoch of the
+/// same role. Positive: the epoch that holds the lease acks it.
+#[tokio::test]
+async fn acking_a_message_you_do_not_hold_the_lease_on_is_403_not_your_lease() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (beta, _) = claim(&d, "beta", 2).await;
+
+    // Never fetched, so no lease at all.
+    let unleased = send_to(&d, &alpha, "beta@acct", b"one").await;
+    let (s, reply, _) = post(&d, "/v1/ack", Some(&beta), json!({"message_id": unleased})).await;
+    assert_eq!(s, 403, "{reply}");
+    assert_eq!(reply["error"], "not_your_lease");
+
+    // Positive control: once beta fetches it (taking the lease), the same ack succeeds.
+    let (s, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
+    assert_eq!(s, 200, "{got}");
+    assert_eq!(got["messages"][0]["message_id"], unleased.as_str());
+    let (s, acked, _) = post(&d, "/v1/ack", Some(&beta), json!({"message_id": unleased})).await;
+    assert_eq!(s, 200, "{acked}");
+    assert_eq!(acked["outcome"], "removed");
+
+    // Leased by beta's first epoch; after a takeover the new epoch does not hold that lease.
+    let leased = send_to(&d, &alpha, "beta@acct", b"two").await;
+    let (_, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
+    assert_eq!(got["messages"][0]["message_id"], leased.as_str());
+    let (beta2, _) = claim(&d, "beta", 3).await;
+    let (s, reply, _) = post(&d, "/v1/ack", Some(&beta2), json!({"message_id": leased})).await;
+    assert_eq!(s, 403, "{reply}");
+    assert_eq!(reply["error"], "not_your_lease");
+    d.stop().await;
+}
+
+/// #77 D3: a client `message_id` containing `/` or a control character is 400 `malformed` (ids are
+/// scoped as `<sender>/<id>`, so a `/` would forge another namespace). `ab` is queued.
+#[tokio::test]
+async fn a_message_id_with_a_slash_or_control_char_is_400_malformed() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (_beta, _) = claim(&d, "beta", 2).await;
+    for bad in ["a/b", "a\u{7}"] {
+        let (s, reply, _) = post(
+            &d,
+            "/v1/send",
+            Some(&alpha),
+            json!({"to": "beta@acct", "message_id": bad, "body_b64": B64.encode(b"x")}),
+        )
+        .await;
+        assert_eq!(s, 400, "{bad:?}: {reply}");
+        assert_eq!(reply["error"], "malformed", "{bad:?}");
+    }
+    let (s, reply, _) = post(
+        &d,
+        "/v1/send",
+        Some(&alpha),
+        json!({"to": "beta@acct", "message_id": "ab", "body_b64": B64.encode(b"x")}),
+    )
+    .await;
+    assert_eq!(s, 200, "{reply}");
+    assert_eq!(reply["outcome"], "queued");
+    d.stop().await;
+}
+
+/// The presence summary `list` reports for `role`.
+async fn summary_of(d: &Running, token: &str, role: &str) -> Value {
+    let (s, listed, _) = post_get_list(d, token).await;
+    assert_eq!(s, 200, "{listed}");
+    listed["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["global_id"] == role)
+        .expect("role listed")["summary"]
+        .clone()
+}
+
+async fn post_get_list(d: &Running, token: &str) -> (u16, Value, String) {
+    let resp = client()
+        .get(d.url("/v1/list"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::Null),
+        text,
+    )
+}
+
+/// #77 D4: a heartbeat summary over 500 bytes, or containing a control character, is 400
+/// `malformed` and leaves the stored summary unchanged. Exactly 500 characters is accepted.
+#[tokio::test]
+async fn a_heartbeat_summary_too_long_or_with_a_control_char_is_400_malformed() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    for bad in ["x".repeat(501), "line one\nline two".to_string()] {
+        let (s, reply, _) = post(&d, "/v1/heartbeat", Some(&alpha), json!({"summary": bad})).await;
+        assert_eq!(s, 400, "{reply}");
+        assert_eq!(reply["error"], "malformed");
+    }
+    assert_eq!(summary_of(&d, &alpha, "alpha@acct").await, Value::Null);
+
+    let ok = "x".repeat(500);
+    let (s, reply, _) = post(&d, "/v1/heartbeat", Some(&alpha), json!({"summary": ok})).await;
+    assert_eq!(s, 200, "{reply}");
+    assert_eq!(summary_of(&d, &alpha, "alpha@acct").await, json!(ok));
+    d.stop().await;
+}
+
+/// #77 D5: once a recipient's mailbox holds `max_bytes` (64 MiB) of bodies, the next send is 413
+/// `mailbox_full` (the daemon's own limit, not axum's 2 MB request cap: each request body here is
+/// about 2 MB of base64 and every one before the full mailbox is accepted). Every send before
+/// that is queued, and a small message that still fits is queued afterwards.
+#[tokio::test]
+async fn a_full_mailbox_is_413_mailbox_full() {
+    const BODY: usize = 1_500_000; // base64 inflates to 2_000_000 < axum's 2 MiB request limit
+    const CAP: usize = 64 * 1024 * 1024;
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (_beta, _) = claim(&d, "beta", 2).await;
+    let body = vec![7u8; BODY];
+
+    let fits = CAP / BODY;
+    for _ in 0..fits {
+        send_to(&d, &alpha, "beta@acct", &body).await;
+    }
+    let (s, reply, text) = post(
+        &d,
+        "/v1/send",
+        Some(&alpha),
+        json!({"to": "beta@acct", "body_b64": B64.encode(&body)}),
+    )
+    .await;
+    assert_eq!(s, 413, "{text}");
+    assert_eq!(reply["error"], "mailbox_full");
+
+    // The cap is on bytes: a small message that still fits is accepted.
+    send_to(&d, &alpha, "beta@acct", b"small").await;
+    d.stop().await;
+}

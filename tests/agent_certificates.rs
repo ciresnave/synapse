@@ -560,3 +560,261 @@ async fn a_relayed_revocation_is_accepted_only_for_a_pinned_account_key() {
     let _ = drain(&stranger).await;
     assert_eq!(stranger.trust_store().await.revocation_count(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// #77: rejection branches no test used to execute. Each test pairs the rejection (negative
+// control) with the same path accepting the good input (positive control).
+// ---------------------------------------------------------------------------------------------
+
+/// No serial is revoked: these tests are about the validity rules, not revocation.
+struct NoRevocations;
+
+impl synapse::certificate::RevocationLookup for NoRevocations {
+    fn is_revoked(&self, _issuer_key_id: &str, _serial: &[u8; 16]) -> bool {
+        false
+    }
+}
+
+/// Seconds after a fixed epoch, so validity windows are exact.
+fn at(secs: i64) -> chrono::DateTime<Utc> {
+    chrono::DateTime::from_timestamp(1_700_000_000 + secs, 0).expect("valid timestamp")
+}
+
+/// An unsigned certificate for `subject`, vouched for by `issuer`, valid over `[from, to]`.
+fn windowed(
+    issuer: &SigningKey,
+    subject: &SigningKey,
+    id: &str,
+    from: i64,
+    to: i64,
+    may_delegate: u8,
+) -> AgentCertificate {
+    AgentCertificate {
+        version: 1,
+        serial: [3u8; 16],
+        issuer_key_id: synapse::sender_auth::key_id(&issuer.verifying_key().to_bytes()),
+        subject_label: "agent".to_string(),
+        subject_global_id: id.to_string(),
+        subject_signing_key: subject.verifying_key().to_bytes(),
+        subject_sealing_key: [0u8; 32],
+        not_before: at(from),
+        not_after: at(to),
+        permissions: vec![Permission::Send],
+        may_delegate,
+        signature: [0u8; 64],
+    }
+}
+
+/// Validate `chain` (leaf first) rooted at `account`'s key.
+fn validate(
+    chain: &[AgentCertificate],
+    account: &SigningKey,
+    now: chrono::DateTime<Utc>,
+) -> Result<synapse::certificate::VerifiedChain, synapse::certificate::ChainError> {
+    let public = account.verifying_key().to_bytes();
+    let id = synapse::sender_auth::key_id(&public);
+    synapse::certificate::validate_chain(
+        chain,
+        &move |wanted: &str| (wanted == id).then_some(public),
+        &NoRevocations,
+        now,
+    )
+}
+
+/// A two-link chain `[child, root]`: `root` is signed by the account, `child` by root's subject key.
+/// The child's window is `[100, 900]` inside the root's `[0, 1000]`.
+fn two_link_chain(declared_issuer: Option<String>) -> (Vec<AgentCertificate>, SigningKey) {
+    let account = account_key(40);
+    let root_subject = account_key(41);
+    let child_subject = account_key(42);
+    let root = AgentCertificate::sign(
+        windowed(&account, &root_subject, "agent@host", 0, 1000, 1),
+        &account,
+    );
+    let mut child = windowed(
+        &root_subject,
+        &child_subject,
+        "worker.agent@host",
+        100,
+        900,
+        0,
+    );
+    if let Some(declared) = declared_issuer {
+        child.issuer_key_id = declared;
+    }
+    // Signed by the parent (root's subject key) AFTER the declared issuer is set, so the signature
+    // is genuine and only the declared `issuer_key_id` can be wrong.
+    let child = AgentCertificate::sign(child, &root_subject);
+    (vec![child, root], account)
+}
+
+/// Guards `validate_chain` refusing a link whose signature is genuine but whose declared
+/// `issuer_key_id` does not name its parent. The correctly-declared cert is accepted.
+#[test]
+fn a_link_declaring_the_wrong_issuer_key_id_is_refused_though_correctly_signed() {
+    let (good, account) = two_link_chain(None);
+    assert!(
+        good[0].verify_signature(&account_key(41).verifying_key().to_bytes()),
+        "precondition: the child's signature is genuine"
+    );
+    assert!(validate(&good, &account, at(500)).is_ok());
+
+    let (bad, account) = two_link_chain(Some("0".repeat(64)));
+    assert!(
+        bad[0].verify_signature(&account_key(41).verifying_key().to_bytes()),
+        "precondition: the mismatching cert is still validly signed by its parent"
+    );
+    assert_eq!(
+        validate(&bad, &account, at(500)).unwrap_err(),
+        synapse::certificate::ChainError::BadSignature
+    );
+}
+
+/// Guards `validate_chain` refusing a non-root link before its `not_before`, while the parent's
+/// window is open (so only the link's own window fails). Inside the window it is accepted.
+#[test]
+fn a_link_not_yet_valid_is_refused_and_one_inside_its_window_is_accepted() {
+    let (chain, account) = two_link_chain(None);
+    assert_eq!(
+        validate(&chain, &account, at(50)).unwrap_err(),
+        synapse::certificate::ChainError::NotYetValid
+    );
+    assert!(validate(&chain, &account, at(100)).is_ok());
+}
+
+/// Guards `validate_chain` refusing a non-root link after its `not_after` while the parent's
+/// window is still open. Inside the window it is accepted.
+#[test]
+fn an_expired_link_is_refused_and_one_inside_its_window_is_accepted() {
+    let (chain, account) = two_link_chain(None);
+    assert_eq!(
+        validate(&chain, &account, at(950)).unwrap_err(),
+        synapse::certificate::ChainError::Expired
+    );
+    assert!(validate(&chain, &account, at(900)).is_ok());
+}
+
+fn a_certificate() -> AgentCertificate {
+    let account = account_key(43);
+    AgentCertificate::sign(
+        windowed(&account, &account_key(44), "agent@host", 0, 1000, 0),
+        &account,
+    )
+}
+
+fn a_revocation() -> Revocation {
+    signed_revocation(&account_key(45), [5u8; 16])
+}
+
+/// The PEM body of `text` (one block), for tampering with.
+fn pem_body(text: &str) -> Vec<u8> {
+    pem::parse(text).expect("valid pem").contents().to_vec()
+}
+
+fn pem_with(label: &str, body: Vec<u8>) -> String {
+    pem::encode(&pem::Pem::new(label, body))
+}
+
+/// Guards `AgentCertificate::from_pem` refusing a wrong PEM label, a wrong domain tag and trailing
+/// bytes, each as `Malformed`; the unmodified PEM parses to the same certificate.
+#[test]
+fn certificate_pem_with_a_wrong_label_tag_or_length_is_malformed() {
+    use synapse::certificate::ChainError;
+    let cert = a_certificate();
+    let text = cert.to_pem();
+    let parsed = AgentCertificate::from_pem(&text).expect("the valid PEM parses");
+    assert_eq!(parsed.serial, cert.serial);
+    assert_eq!(parsed.signature, cert.signature);
+
+    // Wrong label (a revocation's label on a certificate body).
+    let relabelled = pem_with("SYNAPSE REVOCATION", pem_body(&text));
+    assert_eq!(
+        AgentCertificate::from_pem(&relabelled).unwrap_err(),
+        ChainError::Malformed
+    );
+
+    // Wrong domain tag: flip the first tag byte (the body starts with a 4-byte length).
+    let mut body = pem_body(&text);
+    body[4] ^= 1;
+    assert_eq!(
+        AgentCertificate::from_pem(&pem_with("SYNAPSE AGENT CERT", body)).unwrap_err(),
+        ChainError::Malformed
+    );
+
+    // Wrong trailing length: one extra byte after the signature.
+    let mut body = pem_body(&text);
+    body.push(0);
+    assert_eq!(
+        AgentCertificate::from_pem(&pem_with("SYNAPSE AGENT CERT", body)).unwrap_err(),
+        ChainError::Malformed
+    );
+}
+
+/// Guards `Revocation::from_pem` the same way: wrong label, wrong domain tag, trailing bytes are
+/// `Malformed`; the unmodified PEM parses.
+#[test]
+fn revocation_pem_with_a_wrong_label_tag_or_length_is_malformed() {
+    use synapse::certificate::ChainError;
+    let revocation = a_revocation();
+    let text = revocation.to_pem();
+    let parsed = Revocation::from_pem(&text).expect("the valid PEM parses");
+    assert_eq!(parsed.serial, revocation.serial);
+    assert_eq!(parsed.signature, revocation.signature);
+
+    let relabelled = pem_with("SYNAPSE AGENT CERT", pem_body(&text));
+    assert_eq!(
+        Revocation::from_pem(&relabelled).unwrap_err(),
+        ChainError::Malformed
+    );
+
+    let mut body = pem_body(&text);
+    body[4] ^= 1;
+    assert_eq!(
+        Revocation::from_pem(&pem_with("SYNAPSE REVOCATION", body)).unwrap_err(),
+        ChainError::Malformed
+    );
+
+    let mut body = pem_body(&text);
+    body.push(0);
+    assert_eq!(
+        Revocation::from_pem(&pem_with("SYNAPSE REVOCATION", body)).unwrap_err(),
+        ChainError::Malformed
+    );
+}
+
+/// 32 bytes that are not a valid Ed25519 public key (the y-coordinate has no point on the curve).
+fn invalid_ed25519_point() -> [u8; 32] {
+    (0..=255u8)
+        .map(|first| {
+            let mut bytes = [0u8; 32];
+            bytes[0] = first;
+            bytes[1] = 1;
+            bytes
+        })
+        .find(|bytes| ed25519_dalek::VerifyingKey::from_bytes(bytes).is_err())
+        .expect("some small y-coordinate is not on the curve")
+}
+
+/// Guards `verify_signature` returning `false` (not panicking, not accepting) when the issuer key
+/// is not a valid Ed25519 point, for certificates and revocations; the real key verifies.
+#[test]
+fn verify_signature_with_an_invalid_issuer_point_is_false() {
+    let bad = invalid_ed25519_point();
+    assert!(
+        ed25519_dalek::VerifyingKey::from_bytes(&bad).is_err(),
+        "precondition: the key is not a valid point"
+    );
+
+    let account = account_key(46);
+    let public = account.verifying_key().to_bytes();
+    let cert = AgentCertificate::sign(
+        windowed(&account, &account_key(47), "agent@host", 0, 1000, 0),
+        &account,
+    );
+    assert!(cert.verify_signature(&public));
+    assert!(!cert.verify_signature(&bad));
+
+    let revocation = signed_revocation(&account, [6u8; 16]);
+    assert!(revocation.verify_signature(&public));
+    assert!(!revocation.verify_signature(&bad));
+}

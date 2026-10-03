@@ -439,3 +439,66 @@ fn a_key_writable_by_a_broad_group_is_refused() {
         "{got:?}"
     );
 }
+
+/// #77 K1: a second writer of the account name is refused with `AccountExists`. Negative: the name
+/// file is already present while the key is absent (so the key is created, then the create-only
+/// name write loses). Positive: a fresh home is created.
+#[test]
+fn a_taken_account_name_is_refused_and_a_fresh_home_is_created() {
+    let taken = tempfile::tempdir().unwrap();
+    let account_dir = taken.path().join("account");
+    std::fs::create_dir_all(&account_dir).unwrap();
+    // Owner-only, as the keystore creates it; otherwise it refuses the directory before the name
+    // write is ever reached.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&account_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(account_dir.join("name"), b"someone").unwrap();
+    assert!(!account_key_path(taken.path()).exists());
+    let got = Keystore::init_account(taken.path(), "acct");
+    assert!(matches!(got, Err(KeystoreError::AccountExists)), "{got:?}");
+    assert_eq!(
+        std::fs::read(account_dir.join("name")).unwrap(),
+        b"someone",
+        "the existing name is untouched"
+    );
+
+    let fresh = tempfile::tempdir().unwrap();
+    let created = Keystore::init_account(fresh.path(), "acct").expect("a fresh home is created");
+    assert_eq!(created.account, "acct");
+}
+
+/// #77 K2 (best effort): threads race `init_account` on fresh homes, all released together, and
+/// exactly one wins per home while every loser gets `AccountExists`. Only a real race can reach
+/// the "key file created between the check and the write" branch, so this test cannot guarantee
+/// it executes; it guarantees the outcome is right whichever branch the race takes.
+#[test]
+fn racing_init_account_has_exactly_one_winner_per_home() {
+    const THREADS: usize = 8;
+    for round in 0..40 {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(THREADS);
+        let results: Vec<Result<_, KeystoreError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        Keystore::init_account(dir.path(), "acct")
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let winners = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(winners, 1, "round {round}: {results:?}");
+        for loser in results.iter().filter_map(|r| r.as_ref().err()) {
+            assert!(
+                matches!(loser, KeystoreError::AccountExists),
+                "round {round}: {loser:?}"
+            );
+        }
+        Keystore::open(dir.path()).expect("the winner's account opens");
+    }
+}
