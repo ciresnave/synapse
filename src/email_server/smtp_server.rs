@@ -2,12 +2,15 @@
 /// High-performance SMTP server for EMRP
 use crate::error::{Result, SynapseError};
 use crate::types::SecureMessage;
+use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+
+use super::security::{EmailSecurity, InboundLimits, LoginLimits};
 use tracing::{debug, error, info};
 
 /// High-performance SMTP server optimized for EMRP
@@ -39,6 +42,8 @@ pub struct SynapseSmtpServer {
     auth_handler: Arc<dyn AuthHandler + Send + Sync>,
     /// Performance metrics
     metrics: Arc<Mutex<ServerMetrics>>,
+    /// Login and inbound limiters, and the event sink (hardening P7).
+    security: EmailSecurity,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +93,8 @@ pub struct TlsConfig {
 struct ClientSession {
     #[allow(dead_code)]
     id: String,
+    /// The peer's IP, the key the limiters use.
+    source: String,
     authenticated: bool,
     current_message: Option<SmtpMessage>,
     #[allow(dead_code)]
@@ -171,7 +178,35 @@ impl SynapseSmtpServer {
             clients: Arc::new(Mutex::new(HashMap::new())),
             auth_handler,
             metrics: Arc::new(Mutex::new(ServerMetrics::default())),
+            security: EmailSecurity::default(),
         }
+    }
+
+    /// Replaces the login guard's tuning for SMTP `AUTH` (hardening P7). The limits apply with or
+    /// without a sink.
+    #[must_use]
+    pub fn with_login_limits(mut self, limits: LoginLimits) -> Self {
+        self.security = self.security.with_login(limits);
+        self
+    }
+
+    /// Replaces the per-source connection and message limits (hardening P7).
+    #[must_use]
+    pub fn with_inbound_limits(mut self, limits: InboundLimits) -> Self {
+        self.security = self.security.with_inbound(limits);
+        self
+    }
+
+    /// Where security events go. The first call wins, and it reaches every clone of this server.
+    pub fn set_security_sink(&self, sink: Arc<dyn crate::security_events::SecuritySink>) {
+        self.security.set_sink(sink);
+    }
+
+    /// Shares one set of limiters with a paired IMAP server, so guesses split across the two still
+    /// count against one budget.
+    pub(crate) fn with_security(mut self, security: EmailSecurity) -> Self {
+        self.security = security;
+        self
     }
 
     /// Start the SMTP server: bind `config.port` and serve it. Callers that need to know the port
@@ -220,7 +255,15 @@ impl SynapseSmtpServer {
     }
 
     /// Handle individual SMTP connection
-    async fn handle_connection(&self, stream: TcpStream) -> Result<()> {
+    async fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
+        let source = super::security::source_ip(stream.peer_addr());
+        if !self.security.connection_allowed(&source, Utc::now()) {
+            stream
+                .write_all(b"421 4.7.0 Too many connections, try again later\r\n")
+                .await?;
+            stream.flush().await?;
+            return Ok(());
+        }
         let (read_half, write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
@@ -233,6 +276,7 @@ impl SynapseSmtpServer {
                     .unwrap()
                     .as_millis()
             ),
+            source,
             authenticated: false,
             current_message: None,
             connected_at: SystemTime::now(),
@@ -404,7 +448,16 @@ impl SynapseSmtpServer {
                                 if auth_parts.len() >= 3 {
                                     let username = auth_parts[1];
                                     let password = auth_parts[2];
+                                    let surface = "email/smtp-auth";
+                                    let source = session.source.clone();
+                                    let now = Utc::now();
 
+                                    // A locked username or source reads exactly like a wrong
+                                    // password, and the password is not checked (hardening P7).
+                                    if !self.security.login_allowed(surface, username, &source, now)
+                                    {
+                                        return Ok("535 Authentication failed\r\n".to_string());
+                                    }
                                     match self.auth_handler.authenticate(username, password) {
                                         Ok(true) => {
                                             session.authenticated = true;
@@ -413,6 +466,11 @@ impl SynapseSmtpServer {
                                             );
                                         }
                                         Ok(false) => {
+                                            // Recorded first, then answered after the delay.
+                                            let hold = self
+                                                .security
+                                                .login_failed(surface, username, &source, now);
+                                            tokio::time::sleep(hold).await;
                                             return Ok("535 Authentication failed\r\n".to_string());
                                         }
                                         Err(_) => {
@@ -431,6 +489,9 @@ impl SynapseSmtpServer {
             "MAIL" => {
                 if self.config.require_auth && !session.authenticated {
                     return Ok("530 Authentication required\r\n".to_string());
+                }
+                if !self.security.message_allowed(&session.source, Utc::now()) {
+                    return Ok("451 4.7.1 Too many messages, try again later\r\n".to_string());
                 }
 
                 if let Some(from_addr) = self.extract_email_from_mail_from(command) {
@@ -667,6 +728,7 @@ impl Clone for SynapseSmtpServer {
             clients: Arc::clone(&self.clients),
             auth_handler: Arc::clone(&self.auth_handler),
             metrics: Arc::clone(&self.metrics),
+            security: self.security.clone(),
         }
     }
 }

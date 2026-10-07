@@ -150,7 +150,7 @@ use super::tcp_unified::positive_limit;
 use crate::{
     email_server::{
         AuthHandler, ConnectivityDetector, ServerRecommendation, SmtpServerConfig,
-        SynapseSmtpServer,
+        SynapseSmtpServer, security::InboundLimits,
     },
     error::{Result, SynapseError},
     types::{EmailConfig, ImapConfig, SecureMessage, SmtpConfig},
@@ -197,6 +197,23 @@ pub const DEFAULT_MAX_QUEUED_BYTES: usize = 4 * DEFAULT_MAX_MESSAGE_SIZE;
 struct EmailLimits {
     max_message_size: usize,
     max_queued_bytes: usize,
+    /// Direct mode's per-source inbound limits (hardening P7, audit row 13).
+    inbound: InboundLimits,
+}
+
+/// The config key for how many connections per minute Direct mode's `SynapseSmtpServer` accepts
+/// from one source IP (hardening P7). A positive integer; defaults to `InboundLimits::default()`.
+pub const INBOUND_CONNECTIONS_PER_MINUTE_KEY: &str = "email_inbound_connections_per_minute";
+
+/// The config key for how many messages (`MAIL` commands) per minute Direct mode's
+/// `SynapseSmtpServer` accepts from one source IP (hardening P7). A positive integer.
+pub const INBOUND_MESSAGES_PER_MINUTE_KEY: &str = "email_inbound_messages_per_minute";
+
+/// A positive per-minute limit that fits a `u32`.
+fn per_minute_limit(config: &HashMap<String, String>, key: &str, default: u32) -> Result<u32> {
+    let limit = positive_limit(config, key, default as usize)?;
+    u32::try_from(limit)
+        .map_err(|_| SynapseError::Config(format!("{key} ({limit}) must be at most {}", u32::MAX)))
 }
 
 impl EmailLimits {
@@ -218,9 +235,24 @@ impl EmailLimits {
                 u32::MAX
             )));
         }
+        let defaults = InboundLimits::default();
+        let inbound = InboundLimits {
+            connections_per_minute: per_minute_limit(
+                config,
+                INBOUND_CONNECTIONS_PER_MINUTE_KEY,
+                defaults.connections_per_minute,
+            )?,
+            messages_per_minute: per_minute_limit(
+                config,
+                INBOUND_MESSAGES_PER_MINUTE_KEY,
+                defaults.messages_per_minute,
+            )?,
+            ..defaults
+        };
         Ok(Self {
             max_message_size,
             max_queued_bytes,
+            inbound,
         })
     }
 }
@@ -350,6 +382,7 @@ impl EmailTransportImpl {
         let EmailLimits {
             max_message_size,
             max_queued_bytes,
+            inbound,
         } = EmailLimits::from_config(config)?;
 
         let (smtp_server, listener) = if mode == EmailMode::Direct {
@@ -362,7 +395,7 @@ impl EmailTransportImpl {
 
             let auth_handler: Arc<dyn AuthHandler + Send + Sync> = Arc::new(AcceptAllAuthHandler);
             let message_store = Arc::new(StdMutex::new(HashMap::new()));
-            let smtp_server = Arc::new(SynapseSmtpServer::new(
+            let smtp_server = SynapseSmtpServer::new(
                 SmtpServerConfig {
                     port: local_port,
                     bind_scope,
@@ -380,7 +413,8 @@ impl EmailTransportImpl {
                 },
                 auth_handler,
                 message_store,
-            ));
+            );
+            let smtp_server = Arc::new(smtp_server.with_inbound_limits(inbound));
             (Some(smtp_server), Some(listener))
         } else {
             // RelayOut/External: no inbound listener (module docs) -- send relays through
@@ -523,6 +557,14 @@ impl EmailTransportImpl {
 impl Transport for EmailTransportImpl {
     fn transport_type(&self) -> TransportType {
         TransportType::Email
+    }
+
+    /// Direct mode's own `SynapseSmtpServer` records its inbound limits' events here (hardening
+    /// P7). RelayOut and External bind no listener, so they have nothing to record.
+    fn attach_security_sink(&self, sink: Arc<dyn crate::security_events::SecuritySink>) {
+        if let Some(server) = &self.smtp_server {
+            server.set_security_sink(sink);
+        }
     }
 
     fn capabilities(&self) -> TransportCapabilities {

@@ -165,6 +165,13 @@ pub trait Transport: TransportReceive + Send + Sync {
     /// Get transport metrics
     async fn metrics(&self) -> TransportMetrics;
 
+    /// Gives the transport the manager's security sink, before `start`, for events it records
+    /// itself (hardening P7: Direct-mode email's inbound limits). Most transports record nothing of
+    /// their own, so the default ignores it.
+    fn attach_security_sink(&self, sink: std::sync::Arc<dyn crate::security_events::SecuritySink>) {
+        let _ = sink;
+    }
+
     /// Send a connection offer to a target
     async fn send_connection_offer(&self, target: &str, offer: ConnectionOffer) -> Result<String> {
         let _ = (target, offer);

@@ -387,6 +387,11 @@ impl TransportManager {
             }
         };
 
+        // Events a transport records itself go to the same sink as the receive path's (P7).
+        if let Some(sink) = self.events.sink() {
+            transport.attach_security_sink(Arc::clone(sink));
+        }
+
         // Start the transport
         transport.start().await?;
 
