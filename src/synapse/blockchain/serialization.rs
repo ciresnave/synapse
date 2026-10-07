@@ -1,37 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use bincode::{BorrowDecode, Decode, Encode};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::fmt;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DateTimeWrapper(pub chrono::DateTime<chrono::Utc>);
-
-impl Default for DateTimeWrapper {
-    fn default() -> Self {
-        DateTimeWrapper(chrono::Utc::now())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct UuidWrapper(pub Uuid);
-
-impl fmt::Display for UuidWrapper {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+// The wrappers now live in the core (`crate::wire`), which carries no bincode. Their bincode impls
+// stay here with the legacy trees that use them, until step B2 of the bincode removal plan.
+pub use crate::wire::{DateTimeWrapper, UuidWrapper};
 
 impl DateTimeWrapper {
-    pub fn new(dt: chrono::DateTime<chrono::Utc>) -> Self {
-        DateTimeWrapper(dt)
-    }
-
-    pub fn into_inner(self) -> chrono::DateTime<chrono::Utc> {
-        self.0
-    }
-
     // Manual serialization methods that don't rely on derive macros
     pub fn to_bincode(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
         let timestamp = self.0.timestamp();
@@ -89,16 +65,6 @@ impl<'de, Context> BorrowDecode<'de, Context> for DateTimeWrapper {
         })?;
 
         Ok(DateTimeWrapper(dt))
-    }
-}
-
-impl UuidWrapper {
-    pub fn new(uuid: Uuid) -> Self {
-        UuidWrapper(uuid)
-    }
-
-    pub fn into_inner(self) -> Uuid {
-        self.0
     }
 }
 

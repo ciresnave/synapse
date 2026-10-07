@@ -18,18 +18,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// The signature algorithm a sender used. Any other value fails to parse.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Default,
-    Serialize,
-    Deserialize,
-    bincode::Encode,
-    bincode::Decode,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProofAlg {
     /// The sender had no key. Receivers mark the message `Unverifiable(Unsigned)`.
@@ -40,9 +29,7 @@ pub enum ProofAlg {
 }
 
 /// The sender's claim of authorship. Mandatory on the wire: a message without it does not parse.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, bincode::Encode, bincode::Decode,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SenderProof {
     pub alg: ProofAlg,
     /// Lowercase hex SHA-256 of the signer's 32-byte public key; empty when `alg` is `None`.

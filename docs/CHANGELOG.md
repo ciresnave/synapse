@@ -5,6 +5,32 @@ All notable changes to the Synapse project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 6.0.0 release-candidate series
+
+This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
+the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
+
+### Removed (breaking)
+
+The binary codec that RUSTSEC-2025-0141 flags as unmaintained has been removed from the core types
+(step B1 of `docs/superpowers/plans/2026-10-07-remove-bincode.md`). The wire format was always JSON
+and is unchanged.
+
+- `SimpleMessage::to_bytes` and `SimpleMessage::from_bytes`
+- `SecureMessage::to_bytes` and `SecureMessage::from_bytes`
+- `StreamChunk::to_bytes` and `StreamChunk::from_bytes`
+- `StreamMetadata::to_bytes` and `StreamMetadata::from_bytes`
+- The `bincode::Encode`/`Decode` impls on `MessageType`, `SecurityLevel`, `SimpleMessage`,
+  `SecureMessage`, `StreamPriority`, `StreamType`, `StreamChunk`, `StreamMetadata`,
+  `sender_auth::ProofAlg` and `sender_auth::SenderProof`.
+
+Use `serde_json::to_vec` and `serde_json::from_slice` instead, which is the wire format.
+
+### Moved
+
+- `DateTimeWrapper` and `UuidWrapper` now live in `synapse::wire`. `synapse::types::…` and
+  `synapse::blockchain::serialization::…` still re-export them.
+
 ## [1.0.0] - 2023-07-01
 
 ### Added

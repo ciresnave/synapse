@@ -88,13 +88,24 @@ fn removed_byte_codecs_are_gone() {
     );
 
     // (ii) Nothing calls them by type path.
-    let all = tracked(&["src", "crates", "tests", "examples", ":(exclude)tests/bincode_is_gone.rs"]);
+    let all = tracked(&[
+        "src",
+        "crates",
+        "tests",
+        "examples",
+        ":(exclude)tests/bincode_is_gone.rs",
+    ]);
     // Control: the same `Type::from_bytes` shape with another type is found, so the scan works.
     assert!(
         !files_containing(&all, "Signature::from_bytes").is_empty(),
         "control: Signature::from_bytes should be found"
     );
-    for ty in ["SimpleMessage", "SecureMessage", "StreamChunk", "StreamMetadata"] {
+    for ty in [
+        "SimpleMessage",
+        "SecureMessage",
+        "StreamChunk",
+        "StreamMetadata",
+    ] {
         for f in ["to_bytes", "from_bytes"] {
             let needle = format!("{ty}::{f}");
             let hits = files_containing(&all, &needle);
@@ -113,9 +124,8 @@ fn fixed_message() -> SecureMessage {
         b"payload".to_vec(),
         SecurityLevel::Authenticated,
     );
-    message.message_id = UuidWrapper::new(
-        uuid::Uuid::parse_str("6f0e8a3c-2b1d-4c5e-9a7f-0123456789ab").unwrap(),
-    );
+    message.message_id =
+        UuidWrapper::new(uuid::Uuid::parse_str("6f0e8a3c-2b1d-4c5e-9a7f-0123456789ab").unwrap());
     message.timestamp = DateTimeWrapper::new(
         chrono::DateTime::parse_from_rfc3339("2026-10-07T12:00:00.123456789Z")
             .unwrap()
