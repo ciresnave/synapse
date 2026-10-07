@@ -8,7 +8,7 @@ pub mod connectivity;
 pub mod imap_server;
 pub mod smtp_server;
 
-pub use auth::{SynapseAuthHandler, UserAccount, UserPermissions, create_test_auth_handler};
+pub use auth::{SynapseAuthHandler, UserAccount, UserPermissions};
 pub use connectivity::{ConnectivityAssessment, ConnectivityDetector, ServerRecommendation};
 pub use imap_server::{ImapServerConfig, SynapseImapServer};
 pub use smtp_server::{AuthHandler, SmtpServerConfig, SynapseSmtpServer};
@@ -217,54 +217,4 @@ impl SynapseEmailServer {
             ServerRecommendation::RunLocalServer { .. } | ServerRecommendation::RelayOnly { .. }
         )
     }
-}
-
-/// Create a test email server for development
-pub async fn create_test_email_server() -> Result<SynapseEmailServer> {
-    let auth_handler = Arc::new(create_test_auth_handler());
-
-    // Use test configuration
-    let smtp_config = SmtpServerConfig {
-        port: 2525,
-        require_auth: false, // Easier for testing
-        ..Default::default()
-    };
-
-    let imap_config = ImapServerConfig {
-        port: 1143,
-        ..Default::default()
-    };
-
-    // Mock connectivity assessment for testing
-    let connectivity = ConnectivityAssessment {
-        can_bind_smtp: true,
-        can_bind_imap: true,
-        has_external_ip: false,
-        external_ip: None,
-        firewall_status: connectivity::FirewallStatus::Unknown,
-        recommended_config: ServerRecommendation::RunLocalServer {
-            smtp_port: 2525,
-            imap_port: 1143,
-            external_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-        },
-    };
-
-    let message_store = Arc::new(Mutex::new(HashMap::new()));
-    let smtp_server = SynapseSmtpServer::new(
-        smtp_config,
-        Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
-        Arc::clone(&message_store),
-    );
-    let imap_server = SynapseImapServer::new(
-        imap_config,
-        Arc::clone(&message_store),
-        Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
-    );
-
-    Ok(SynapseEmailServer {
-        smtp_server,
-        imap_server,
-        connectivity,
-        auth_handler,
-    })
 }

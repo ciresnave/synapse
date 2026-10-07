@@ -102,56 +102,13 @@ impl Default for SynapseAuthHandler {
 }
 
 impl SynapseAuthHandler {
-    /// Create a new auth handler with default configuration
+    /// Create an auth handler with no accounts. Add each one with [`Self::add_user_with_password`];
+    /// until then every login is refused. There are deliberately no built-in accounts: they used to
+    /// be `admin/admin` and `emrp/emrp123`, credentials anyone could read in the published source
+    /// (brute-force hardening P1).
     pub fn new() -> Self {
-        let mut users = HashMap::new();
-
-        // Add default admin user with properly hashed password
-        let admin_password_hash = hash("admin", DEFAULT_COST).unwrap_or_else(|_| {
-            eprintln!("WARNING: Failed to hash admin password, using fallback");
-            "fallback_hash".to_string()
-        });
-
-        users.insert(
-            "admin".to_string(),
-            UserAccount {
-                username: "admin".to_string(),
-                password_hash: admin_password_hash,
-                email: "admin@localhost".to_string(),
-                permissions: UserPermissions {
-                    can_send: true,
-                    can_receive: true,
-                    can_relay: true,
-                    is_admin: true,
-                },
-                active: true,
-            },
-        );
-
-        // Add default emrp user with properly hashed password
-        let emrp_password_hash = hash("emrp123", DEFAULT_COST).unwrap_or_else(|_| {
-            eprintln!("WARNING: Failed to hash emrp password, using fallback");
-            "fallback_hash".to_string()
-        });
-
-        users.insert(
-            "emrp".to_string(),
-            UserAccount {
-                username: "emrp".to_string(),
-                password_hash: emrp_password_hash,
-                email: "emrp@localhost".to_string(),
-                permissions: UserPermissions {
-                    can_send: true,
-                    can_receive: true,
-                    can_relay: false,
-                    is_admin: false,
-                },
-                active: true,
-            },
-        );
-
         Self {
-            users: Arc::new(Mutex::new(users)),
+            users: Arc::new(Mutex::new(HashMap::new())),
             routing_permissions: Arc::new(Mutex::new(RoutingPermissions::default())),
             config: AuthConfig::default(),
         }
@@ -324,8 +281,11 @@ impl AuthHandler for SynapseAuthHandler {
     }
 }
 
-/// Create a pre-configured auth handler for testing
-pub fn create_test_auth_handler() -> SynapseAuthHandler {
+/// A pre-configured auth handler for this crate's tests. Test-only: its `testuser/testpass` account
+/// is a known credential, so it must never be reachable from the published API (brute-force
+/// hardening P1).
+#[cfg(test)]
+pub(crate) fn create_test_auth_handler() -> SynapseAuthHandler {
     let handler = SynapseAuthHandler::new();
 
     // Add test domains
