@@ -3,9 +3,13 @@
 //!
 //! Usage: `synapse-mcp --config <path>`, or set `SYNAPSE_MCP_CONFIG`. stdout carries the MCP
 //! protocol; logs go to stderr. No output ever names the private key's path (spec §6).
+//!
+//! Security events (hardening P6) go to `<config stem>-security-events.jsonl` beside the config
+//! file: owner-only, append-only, rotated once at 4 MiB. Alert delivery is not wired (board 131).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
@@ -33,7 +37,21 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let server = match SynapseMcpServer::start(config).await {
+    let sink = match synapse_security::FileSink::open(
+        security_events_path(&config_path),
+        SECURITY_EVENTS_MAX_BYTES,
+    ) {
+        Ok(sink) => Arc::new(sink),
+        Err(_) => {
+            // Fixed text: the path sits beside the config, which may name the key's directory.
+            eprintln!(
+                "synapse-mcp: cannot open the security event file beside the config \
+                 (it must be owner-only)"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let server = match SynapseMcpServer::start_with_sink(config, sink).await {
         Ok(server) => server,
         Err(e) => {
             eprintln!("synapse-mcp: {e}");
@@ -54,6 +72,18 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The size at which the event file rotates to `<file>.1`.
+const SECURITY_EVENTS_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// `<config stem>-security-events.jsonl` in the config file's directory, so two servers whose
+/// configs share a directory keep separate files.
+fn security_events_path(config_path: &Path) -> PathBuf {
+    let stem = config_path
+        .file_stem()
+        .map_or_else(|| "synapse-mcp".into(), |s| s.to_string_lossy());
+    config_path.with_file_name(format!("{stem}-security-events.jsonl"))
 }
 
 fn config_path() -> Option<PathBuf> {

@@ -127,8 +127,25 @@ pub struct SynapseMcpServer {
 
 impl SynapseMcpServer {
     /// Load the key, pin the peers, and start the UDP transport (spec §3). Every error message is
-    /// fixed text: none names the key path or contains key bytes.
+    /// fixed text: none names the key path or contains key bytes. Records no security events; see
+    /// [`Self::start_with_sink`].
     pub async fn start(config: McpConfig) -> synapse::error::Result<Self> {
+        Self::start_inner(config, None).await
+    }
+
+    /// As [`Self::start`], and the receive path's security events (hardening P6: knocks, replays,
+    /// unopenable bodies, refused revocations) go to `sink`.
+    pub async fn start_with_sink(
+        config: McpConfig,
+        sink: Arc<dyn synapse::security_events::SecuritySink>,
+    ) -> synapse::error::Result<Self> {
+        Self::start_inner(config, Some(sink)).await
+    }
+
+    async fn start_inner(
+        config: McpConfig,
+        sink: Option<Arc<dyn synapse::security_events::SecuritySink>>,
+    ) -> synapse::error::Result<Self> {
         let pem = std::fs::read_to_string(&config.private_key_pem_path)
             .map_err(|_| config_error("cannot read the private key file"))?;
         let mut crypto = CryptoManager::new();
@@ -199,7 +216,7 @@ impl SynapseMcpServer {
 
         let mut udp = HashMap::new();
         udp.insert("bind_port".to_string(), config.udp_bind_port.to_string());
-        let manager = TransportManagerBuilder::new()
+        let mut builder = TransportManagerBuilder::new()
             .disable_transport(TransportType::Tcp)
             .disable_transport(TransportType::Http)
             .disable_transport(TransportType::Email)
@@ -209,8 +226,11 @@ impl SynapseMcpServer {
             .sealing_key(sealing_key)
             .replay_config(replay_config)
             .gate_config(gate_config)
-            .tracking_limits(tracking_ttl, 10_000)
-            .build();
+            .tracking_limits(tracking_ttl, 10_000);
+        if let Some(sink) = sink {
+            builder = builder.security_sink(sink);
+        }
+        let manager = builder.build();
         manager
             .register_factory(Box::new(UdpTransportFactory))
             .await?;

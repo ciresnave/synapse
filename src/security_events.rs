@@ -461,3 +461,70 @@ impl AlertPolicy {
         digests
     }
 }
+
+/// Bound on distinct `(kind, surface)` pairs an [`EventGate`] tracks. Surfaces are fixed strings in
+/// code, so this is never reached in practice; it only keeps the map bounded.
+const MAX_GATE_PAIRS: usize = 1_024;
+
+#[derive(Default)]
+struct GateEntry {
+    last_written: Option<DateTime<Utc>>,
+    held_back: u32,
+}
+
+/// Writes at most one event line per `(kind, surface)` per interval; later ones are counted, and the
+/// count rides on the next line that passes. Keyed on the surface, never the subject, because a
+/// subject can be attacker-chosen. This keeps a flood on one surface from rotating every other
+/// surface's evidence out of a size-capped sink.
+pub struct EventGate {
+    interval: Duration,
+    state: Mutex<HashMap<(SecurityEventKind, String), GateEntry>>,
+}
+
+impl EventGate {
+    /// A gate with the given interval; zero passes everything.
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            state: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// `Some(detail)` to write now, with `"; N similar events held back"` appended when N > 0, or
+    /// `None` to hold this one back.
+    pub fn pass(
+        &self,
+        kind: SecurityEventKind,
+        surface: &str,
+        detail: &str,
+        now: DateTime<Utc>,
+    ) -> Option<String> {
+        if self.interval <= Duration::zero() {
+            return Some(detail.to_string());
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (kind, surface.to_string());
+        if !state.contains_key(&key) && state.len() >= MAX_GATE_PAIRS {
+            state.clear();
+        }
+        let entry = state.entry(key).or_default();
+        if entry
+            .last_written
+            .is_some_and(|at| now - at < self.interval)
+        {
+            entry.held_back = entry.held_back.saturating_add(1);
+            return None;
+        }
+        let detail = if entry.held_back > 0 {
+            format!("{detail}; {} similar events held back", entry.held_back)
+        } else {
+            detail.to_string()
+        };
+        entry.held_back = 0;
+        entry.last_written = Some(now);
+        Some(detail)
+    }
+}

@@ -192,6 +192,8 @@ pub struct TransportManager {
     sealing_key: TokioRwLock<Option<crate::sealing::SealingKeyPair>>,
     /// The delivery gate and the replay record (P2 slice e).
     inbound: TokioRwLock<crate::replay::InboundState>,
+    /// Security events on the receive path (hardening P6). Without a sink it records nothing.
+    events: super::security::TransportEvents,
 }
 
 /// Unified metrics across all transports
@@ -289,6 +291,10 @@ impl TransportManager {
                 crate::replay::GateConfig::default(),
                 chrono::Utc::now(),
             )),
+            events: super::security::TransportEvents::new(
+                super::security::KnockLimits::default(),
+                None,
+            ),
         }
     }
 
@@ -659,11 +665,24 @@ impl TransportManager {
     /// stored -- `TrustStore::add_revocation` already refuses anything not signed by a pinned
     /// account key, so a relay (see [`Self::receive_messages`]) can deliver a revocation but never
     /// forge one.
+    ///
+    /// A revocation refused as foreign or forged is recorded as a security event (hardening P6,
+    /// row 8); a duplicate is not.
     pub async fn add_revocations(&self, revocations: &[crate::certificate::Revocation]) -> usize {
         let mut store = self.trust_store.write().await;
+        let now = chrono::Utc::now();
         revocations
             .iter()
-            .filter(|revocation| store.add_revocation((*revocation).clone()))
+            .filter(
+                |revocation| match store.try_add_revocation((*revocation).clone()) {
+                    Ok(stored) => stored,
+                    Err(reason) => {
+                        self.events
+                            .revocation_refused(&revocation.issuer_key_id, reason, now);
+                        false
+                    }
+                },
+            )
             .count()
     }
 
@@ -726,7 +745,16 @@ impl TransportManager {
                 now,
             );
             let freshness = match admission {
-                crate::replay::Admission::Reject => continue,
+                crate::replay::Admission::Reject => {
+                    self.events.knock(
+                        &message.from_global_id,
+                        &incoming.source,
+                        crate::replay::verdict_reason(&verdict),
+                        &message.sender_proof.key_id,
+                        now,
+                    );
+                    continue;
+                }
                 crate::replay::Admission::AdmitUnverified => crate::replay::Freshness::NotChecked,
                 crate::replay::Admission::Admit { key_id } => {
                     match inbound.check(
@@ -741,6 +769,7 @@ impl TransportManager {
                                 key_id = %key_id,
                                 "dropping replayed message"
                             );
+                            self.events.replay(&key_id, &incoming.source, now);
                             continue;
                         }
                         crate::replay::Decision::Deliver(freshness) => freshness,
@@ -754,6 +783,10 @@ impl TransportManager {
                 continue;
             }
             let payload = crate::sealing::open(message, sealing_key.as_ref());
+            if let crate::sealing::Payload::CouldNotOpen(error) = &payload {
+                self.events
+                    .unopenable(&message.from_global_id, &incoming.source, *error, now);
+            }
             // Only ever attach a chain summary when the chain it describes is the SAME one that
             // authenticated this message: `verified_chain_at` resolves any well-formed
             // `CHAIN_KEY` metadata independently of which route produced the verdict (it performs
@@ -1270,6 +1303,8 @@ pub struct TransportManagerBuilder {
     gate: crate::replay::GateConfig,
     tracking_ttl: chrono::Duration,
     tracking_capacity: usize,
+    security_sink: Option<Arc<dyn crate::security_events::SecuritySink>>,
+    knock_limits: super::security::KnockLimits,
 }
 
 impl TransportManagerBuilder {
@@ -1282,6 +1317,8 @@ impl TransportManagerBuilder {
             gate: crate::replay::GateConfig::default(),
             tracking_ttl: chrono::Duration::hours(1),
             tracking_capacity: 10_000,
+            security_sink: None,
+            knock_limits: super::security::KnockLimits::default(),
         }
     }
 
@@ -1356,6 +1393,19 @@ impl TransportManagerBuilder {
         self
     }
 
+    /// Where receive-path security events go (hardening P6). Without one, none are recorded.
+    pub fn security_sink(mut self, sink: Arc<dyn crate::security_events::SecuritySink>) -> Self {
+        self.security_sink = Some(sink);
+        self
+    }
+
+    /// Budgets for the knock record. They decide only which knocks are written as their own
+    /// event; every message is still verified.
+    pub fn knock_limits(mut self, limits: super::security::KnockLimits) -> Self {
+        self.knock_limits = limits;
+        self
+    }
+
     pub fn build(self) -> TransportManager {
         let tracking_ttl = self.tracking_ttl;
         let tracking_capacity = self.tracking_capacity;
@@ -1379,6 +1429,8 @@ impl TransportManagerBuilder {
             self.gate,
             chrono::Utc::now(),
         ));
+        manager.events =
+            super::security::TransportEvents::new(self.knock_limits, self.security_sink);
         manager
     }
 }

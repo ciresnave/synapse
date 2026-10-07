@@ -380,3 +380,64 @@ fn alert_policy_coalesces_a_flood_into_one_alert_and_one_digest() {
             .is_some()
     );
 }
+
+// --- P6: the event gate (moved from synapsed's private copy into the core, time injected) ---
+
+use synapse::security_events::EventGate;
+
+#[test]
+fn gate_holds_back_a_repeat_within_the_interval_and_reports_the_count_later() {
+    let gate = EventGate::new(secs(1));
+    let k = SecurityEventKind::UnverifiedSender;
+    assert_eq!(
+        gate.pass(k, "transport/knock", "d", t0()).as_deref(),
+        Some("d")
+    );
+    // Negative control: two repeats inside the interval are held back.
+    assert_eq!(gate.pass(k, "transport/knock", "d", t0()), None);
+    assert_eq!(
+        gate.pass(
+            k,
+            "transport/knock",
+            "d",
+            t0() + Duration::milliseconds(999)
+        ),
+        None
+    );
+    // After the interval the next line carries the count of what was held back, once.
+    assert_eq!(
+        gate.pass(k, "transport/knock", "d", t0() + secs(1))
+            .as_deref(),
+        Some("d; 2 similar events held back")
+    );
+    assert_eq!(
+        gate.pass(k, "transport/knock", "d", t0() + secs(2))
+            .as_deref(),
+        Some("d")
+    );
+}
+
+#[test]
+fn gate_keys_on_kind_and_surface_never_on_subject() {
+    let gate = EventGate::new(secs(1));
+    let k = SecurityEventKind::UnverifiedSender;
+    assert!(gate.pass(k, "transport/knock", "a", t0()).is_some());
+    // Positive controls: another surface, and another kind on the same surface, pass.
+    assert!(gate.pass(k, "transport/sealing", "a", t0()).is_some());
+    assert!(
+        gate.pass(SecurityEventKind::RateLimited, "transport/knock", "a", t0())
+            .is_some()
+    );
+}
+
+#[test]
+fn a_zero_interval_gate_passes_everything() {
+    let gate = EventGate::new(Duration::zero());
+    let k = SecurityEventKind::ReplayRefused;
+    for _ in 0..3 {
+        assert_eq!(
+            gate.pass(k, "transport/replay", "d", t0()).as_deref(),
+            Some("d")
+        );
+    }
+}

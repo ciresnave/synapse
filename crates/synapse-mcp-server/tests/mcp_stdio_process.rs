@@ -248,3 +248,60 @@ async fn two_processes_send_poll_ack_and_leak_no_key_path() {
         }
     }
 }
+
+/// Hardening P6, row 12: the binary writes its security events to `<config stem>-security-events.jsonl`
+/// beside the config file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_binary_records_a_knock_beside_its_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut bob_c, mut alice_c) = (CryptoManager::new(), CryptoManager::new());
+    let (bob_sk, _) = bob_c.generate_keypair().unwrap();
+    let (bob_seal_sk, _) = bob_c.generate_sealing_key().unwrap();
+    let (_, alice_pk) = alice_c.generate_keypair().unwrap();
+    let (_, alice_seal_pk) = alice_c.generate_sealing_key().unwrap();
+    let (bob_port, alice_port) = (free_udp_port(), free_udp_port());
+    let bob = spawn(
+        dir.path(),
+        BOB,
+        bob_port,
+        &bob_sk,
+        &bob_seal_sk,
+        (ALICE, &alice_pk, &alice_seal_pk, alice_port),
+    )
+    .await;
+    let events_path = dir.path().join("bob-security-events.jsonl");
+    assert!(events_path.exists(), "the event file is opened at startup");
+    // Positive control: nothing has knocked yet.
+    assert_eq!(std::fs::read_to_string(&events_path).unwrap(), "");
+
+    let unsigned = synapse::types::SecureMessage::new(
+        BOB,
+        "mallory@synapse.test",
+        b"hi".to_vec(),
+        synapse::types::SecurityLevel::Authenticated,
+    );
+    let raw = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    raw.send_to(
+        &serde_json::to_vec(&unsigned).unwrap(),
+        ("127.0.0.1", bob_port),
+    )
+    .unwrap();
+    let mut transcript = Vec::new();
+    let mut lines = Vec::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        call(&bob, "poll", json!({}), &mut transcript).await;
+        lines = std::fs::read_to_string(&events_path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .collect();
+        if !lines.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["surface"], "transport/knock");
+    assert_eq!(lines[0]["subject"], "mallory@synapse.test");
+    let _ = bob.client.cancel().await;
+}
