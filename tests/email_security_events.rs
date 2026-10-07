@@ -16,7 +16,11 @@ use synapse::email_server::{
     SynapseSmtpServer, UserPermissions,
 };
 use synapse::security_events::{LimiterConfig, SecurityEvent, SecurityEventKind, SecuritySink};
-use synapse::transport::{EmailTransportFactory, TransportManagerBuilder, TransportType};
+use synapse::transport::providers::TestTransportProvider;
+use synapse::transport::{
+    EmailTransportFactory, EmailTransportImpl, MultiTransportRouter, Transport,
+    TransportManagerBuilder, TransportType,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -483,6 +487,53 @@ async fn direct_mode_inherits_the_manager_sink() {
         capture.all()
     );
     manager.stop().await.unwrap();
+}
+
+// P7 follow-up (a4): `MultiTransportRouter` builds its own email transport, outside any
+// `TransportManager`. Its sink must reach that transport's Direct-mode listener too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_transport_router_passes_its_sink_to_the_email_transport() {
+    let capture = Arc::new(Capture::default());
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = HashMap::from([
+        ("email_mode".to_string(), "direct".to_string()),
+        ("local_port".to_string(), port.to_string()),
+        (
+            "email_inbound_connections_per_minute".to_string(),
+            "1".to_string(),
+        ),
+    ]);
+    let email: Arc<dyn Transport> = Arc::new(EmailTransportImpl::new(&config).await.unwrap());
+    let provider = TestTransportProvider::new().with_email_transport(Arc::clone(&email));
+    let router = MultiTransportRouter::new_with_provider(
+        synapse::Config::default_for_entity("Test", "tool"),
+        "alice@synapse.local".to_string(),
+        Box::new(provider),
+    )
+    .await
+    .unwrap();
+    router.set_security_sink(capture.clone());
+    // The router never starts its email transport itself (see its `start_background_services`).
+    email.start().await.unwrap();
+
+    // Positive control: the first connection is greeted.
+    let (_c1, g1) = Client::connect(port).await;
+    assert!(g1.starts_with("220"), "got {g1:?}");
+    // Negative control: the second is refused, and the router's sink holds the event.
+    let (_c2, g2) = Client::connect(port).await;
+    assert!(g2.starts_with("421"), "got {g2:?}");
+    assert_eq!(
+        capture
+            .of("email/smtp-inbound", SecurityEventKind::RateLimited)
+            .len(),
+        1,
+        "{:?}",
+        capture.all()
+    );
 }
 
 #[tokio::test]

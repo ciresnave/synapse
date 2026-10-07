@@ -33,6 +33,13 @@ Use `serde_json::to_vec` and `serde_json::from_slice` instead, which is the wire
 
 ### Added
 
+- **`MultiTransportRouter::set_security_sink` (6.0.0-rc.16).** `MultiTransportRouter` builds its
+  own Direct-mode email transport, outside any `TransportManager`, and gave it no sink. It now
+  passes the sink to each of its transports, and `SynapseRouter::set_security_sink` passes the
+  router's sink on to its `MultiTransportRouter`. Like `TransportManager`'s, this sink records only
+  in Direct mode, whose SMTP listener enforces the inbound limits. `MultiTransportRouter` never
+  starts its email transport itself, so today that listener is bound but not served; the path is
+  wired and tested by injection, with the test starting the transport.
 - **`SynapseRouter::set_security_sink` (6.0.0-rc.15).** The router's email transport now records
   its own security events to the sink you give it. That happens only in Direct mode, where its SMTP
   listener enforces the inbound limits. Before, it enforced them but recorded nothing. The router

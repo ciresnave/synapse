@@ -95,8 +95,8 @@ impl SynapseRouter {
         })
     }
 
-    /// Where the router's email transport and email server record their own security events
-    /// (hardening P7). The transport records only in Direct mode, whose SMTP listener enforces the
+    /// Where the router's email transport, email server and multi-transport router record their
+    /// own security events (hardening P7). The transport records only in Direct mode, whose SMTP listener enforces the
     /// inbound limits; RelayOut and External bind no listener. A transport built later
     /// is given the sink before `start`, as `TransportManager` does, and one already built is given
     /// it now. Clones share the sink. The first call wins; later ones are ignored.
@@ -112,6 +112,9 @@ impl SynapseRouter {
         }
         if let Some(transport) = self.email.read().await.as_ref() {
             transport.attach_security_sink(Arc::clone(sink));
+        }
+        if let Some(mt_router) = &self.multi_transport {
+            mt_router.set_security_sink(Arc::clone(sink));
         }
     }
 
@@ -1624,5 +1627,30 @@ mod tests {
             events[0].kind,
             crate::security_events::SecurityEventKind::AuthFailure
         );
+    }
+
+    // P7 follow-up (a4): the router's sink also reaches its multi-transport router's email
+    // transport, which that router built itself.
+    #[tokio::test]
+    async fn the_multi_transport_routers_email_transport_gets_the_sink() {
+        let config = Config::default_for_entity("Test", "tool");
+        let recording = Arc::new(RecordingTransport::default());
+        let attached = Arc::clone(&recording.attached);
+        let mt_router = MultiTransportRouter::new_with_provider(
+            config.clone(),
+            "alice@synapse.local".to_string(),
+            Box::new(StubTransportProvider {
+                email_transport: recording,
+            }),
+        )
+        .await
+        .expect("multi-transport router");
+        let mut router = SynapseRouter::new(config, "alice@synapse.local".to_string())
+            .await
+            .expect("router");
+        router.multi_transport = Some(Arc::new(mt_router));
+        let sink: Arc<dyn crate::security_events::SecuritySink> = Arc::new(Capture::default());
+        router.set_security_sink(Arc::clone(&sink)).await;
+        assert_eq!(*attached.lock().expect("lock"), Some(sink_addr(&sink)));
     }
 }
