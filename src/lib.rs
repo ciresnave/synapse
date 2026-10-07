@@ -260,10 +260,6 @@ pub use synapse::models;
 pub use synapse::services;
 pub use synapse::storage;
 
-// Auth integration modules
-pub mod auth_enterprise;
-pub mod auth_v4_example;
-
 // Enhanced auth-framework integration.
 // ⚠️ ASPIRATIONAL: this module is written against an auth-framework API that has never
 // been published (see its own header for the measured list of missing items). It is gated

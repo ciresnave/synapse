@@ -443,7 +443,6 @@ The demo showcases:
 - [Synapse Neural Network Guide](./SYNAPSE_COMPLETE_ARCHITECTURE.md)
 - [OAuth Provider Configuration](./config/auth/oauth-providers.toml)
 - [AI Agent Configuration](./config/auth/ai-agents.toml)
-- [Enterprise Features Guide](./ENTERPRISE_AI_PLATFORM.md)
 
 ---
 
