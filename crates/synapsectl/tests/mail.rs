@@ -399,11 +399,30 @@ fn loosen(path: &Path) {
     }
 }
 
+/// The CLI's security event file in the home (hardening P8).
+const EVENTS_FILE: &str = "cli-security-events.jsonl";
+
+/// Every event the CLI recorded in `home`, oldest first; none if the file is absent.
+fn events(home: &Path) -> Vec<Value> {
+    match std::fs::read_to_string(home.join(EVENTS_FILE)) {
+        Ok(text) => text
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each line is one JSON event"))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("reading the event file: {e}"),
+    }
+}
+
 /// Opus review I3: a session directory, session file or announce file that others can read is
-/// refused, not used.
+/// refused, not used. Hardening P8, row 6: the refusal is also recorded as an event.
 #[test]
 fn a_too_open_session_or_announce_file_is_refused() {
-    for target in ["sessions", "sessions/alpha.json", "synapsed.json"] {
+    for (target, item) in [
+        ("sessions", "session directory"),
+        ("sessions/alpha.json", "session file"),
+        ("synapsed.json", "daemon announce file"),
+    ] {
         let home = Home::new();
         home.ok(&["claim", "--role", "alpha"]);
         home.ok(&["send", "--role", "alpha", "--to", "alpha", "before"]);
@@ -415,7 +434,57 @@ fn a_too_open_session_or_announce_file_is_refused() {
             err.contains("accessible to more than its owner"),
             "{target}: {err}"
         );
+        assert!(
+            err.contains("security: permissions_too_open synapsectl/files"),
+            "{target}: {err}"
+        );
+        let events = events(home.path());
+        assert_eq!(events.len(), 1, "{target}: {events:?}");
+        assert_eq!(events[0]["kind"], "permissions_too_open", "{target}");
+        assert_eq!(events[0]["surface"], "synapsectl/files", "{target}");
+        assert_eq!(events[0]["subject"], item, "{target}");
     }
+}
+
+/// Hardening P8, row 7: a keystore key others can reach is refused, and the refusal is recorded.
+#[test]
+fn a_too_open_account_key_is_refused_and_recorded() {
+    let home = Home::new();
+    loosen(&home.path().join("account").join("account.key.pem"));
+    let out = home.run(&["id", "show"]);
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let events = events(home.path());
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["kind"], "permissions_too_open");
+    assert_eq!(events[0]["subject"], "account key");
+}
+
+/// Hardening P8: in a home others can reach, the event goes to stderr only. A file written there
+/// could be a planted link to one of the owner's files.
+#[test]
+fn a_too_open_home_gets_no_event_file() {
+    let home = Home::new();
+    loosen(&home.path().join("account").join("account.key.pem"));
+    loosen(home.path());
+    let out = home.run(&["id", "show"]);
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("security: permissions_too_open"), "{err}");
+    assert!(!home.path().join(EVENTS_FILE).exists());
+}
+
+/// Hardening P8, the positive control: commands that meet no refusal record nothing.
+#[test]
+fn clean_commands_record_no_event() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    home.ok(&["send", "--role", "alpha", "--to", "alpha", "hello"]);
+    home.ok(&["id", "show", "--role", "alpha"]);
+    assert!(
+        !home.path().join(EVENTS_FILE).exists(),
+        "{:?}",
+        events(home.path())
+    );
 }
 
 /// Opus review I1 (#74), the client-only mitigation: an announce file whose daemon is dead is not
@@ -573,6 +642,17 @@ fn a_squatter_on_a_live_pids_port_gets_no_credential() {
         format!("daemon at {addr} failed its proof; possible port squat; not sending credentials");
     assert_eq!(stderr.matches(&warning).count(), 1, "{stderr}");
     assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // Hardening P8, row 3 client side: the failed proof is recorded once, like the warning.
+    let events = events(home.path());
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["kind"], "proof_failure");
+    assert_eq!(events[0]["surface"], "synapsectl/health-proof");
+    assert_eq!(events[0]["subject"], addr.as_str());
+    let instance_id = announce["instance_id"].as_str().unwrap();
+    assert!(
+        !events[0].to_string().contains(instance_id),
+        "the proof key reached an event: {events:?}"
+    );
     let fresh = home.announced_pid().unwrap();
     assert_ne!(fresh, live_pid);
     assert_eq!(spawned_pids(&out), vec![fresh], "a fresh daemon took over");

@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 use synapse::certificate::chain_to_pem;
 use synapse::keystore::{Keystore, KeystoreError, check_owner_only};
 use synapse::roles::sign_claim_for;
+use synapse::security_events::SecurityEventKind;
 
 /// The daemon's announce file in the home, written by `synapsed` (M5a).
 const ANNOUNCE_FILE: &str = "synapsed.json";
@@ -150,7 +151,7 @@ impl Daemon {
         let mut squat = Squat::default();
         // Two tries, so one slow answer from a live daemon doesn't start a doomed second one.
         for _ in 0..2 {
-            if let Some(found) = squat.check(answering(&http, home)?) {
+            if let Some(found) = squat.check(home, answering(&http, home)?) {
                 return Ok(Daemon::new(http, home, found));
             }
         }
@@ -161,7 +162,7 @@ impl Daemon {
         loop {
             // Whichever daemon answers will do: ours, or, if two CLIs raced, the one holding the
             // store (ours then exits on its lock), or a live one that was only slow to answer.
-            if let Some(found) = squat.check(answering(&http, home)?) {
+            if let Some(found) = squat.check(home, answering(&http, home)?) {
                 return Ok(Daemon::new(http, home, found));
             }
             // A squatter that failed the proof still holds its port, so a daemon of ours that has
@@ -312,18 +313,26 @@ enum Answer {
     Proven(Announce, DateTime<Utc>),
 }
 
-/// The first listener in this command that failed the proof. It is warned about once, however many
-/// times it is probed.
+/// The first listener in this command that failed the proof. It is warned about, and recorded as a
+/// `ProofFailure` event (hardening P8, row 3), once, however many times it is probed.
 #[derive(Default)]
 struct Squat(Option<String>);
 
 impl Squat {
-    fn check(&mut self, answer: Answer) -> Option<(Announce, DateTime<Utc>)> {
+    fn check(&mut self, home: &Path, answer: Answer) -> Option<(Announce, DateTime<Utc>)> {
         match answer {
             Answer::Proven(announce, started_at) => Some((announce, started_at)),
             Answer::Unproven(addr) => {
                 if self.0.is_none() {
                     eprintln!("synapse: {}", squat_warning(&addr));
+                    crate::events::record(
+                        Some(home),
+                        SecurityEventKind::ProofFailure,
+                        "synapsectl/health-proof",
+                        &addr,
+                        Some(&addr),
+                        "failed the health proof; no credential sent",
+                    );
                     self.0 = Some(addr);
                 }
                 None
