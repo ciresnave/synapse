@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 use synapse::certificate::chain_to_pem;
 use synapse::keystore::Keystore;
 use synapse::roles::{sign_claim, sign_claim_for};
-use synapsed::{Daemon, DaemonConfig, DaemonError};
+use synapse::security_events::LimiterConfig;
+use synapsed::{Daemon, DaemonConfig, DaemonError, SECURITY_EVENTS_FILE, SecurityConfig};
 
 struct Running {
     addr: SocketAddr,
@@ -48,9 +49,16 @@ fn config(home: &std::path::Path) -> DaemonConfig {
 }
 
 async fn start() -> Running {
+    start_with(None).await
+}
+
+async fn start_with(security: Option<SecurityConfig>) -> Running {
     let home = tempfile::tempdir().unwrap();
     Keystore::init_account(home.path(), "acct").expect("init account");
-    let daemon = Daemon::open(&config(home.path())).expect("open daemon");
+    let mut daemon = Daemon::open(&config(home.path())).expect("open daemon");
+    if let Some(security) = security {
+        daemon = daemon.with_security(security);
+    }
     let started_at = daemon.started_at();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -286,7 +294,8 @@ async fn a_forged_from_is_refused() {
 
 #[tokio::test]
 async fn a_bad_or_missing_token_is_401() {
-    let d = start().await;
+    // 17 bad requests: a roomy budget, so this test measures status codes and not the limiter.
+    let d = start_with(Some(tuned(1000, 200, 2000, std::time::Duration::ZERO))).await;
     let bad = "00".repeat(32);
     for path in ["/v1/send", "/v1/fetch", "/v1/ack", "/v1/heartbeat"] {
         let plus = format!("+a{}", "0".repeat(62)); // u8::from_str_radix accepts "+a"
@@ -854,4 +863,246 @@ async fn a_full_mailbox_is_413_mailbox_full() {
     // The cap is on bytes: a small message that still fits is accepted.
     send_to(&d, &alpha, "beta@acct", b"small").await;
     d.stop().await;
+}
+
+// ---- P5: brute-force hardening (countermeasures and events) ----
+
+fn limiter(free: u32, base_ms: i64, max_ms: i64) -> LimiterConfig {
+    LimiterConfig {
+        free_failures: free,
+        window: chrono::Duration::minutes(5),
+        base_delay: chrono::Duration::milliseconds(base_ms),
+        max_delay: chrono::Duration::milliseconds(max_ms),
+        lockout_after: u32::MAX,
+        lockout: chrono::Duration::zero(),
+        max_keys: 100,
+    }
+}
+
+fn tuned(free: u32, base_ms: i64, max_ms: i64, interval: Duration) -> SecurityConfig {
+    SecurityConfig {
+        bearer: limiter(free, base_ms, max_ms),
+        claim: limiter(free, base_ms, max_ms),
+        health: limiter(free, base_ms, max_ms),
+        misuse: limiter(free, base_ms, max_ms),
+        event_interval: interval,
+    }
+}
+
+/// One free failure, then 200 ms, 400 ms, ...; every event written.
+fn small() -> SecurityConfig {
+    tuned(1, 200, 2000, Duration::ZERO)
+}
+
+const SLOW: Duration = Duration::from_millis(200);
+
+fn events_text(d: &Running) -> String {
+    std::fs::read_to_string(d.home.path().join(SECURITY_EVENTS_FILE)).expect("event file")
+}
+
+fn events(d: &Running) -> Vec<Value> {
+    events_text(d)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a JSON line"))
+        .collect()
+}
+
+fn on(events: &[Value], kind: &str, surface: &str) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|e| e["kind"] == kind && e["surface"] == surface)
+        .cloned()
+        .collect()
+}
+
+async fn timed_post(
+    d: &Running,
+    path: &str,
+    token: Option<&str>,
+    body: Value,
+) -> (u16, Value, Duration) {
+    let started = std::time::Instant::now();
+    let (status, reply, _) = post(d, path, token, body).await;
+    (status, reply, started.elapsed())
+}
+
+#[tokio::test]
+async fn bad_bearers_are_delayed_and_recorded() {
+    let d = start_with(Some(small())).await;
+    let (good, _) = claim(&d, "alpha", 1).await;
+    let bad = ["a1", "b2", "c3"].map(|b| b.repeat(32));
+    let mut last = Duration::ZERO;
+    for token in &bad {
+        let (s, _, took) = timed_post(&d, "/v1/heartbeat", Some(token), json!({})).await;
+        assert_eq!(s, 401);
+        last = took;
+    }
+    assert!(last >= SLOW, "the 3rd failure was answered in {last:?}");
+    let text = events_text(&d);
+    let lines = on(&events(&d), "auth_failure", "synapsed/bearer");
+    assert!(lines.len() >= 3, "{text}");
+    assert!(lines.iter().all(|e| e["subject"] == "bearer"));
+    for token in &bad {
+        assert!(
+            !text.contains(token.as_str()),
+            "a token is in the event file"
+        );
+    }
+    // Positive control: the failures do not slow a valid caller.
+    let (s, _, took) = timed_post(&d, "/v1/heartbeat", Some(&good), json!({})).await;
+    assert_eq!(s, 200);
+    assert!(took < SLOW, "a valid token took {took:?}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn refused_claims_are_delayed_and_recorded() {
+    let d = start_with(Some(small())).await;
+    let mut secrets = Vec::new();
+    let mut last = Duration::ZERO;
+    for n in [0x71u8, 0x72, 0x73] {
+        let mut body = claim_body(&d, "alpha", n);
+        let mut sig = B64.decode(body["signature_b64"].as_str().unwrap()).unwrap();
+        sig[0] ^= 1;
+        body["signature_b64"] = json!(B64.encode(&sig));
+        secrets.push(body["nonce_hex"].as_str().unwrap().to_string());
+        secrets.push(body["signature_b64"].as_str().unwrap().to_string());
+        let (s, reply, took) = timed_post(&d, "/v1/claim", None, body).await;
+        assert_eq!(s, 403, "{reply}");
+        assert_eq!(reply["error"], "claim_refused");
+        last = took;
+    }
+    assert!(last >= SLOW, "the 3rd refusal was answered in {last:?}");
+    let mut malformed = claim_body(&d, "alpha", 0x74);
+    malformed["nonce_hex"] = json!("zz");
+    let (s, reply, _) = timed_post(&d, "/v1/claim", None, malformed).await;
+    assert_eq!(s, 400, "{reply}");
+    let text = events_text(&d);
+    let lines = on(&events(&d), "auth_failure", "synapsed/claim");
+    assert!(lines.len() >= 4, "{text}");
+    assert!(lines.iter().all(|e| e["subject"] == "alpha@acct"), "{text}");
+    for secret in &secrets {
+        assert!(
+            !text.contains(secret.as_str()),
+            "a secret is in the event file"
+        );
+    }
+    // Positive control: a valid claim is not slowed by the failures before it.
+    let (s, reply, took) = timed_post(&d, "/v1/claim", None, claim_body(&d, "alpha", 0x75)).await;
+    assert_eq!(s, 200, "{reply}");
+    assert!(took < SLOW, "a valid claim took {took:?}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn challenged_health_over_budget_is_slowed_not_refused() {
+    let d = start_with(Some(small())).await;
+    let id = instance_id(&d);
+    let challenge = [0x5a; 16];
+    let hexed: String = challenge.iter().map(|b| format!("{b:02x}")).collect();
+    let url = d.url(&format!("/v1/health?challenge={hexed}"));
+    let mut last = Duration::ZERO;
+    for n in 1..=3 {
+        let started = std::time::Instant::now();
+        let resp = client().get(&url).send().await.unwrap();
+        last = started.elapsed();
+        assert_eq!(resp.status(), 200, "request {n}");
+        let reply: Value = resp.json().await.unwrap();
+        let proof = reply["proof"].as_str().expect("a proof");
+        assert!(proof_holds(&id, d.addr, &challenge, proof), "request {n}");
+        if n == 1 {
+            assert!(last < SLOW, "the first challenge took {last:?}");
+            assert!(on(&events(&d), "rate_limited", "synapsed/health").is_empty());
+        }
+    }
+    assert!(last >= SLOW, "the 3rd challenge was answered in {last:?}");
+    // Requests 2 and 3 each owed a delay, so each left an event.
+    let lines = on(&events(&d), "rate_limited", "synapsed/health");
+    assert_eq!(lines.len(), 2, "{}", events_text(&d));
+    assert!(lines.iter().all(|e| e["subject"] == "health"));
+    // Positive control: an unchallenged health is not counted or slowed.
+    let started = std::time::Instant::now();
+    let resp = client().get(d.url("/v1/health")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(started.elapsed() < SLOW);
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn repeated_unknown_recipients_are_delayed_per_role() {
+    let d = start_with(Some(small())).await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (beta, _) = claim(&d, "beta", 2).await;
+    let body = json!({"to": "ghost@acct", "body_b64": B64.encode(b"x")});
+    let mut last = Duration::ZERO;
+    for _ in 0..3 {
+        let (s, reply, took) = timed_post(&d, "/v1/send", Some(&alpha), body.clone()).await;
+        assert_eq!(s, 404, "{reply}");
+        assert_eq!(reply["error"], "unknown_recipient");
+        last = took;
+    }
+    assert!(last >= SLOW, "the 3rd unknown recipient took {last:?}");
+    let lines = on(&events(&d), "rate_limited", "synapsed/recipient");
+    assert!(!lines.is_empty(), "{}", events_text(&d));
+    assert!(lines.iter().all(|e| e["subject"] == "alpha@acct"));
+    // Positive control: another role has its own key.
+    let (s, _, took) = timed_post(&d, "/v1/send", Some(&beta), body).await;
+    assert_eq!(s, 404);
+    assert!(took < SLOW, "beta's first 404 took {took:?}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn repeated_bad_acks_are_delayed_per_role() {
+    let d = start_with(Some(small())).await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (beta, _) = claim(&d, "beta", 2).await;
+    let body = json!({"message_id": "alpha@acct/nothing"});
+    let mut last = Duration::ZERO;
+    for _ in 0..3 {
+        let (s, reply, took) = timed_post(&d, "/v1/ack", Some(&alpha), body.clone()).await;
+        assert_eq!(s, 404, "{reply}");
+        last = took;
+    }
+    assert!(last >= SLOW, "the 3rd bad ack took {last:?}");
+    let lines = on(&events(&d), "rate_limited", "synapsed/ack");
+    assert!(!lines.is_empty(), "{}", events_text(&d));
+    assert!(lines.iter().all(|e| e["subject"] == "alpha@acct"));
+    // Positive control: another role's ack is unaffected.
+    let (s, _, took) = timed_post(&d, "/v1/ack", Some(&beta), body).await;
+    assert_eq!(s, 404);
+    assert!(took < SLOW, "beta's first bad ack took {took:?}");
+    d.stop().await;
+}
+
+#[tokio::test]
+async fn the_event_gate_coalesces_a_flood() {
+    // Nothing is delayed (100 free failures), so only the gate limits what is written.
+    let d = start_with(Some(tuned(100, 200, 2000, Duration::from_secs(60)))).await;
+    for n in 0..5u8 {
+        let token = format!("{:02x}", 0xd0 + n).repeat(32);
+        let (s, _, _) = post(&d, "/v1/heartbeat", Some(&token), json!({})).await;
+        assert_eq!(s, 401);
+    }
+    let lines = on(&events(&d), "auth_failure", "synapsed/bearer");
+    assert_eq!(lines.len(), 1, "{}", events_text(&d));
+    d.stop().await;
+}
+
+#[cfg(unix)]
+#[test]
+fn a_too_open_security_event_file_refuses_to_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    Keystore::init_account(home.path(), "acct").expect("init account");
+    let path = home.path().join(SECURITY_EVENTS_FILE);
+    std::fs::write(&path, b"").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(
+        Daemon::open(&config(home.path())),
+        Err(DaemonError::Security(_))
+    ));
+    // Positive control: the same file at 0600 opens.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(Daemon::open(&config(home.path())).is_ok());
 }

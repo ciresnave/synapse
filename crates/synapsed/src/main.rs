@@ -8,6 +8,8 @@
 //!
 //! Home: `SYNAPSE_HOME` (else the platform default, as for `synapse id`). Address: `SYNAPSE_ADDR`
 //! (default `127.0.0.1:7920`), loopback only. Logs never carry tokens or key material.
+//! Security events (failed bearers and claims, over-budget requests) go to
+//! `<home>/security-events.jsonl`, owner-only; they never carry a token, nonce or signature.
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
