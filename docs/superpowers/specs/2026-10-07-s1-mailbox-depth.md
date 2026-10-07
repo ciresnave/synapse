@@ -60,6 +60,10 @@ already reads):
   - It makes no state change and sends no event.
   - It refuses with `Poisoned` like every other mailbox call (`live()`). The daemon maps any `Err` to
     `pending: null`, as above.
+  - That covers a poisoned *mailbox* and a failed store. A poisoned Rust `Mutex` around the mailbox is a
+    different failure: `list` still answers 503 for it, as every route does.
+  - Only the redb store skips bodies. `MemoryStore`, which is test-only, uses the default
+    `scan_leases`, and its `write` clones its whole state.
 - **Daemon (`synapsed` `list`):**
   - Call `depths(now)` once per request, under the same mailbox lock as `roles_snapshot`, so the epochs
     and counts agree.
@@ -71,7 +75,12 @@ already reads):
 
 1. **Cheap and consistent?**
    - Consistent: yes. Snapshot and counts come from one lock hold and one store transaction.
-   - Cheap: one metadata scan per role, with no bodies. The worst case is 10 000 rows per role.
+   - Cost: one metadata scan per role, with no bodies on redb. The worst case is 10 000 JSON-decoded rows
+     per role, all under the mailbox mutex, which stalls `send`, `fetch` and `ack` for that long.
+   - It runs in a redb write transaction that commits with no changes, because `MailStore` has no read
+     transaction.
+   - **Unmeasured** at 2026-10-07. If agentlife's 10 s poll shows up in latency, the fix is a read
+     transaction on `MailStore`, which would be its own slice. (Review, S-1.)
 2. **Every session, or only agentlife's?**
    - Every session, recommended.
    - `list` already shows every role to any session of the same user, on loopback only.
