@@ -523,9 +523,16 @@ async fn no_sink_still_limits() {
 async fn usernames_are_bounded_before_keying() {
     let capture = Arc::new(Capture::default());
     let port = imap_server(login_limits(2, 100), Some(capture.clone())).await;
-    let long = "u".repeat(10_000);
-    for _ in 0..2 {
-        imap_login(port, &long, WRONG_PASSWORD).await;
+    // Two usernames that agree on their first 256 characters and differ after. Only a key truncated
+    // to 256 characters puts both on one key; untruncated, neither reaches the lockout of 2.
+    let shared = "u".repeat(256);
+    for tail in ["-first", "-second"] {
+        imap_login(
+            port,
+            &format!("{shared}{}", tail.repeat(1_000)),
+            WRONG_PASSWORD,
+        )
+        .await;
     }
     // Both attempts land on one key, so the second locks it, and no field exceeds the bound.
     assert_eq!(

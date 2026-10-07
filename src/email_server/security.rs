@@ -51,8 +51,9 @@ impl Default for LoginLimits {
     }
 }
 
-/// Tuning for the SMTP server's inbound limits, keyed by source IP. Over a limit, the source is
-/// refused for the rest of the minute. Zero refuses every connection or message.
+/// Tuning for the SMTP server's inbound limits, keyed by source IP. The attempt one past a limit
+/// within a sliding minute is refused, and so is that source for a full minute from then. Zero
+/// refuses every connection or message.
 #[derive(Debug, Clone)]
 pub struct InboundLimits {
     /// Connections accepted per source per minute.
@@ -88,6 +89,22 @@ fn per_minute(limit: u32) -> FailureLimiter {
 }
 
 /// The IP of a peer, or `unknown` when the socket could not say.
+/// The limiter key for a source: the IP itself for IPv4, its /64 for IPv6. Anyone holding an IPv6
+/// /64 can rotate through its addresses, so keying the full address would give them a fresh budget
+/// per connection. Events still carry the full address as their source.
+fn source_key(source: &str) -> String {
+    match source.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let prefix = u128::from(v6) & !((1u128 << 64) - 1);
+                format!("{}/64", std::net::Ipv6Addr::from(prefix))
+            }
+        },
+        _ => source.to_string(),
+    }
+}
+
 pub(crate) fn source_ip(peer: std::io::Result<SocketAddr>) -> String {
     peer.map_or_else(|_| "unknown".to_string(), |addr| addr.ip().to_string())
 }
@@ -210,9 +227,10 @@ impl EmailSecurity {
         now: DateTime<Utc>,
     ) -> bool {
         let username = bounded(username);
+        let key = source_key(source);
         let locked = |verdict| matches!(verdict, Verdict::Refuse { .. });
         if locked(self.login.per_user.check(&username, now))
-            || locked(self.login.per_source.check(source, now))
+            || locked(self.login.per_source.check(&key, now))
         {
             let kind = SecurityEventKind::AuthFailure;
             let gate = &self.login.gate;
@@ -233,7 +251,8 @@ impl EmailSecurity {
     ) -> std::time::Duration {
         let username = bounded(username);
         let (user, user_locked) = self.login.per_user.record_failure(&username, now);
-        let (src, source_locked) = self.login.per_source.record_failure(source, now);
+        let key = source_key(source);
+        let (src, source_locked) = self.login.per_source.record_failure(&key, now);
         let gate = &self.login.gate;
         let failure = SecurityEventKind::AuthFailure;
         self.emit(
@@ -250,7 +269,7 @@ impl EmailSecurity {
             self.emit(gate, lockout, surface, &username, source, "per_user", now);
         }
         if source_locked {
-            self.emit(gate, lockout, surface, source, source, "per_source", now);
+            self.emit(gate, lockout, surface, &key, source, "per_source", now);
         }
         delay_of(user).max(delay_of(src))
     }
@@ -274,15 +293,16 @@ impl EmailSecurity {
         limit: &str,
         now: DateTime<Utc>,
     ) -> bool {
-        if matches!(limiter.check(source, now), Verdict::Refuse { .. }) {
+        let key = source_key(source);
+        if matches!(limiter.check(&key, now), Verdict::Refuse { .. }) {
             return false;
         }
-        let (_, tripped) = limiter.record_failure(source, now);
+        let (_, tripped) = limiter.record_failure(&key, now);
         if tripped {
             let kind = SecurityEventKind::RateLimited;
             let gate = &self.inbound.gate;
             let surface = "email/smtp-inbound";
-            self.emit(gate, kind, surface, source, source, limit, now);
+            self.emit(gate, kind, surface, &key, source, limit, now);
             return false;
         }
         true
@@ -316,6 +336,23 @@ mod tests {
             },
             event_interval: Duration::zero(),
         }
+    }
+
+    #[test]
+    fn ipv6_sources_share_a_budget_per_64() {
+        let s = EmailSecurity::default().with_inbound(InboundLimits {
+            connections_per_minute: 1,
+            messages_per_minute: 1,
+            event_interval: Duration::zero(),
+        });
+        let now = t0();
+        assert!(s.connection_allowed("2001:db8:1:2::1", now));
+        // Negative control: another address in the same /64 shares the budget.
+        assert!(!s.connection_allowed("2001:db8:1:2:ffff::9", now));
+        // Positive controls: another /64 does not, and an IPv4-mapped address keys as its IPv4.
+        assert!(s.connection_allowed("2001:db8:1:3::1", now));
+        assert!(s.connection_allowed("::ffff:10.0.0.7", now));
+        assert!(!s.connection_allowed("10.0.0.7", now));
     }
 
     #[test]

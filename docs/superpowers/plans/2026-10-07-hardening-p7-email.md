@@ -44,7 +44,7 @@ backstop refuses a single sprayer before it can lock many accounts.
 | `src/email_server/security.rs` | new: `LoginLimits`, `InboundLimits`, and the crate-private `EmailSecurity` (limiters, `EventGate`, an optional sink set once) |
 | `src/email_server/mod.rs` | `pub mod security`; `SynapseEmailServer::with_security_sink`, `::with_login_limits` |
 | `src/email_server/smtp_server.rs` | the peer IP passed into `handle_connection`; the inbound limits at accept and `MAIL`; the login guard on `AUTH PLAIN`; `with_login_limits`, `with_inbound_limits`, `set_security_sink` |
-| `src/email_server/imap_server.rs` | the peer IP; the login guard on `LOGIN`; `with_login_limits`, `set_security_sink` |
+| `src/email_server/imap_server.rs` | the peer IP; the login guard on `LOGIN`; `with_login_limits`, `set_security_sink`; `serve(listener)`, as the SMTP server has |
 | `src/transport/abstraction.rs` | `Transport::attach_security_sink(&self, Arc<dyn SecuritySink>)`, a provided method that does nothing by default |
 | `src/transport/manager.rs` | `start_transport` attaches the manager's sink, if it has one, before `transport.start()` |
 | `src/transport/security.rs` | `TransportEvents::sink()` (crate-private) |
@@ -87,6 +87,7 @@ written. The countermeasure does not depend on it.
   (so it never delays), `lockout_after = N`, `window = lockout = 1 min`, and `max_keys = 10 000`. One
   `record_failure` is made per connection or message.
 - `event_interval` is 1 s everywhere.
+- **Source keys:** an IPv4 source is keyed by its address. An IPv6 source is keyed by its /64, because anyone holding a /64 can rotate addresses. An IPv4-mapped IPv6 address is keyed as its IPv4. Events still carry the full address as `source`.
 - **Email transport config keys:** `email_inbound_connections_per_minute` and
   `email_inbound_messages_per_minute`. Both are parsed in `EmailLimits::from_config`; zero or a
   non-number is a config error.
@@ -125,3 +126,10 @@ The limits are tuned small, with 1 ms delays, so nothing sleeps for long.
 
 `security.rs` also gets unit tests with time injected: a lockout ends on time, and an inbound limit
 resets after its window.
+
+## Known limits (from the final review, stated in the PR)
+
+- **The delay slows one connection, not a parallel attacker.** The lockout is the real bound.
+- **Check-then-record race.** `login_allowed` and `login_failed` are separate steps with bcrypt between them, so parallel connections can each land about one guess past the limit per lockout cycle. That is bounded by the runtime's worker threads.
+- **Lock state is visible by timing.** A locked attempt answers at once (no bcrypt, no delay). It reveals nothing about passwords. An unknown username already skips bcrypt, which is the pre-existing enumeration oracle in `auth.rs`.
+- **Two paths enforce the limits but have no sink yet:** `router_merged`'s `ensure_email_transport` and its `SynapseEmailServer`. They are follow-ups.
