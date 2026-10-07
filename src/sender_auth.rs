@@ -296,6 +296,22 @@ impl TrustStore {
         self.account_keys.keys().cloned().collect()
     }
 
+    /// Why `revocation` is refused as foreign or forged: `unsupported_version`, `unknown_issuer` or
+    /// `bad_signature`. `None` when it is acceptable; a duplicate is acceptable here, because it is
+    /// not a failure.
+    fn revocation_refusal(&self, revocation: &Revocation) -> Option<&'static str> {
+        if revocation.version != 1 {
+            return Some("unsupported_version");
+        }
+        let Some(entry) = self.account_keys.get(&revocation.issuer_key_id) else {
+            return Some("unknown_issuer");
+        };
+        if !revocation.verify_signature(&entry.key) {
+            return Some("bad_signature");
+        }
+        None
+    }
+
     /// Accept `revocation` if its issuer is a pinned account key, its signature verifies against
     /// that key, and its `(issuer_key_id, serial)` is not already held. Returns whether it was
     /// stored. Before inserting, evicts that issuer's oldest `issued_at` entry once that issuer is
@@ -304,14 +320,18 @@ impl TrustStore {
     /// the most, so one busy issuer cannot cost another issuer its own revocations -- always from
     /// the existing entries, never the one about to be inserted.
     pub fn add_revocation(&mut self, revocation: Revocation) -> bool {
-        if revocation.version != 1 {
-            return false;
-        }
-        let Some(entry) = self.account_keys.get(&revocation.issuer_key_id) else {
-            return false;
-        };
-        if !revocation.verify_signature(&entry.key) {
-            return false;
+        matches!(self.try_add_revocation(revocation), Ok(true))
+    }
+
+    /// As [`Self::add_revocation`], but says why a revocation was refused: `Err` names a foreign or
+    /// forged one (`unsupported_version`, `unknown_issuer`, `bad_signature`); `Ok(false)` is a
+    /// duplicate, which is not a failure; `Ok(true)` means it was stored.
+    pub fn try_add_revocation(
+        &mut self,
+        revocation: Revocation,
+    ) -> std::result::Result<bool, &'static str> {
+        if let Some(reason) = self.revocation_refusal(&revocation) {
+            return Err(reason);
         }
         let issuer = revocation.issuer_key_id.clone();
         if self
@@ -319,7 +339,7 @@ impl TrustStore {
             .get(&issuer)
             .is_some_and(|bucket| bucket.contains_key(&revocation.serial))
         {
-            return false;
+            return Ok(false);
         }
 
         if let Some(bucket) = self.revocations.get(&issuer)
@@ -357,7 +377,7 @@ impl TrustStore {
             .entry(issuer)
             .or_default()
             .insert(revocation.serial, revocation);
-        true
+        Ok(true)
     }
 
     /// Whether a certificate serial has been revoked by that same issuer.

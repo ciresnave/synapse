@@ -10,6 +10,7 @@ use tokio::time::timeout;
 // Core abstraction layer
 pub mod abstraction;
 pub mod manager;
+pub mod security;
 
 // Dependency injection providers for testability
 pub mod providers;
@@ -587,6 +588,7 @@ impl TransportSelector {
 // Re-export all major components for easy access
 pub use abstraction::*;
 pub use manager::*;
+pub use security::KnockLimits;
 
 #[cfg(not(target_arch = "wasm32"))]
 // Removed unexpected cfg feature condition

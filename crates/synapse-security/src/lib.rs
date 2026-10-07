@@ -108,7 +108,8 @@ impl SecuritySink for FileSink {
         };
         line.push(b'\n');
         if let Err(e) = self.write_line(&line) {
-            eprintln!("security: could not write {}: {e}", self.path.display());
+            // No path: it can sit beside a config that names a key's directory.
+            eprintln!("security: could not write the security event file: {e}");
         }
     }
 }

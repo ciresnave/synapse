@@ -693,3 +693,60 @@ async fn a_retention_shorter_than_the_window_is_refused_at_startup() {
     let control_config = McpConfig::from_toml(&control_toml).expect("valid TOML");
     assert!(SynapseMcpServer::start(control_config).await.is_ok());
 }
+
+#[derive(Default)]
+struct Capture(std::sync::Mutex<Vec<synapse::security_events::SecurityEvent>>);
+
+impl synapse::security_events::SecuritySink for Capture {
+    fn record(&self, event: &synapse::security_events::SecurityEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+/// Hardening P6, row 12: the server's receive path inherits the transport's security events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_knock_reaches_the_servers_security_sink() {
+    let dir = tempfile::tempdir().unwrap();
+    let me = identity();
+    let key_path = dir.path().join("bob.pem");
+    std::fs::write(&key_path, &me.private_pem).unwrap();
+    let sealing_path = dir.path().join("bob-sealing.pem");
+    std::fs::write(&sealing_path, me.sealing.to_pkcs8_pem()).unwrap();
+    let port = free_udp_port();
+    let config = McpConfig::from_toml(&format!(
+        "global_id = \"{BOB}\"\nprivate_key_pem_path = \"{}\"\nsealing_key_path = \"{}\"\nudp_bind_port = {port}\n",
+        slash(&key_path),
+        slash(&sealing_path)
+    ))
+    .unwrap();
+    let capture = std::sync::Arc::new(Capture::default());
+    let bob = SynapseMcpServer::start_with_sink(config, capture.clone())
+        .await
+        .expect("server starts");
+
+    // Positive control: polling with nothing received writes no event.
+    poll(&bob).await;
+    assert!(capture.0.lock().unwrap().is_empty());
+
+    let m = SecureMessage::new(
+        BOB,
+        "mallory@synapse.test",
+        b"hi".to_vec(),
+        SecurityLevel::Authenticated,
+    );
+    send_raw(port, &m);
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if poll(&bob).await["dropped"]["unverifiable"].as_u64() == Some(1) {
+            break;
+        }
+    }
+    let events = capture.0.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].surface, "transport/knock");
+    assert_eq!(
+        events[0].kind,
+        synapse::security_events::SecurityEventKind::UnverifiedSender
+    );
+    assert_eq!(events[0].subject, "mallory@synapse.test");
+}
