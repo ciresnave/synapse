@@ -40,7 +40,7 @@ crates/synapse-cli/   binary `synapse`: existing `id` commands + new mail comman
 | POST | `/v1/fetch` | session | `{max?, lease_secs?}` → `{messages: [{message_id, from, body_b64, enqueued_at, lease_until, attempts}]}` |
 | POST | `/v1/ack` | session | `{message_id}` → `{outcome: "removed" \| "already_acked"}` |
 | POST | `/v1/heartbeat` | session | `{summary?}` → `{}` |
-| GET | `/v1/list` | session | → `{roles: [{global_id, epoch, online, last_seen, summary}]}` |
+| GET | `/v1/list` | session | → `{roles: [{global_id, epoch, online, last_seen, summary, pending}]}`; `pending` is `{queued, leased, oldest_enqueued_at}` or `null` when unreadable (S-1, `2026-10-07-s1-mailbox-depth.md`) |
 | GET | `/v1/health` | none | → `{ok: true, version}` |
 
 **Behaviour:**

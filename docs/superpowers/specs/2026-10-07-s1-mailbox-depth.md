@@ -32,6 +32,13 @@ already reads):
 - **`oldest_enqueued_at`:** the minimum `enqueued_at` over all of the role's stored (unacked) messages,
   queued or leased. It is `null` when there are none.
 - **A role with no mail** shows `{"queued": 0, "leased": 0, "oldest_enqueued_at": null}`.
+- **When the depths cannot be read** (the mailbox is poisoned, or the store fails), `list` still answers
+  200, and every role's `pending` is `null`.
+  - Consumers fail closed per field: agentlife treats `null` as unknown, and so never wakes or lazy-stops
+    on it.
+  - This deliberately differs from the mail routes, which answer 503 `store_unavailable`. `list` is also
+    agentlife's source of *online* state, which lives in memory and is still correct. A 503 would hide
+    every role's presence because one field failed. (PM amendment, 2026-10-07.)
 - **Acked history is not counted.**
 
 ## Mechanism
@@ -51,12 +58,14 @@ already reads):
 - **Store access:** the mailbox has only write transactions today. `depths` uses one that writes
   nothing.
   - It makes no state change and sends no event.
-  - It works on a poisoned mailbox the same way `list`'s other reads do. **(Check in the plan:** `live()`
-    refuses when poisoned. `list` should then answer 503 `store_unavailable`, as other routes do.)
+  - It refuses with `Poisoned` like every other mailbox call (`live()`). The daemon maps any `Err` to
+    `pending: null`, as above.
 - **Daemon (`synapsed` `list`):**
   - Call `depths(now)` once per request, under the same mailbox lock as `roles_snapshot`, so the epochs
     and counts agree.
-  - Add `pending` to each entry.
+  - Add `pending` to each entry, or `null` on every entry when `depths` failed. The JSON is built by a pure
+  function (roles, presence, `Option<&depths>`, now), so the `null` case is unit-tested without
+  poisoning a live daemon.
 
 ## Answers to agentlife's questions
 
@@ -69,7 +78,16 @@ already reads):
    - Counts reveal that mail exists, never its content or sender.
    - Restricting by role name would be the first per-role authorization rule in the daemon. Nothing
      needs it.
-3. **M7 / M9 timing:** neither is tasked to this lane yet. That is the PM's to answer.
+3. **M7 / M9 timing:** there is no date, honestly.
+   - Per `2026-09-29-claude-peers-replacement.md`, M7 (the Claude Code channel adapter) needs M6 (the
+     adapters), which comes after M5.
+   - M9 (the cutover) needs everything. It changes how *every* lane messages, so it needs CireSnave's go.
+   - The PM's sequencing for the synapse lane:
+     - finish S-1;
+     - then the remaining hardening rows;
+     - B2 only if board 138 is answered;
+     - then an M6/M7 plan, as a plan only (no code), with an estimate to the PM.
+   - The PM puts the M9 go/no-go on the board when M7 is ready.
 
 **S-2 (an agentlife role):** a long-lived non-model client claims and heartbeats like any other client.
 A session lasts as long as the role's epoch does; there is no token TTL (M5a deferred minor). Its
@@ -92,10 +110,14 @@ messages' `from` is the verified role. No change is needed. **S-3 (SSE):** not i
   - After an ack: the message is gone from both counts. The oldest entry is the minimum across both
     states.
 - **Guard: `RedbTxn::scan_leases` reads no body.**
-  - Assert through `RedbStore::body_writes`'s sibling counter, or by a test that deletes a body row and
-    still gets counts.
-  - The plan picks one.
-  - Control: `scan` on the same store errors or counts the body read.
+  - A new `RedbStore::body_reads()` counter, the sibling of `body_writes()`, stays flat across
+    `depths`.
+  - Control: a `scan` over the same store raises it.
+- **Poisoned:**
+  - Core: `depths` on a poisoned mailbox is `Err(Poisoned)`. Control: the same mailbox before the failed
+    write returns counts.
+  - Daemon: the pure builder with `None` gives `pending: null` on every role, with `online` intact.
+    Control: with `Some`, it gives the counts.
 - **Daemon (`tests/api.rs`):**
   - `list` shows `pending` for an offline role with mail;
   - it moves from queued to leased after the recipient fetches;
