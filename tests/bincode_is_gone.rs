@@ -39,8 +39,12 @@ fn files_containing(files: &[String], needle: &str) -> Vec<String> {
     files
         .iter()
         .filter(|f| {
-            std::fs::read_to_string(root().join(f))
-                .is_ok_and(|text| text.to_lowercase().contains(&needle.to_lowercase()))
+            // Bytes, read lossily: an unreadable file fails the test instead of counting as a miss.
+            let bytes = std::fs::read(root().join(f))
+                .unwrap_or_else(|e| panic!("cannot read tracked file {f}: {e}"));
+            String::from_utf8_lossy(&bytes)
+                .to_lowercase()
+                .contains(&needle.to_lowercase())
         })
         .cloned()
         .collect()

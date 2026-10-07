@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Value wrappers the wire types carry. Their JSON form is the wire format; nothing here depends on a
 //! binary codec. They lived in `synapse::blockchain::serialization`, which still re-exports them,
-//! until the core dropped its unmaintained binary codec (RUSTSEC-2025-0141; plan
-//! `docs/superpowers/plans/2026-10-07-remove-<codec>.md`, where <codec> is the crate removed).
+//! until the core dropped its unmaintained binary codec (RUSTSEC-2025-0141; see the 2026-10-07
+//! removal plan under `docs/superpowers/plans/`).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
