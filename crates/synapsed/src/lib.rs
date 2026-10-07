@@ -17,6 +17,11 @@
 //! - Tokens are kept only as SHA-256 hashes and looked up by hash: the secret is never compared
 //!   byte-wise, stored, or logged.
 //! - A message's sender is always the session's verified role; a client-supplied `from` is refused.
+//! - Brute-force hardening (P5): every failed bearer or claim, and every over-budget challenged
+//!   health, unknown recipient or bad ack, is written as one JSON line to the owner-only
+//!   `<home>/security-events.jsonl` (never a token, nonce or signature), and the failure is
+//!   answered *later*, never differently. Only the failed answer is delayed, never the attempt, so
+//!   a legitimate caller is not slowed by anyone else's failures; there is no lockout anywhere.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -44,6 +49,10 @@ use synapse::mailbox::{
     Acked, Enqueued, Envelope, MailConfig, MailError, Mailbox, RedbStore, StoreError,
 };
 use synapse::roles::ClaimRequest;
+use synapse::security_events::{
+    FailureLimiter, LimiterConfig, SecurityEvent, SecurityEventKind, SecuritySink, Verdict,
+};
+use synapse_security::FileSink;
 
 /// Where and how the daemon runs.
 #[derive(Debug, Clone)]
@@ -65,6 +74,8 @@ pub enum DaemonError {
     Keystore(KeystoreError),
     Store(StoreError),
     Mail(MailError),
+    /// The security event file could not be opened safely.
+    Security(String),
 }
 
 impl fmt::Display for DaemonError {
@@ -75,6 +86,7 @@ impl fmt::Display for DaemonError {
             DaemonError::Keystore(e) => write!(f, "keystore: {e}"),
             DaemonError::Store(e) => write!(f, "{e}"),
             DaemonError::Mail(e) => write!(f, "{e}"),
+            DaemonError::Security(e) => write!(f, "security event file: {e}"),
         }
     }
 }
@@ -118,15 +130,166 @@ struct Shared {
     home: PathBuf,
     started_at: DateTime<Utc>,
     sweep_every: std::time::Duration,
+    security: Security,
+}
+
+/// The size at which the event file rotates to `<file>.1`.
+const SECURITY_EVENTS_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// How the failure budgets and the event file are kept. No limiter ever locks (see [`Security::new`]).
+struct Security {
+    bearer: FailureLimiter,
+    claim: FailureLimiter,
+    health: FailureLimiter,
+    misuse: FailureLimiter,
+    sink: Arc<dyn SecuritySink>,
+    event_interval: std::time::Duration,
+    /// Per (kind, surface): when a line was last written, and how many were held back since.
+    gate: Mutex<HashMap<(SecurityEventKind, &'static str), Gate>>,
+}
+
+#[derive(Default)]
+struct Gate {
+    last_written: Option<std::time::Instant>,
+    held_back: u32,
+}
+
+impl Security {
+    /// Every limiter's `lockout_after` is forced to `u32::MAX`: a global key that could lock would
+    /// let any local user lock the owner out.
+    fn new(config: SecurityConfig, sink: Arc<dyn SecuritySink>) -> Security {
+        let limiter = |mut c: LimiterConfig| {
+            c.lockout_after = u32::MAX;
+            FailureLimiter::new(c)
+        };
+        Security {
+            bearer: limiter(config.bearer),
+            claim: limiter(config.claim),
+            health: limiter(config.health),
+            misuse: limiter(config.misuse),
+            sink,
+            event_interval: config.event_interval,
+            gate: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Records a failure on `key` and returns how long its answer must wait, if at all. Never
+    /// calls `record_success`: on a global key that would reset an attacker's count.
+    fn fail(limiter: &FailureLimiter, key: &str) -> Option<std::time::Duration> {
+        match limiter.record_failure(key, Utc::now()).0 {
+            Verdict::Delay(d) => d.to_std().ok().filter(|d| !d.is_zero()),
+            // `Refuse` needs a lockout, which no limiter here has.
+            Verdict::Allow | Verdict::Refuse { .. } => None,
+        }
+    }
+
+    /// Writes one event, unless one of the same (kind, surface) was written within
+    /// `event_interval`: then it is counted, and the count rides on the next line written. The gate
+    /// keys on the surface, not the subject, because a claimed subject is attacker-chosen.
+    fn emit(&self, kind: SecurityEventKind, surface: &'static str, subject: &str, detail: &str) {
+        let mut detail = detail.to_string();
+        {
+            let mut gate = self
+                .gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = gate.entry((kind, surface)).or_default();
+            let now = std::time::Instant::now();
+            if !self.event_interval.is_zero()
+                && entry
+                    .last_written
+                    .is_some_and(|at| now.duration_since(at) < self.event_interval)
+            {
+                entry.held_back = entry.held_back.saturating_add(1);
+                return;
+            }
+            if entry.held_back > 0 {
+                detail = format!("{detail}; {} similar events held back", entry.held_back);
+            }
+            entry.held_back = 0;
+            entry.last_written = Some(now);
+        }
+        self.sink.record(&SecurityEvent::new(
+            Utc::now(),
+            kind,
+            surface,
+            subject,
+            None,
+            &detail,
+        ));
+    }
+
+    /// Counts one failure against `limiter`'s `key`, and writes a `RateLimited` event only when the
+    /// answer is now delayed (an occasional failure is ordinary).
+    fn over_budget(
+        &self,
+        limiter: &FailureLimiter,
+        key: &str,
+        surface: &'static str,
+        subject: &str,
+        detail: &str,
+    ) -> Option<std::time::Duration> {
+        let delay = Security::fail(limiter, key);
+        if delay.is_some() {
+            self.emit(SecurityEventKind::RateLimited, surface, subject, detail);
+        }
+        delay
+    }
 }
 
 /// The owner-only file in the home where a daemon announces its address and instance id. Only the
 /// same user can read it, so only that user's clients learn which daemon is real (review I3).
 pub const ANNOUNCE_FILE: &str = "synapsed.json";
 
+/// The file in the home where the daemon records security events, one JSON line each.
+pub const SECURITY_EVENTS_FILE: &str = "security-events.jsonl";
+
+/// Tuning for the daemon's limiters and its event file. `Default` is what `synapsed` runs with.
+#[derive(Debug, Clone)]
+pub struct SecurityConfig {
+    /// Row 1, global key `bearer`.
+    pub bearer: LimiterConfig,
+    /// Row 2, keys: the claimed global id, and `claim` as a backstop.
+    pub claim: LimiterConfig,
+    /// Row 3, global key `health`; counts every challenged request.
+    pub health: LimiterConfig,
+    /// Rows 4 and 5, key: the session's global id.
+    pub misuse: LimiterConfig,
+    /// At most one event line per (kind, surface) per interval; later ones are counted and the
+    /// count rides on the next line written. Zero writes every event.
+    pub event_interval: std::time::Duration,
+}
+
+/// A non-locking limiter over a 5-minute window.
+fn budget(free_failures: u32, base_ms: i64, max_ms: i64, max_keys: usize) -> LimiterConfig {
+    LimiterConfig {
+        free_failures,
+        window: chrono::Duration::minutes(5),
+        base_delay: chrono::Duration::milliseconds(base_ms),
+        max_delay: chrono::Duration::milliseconds(max_ms),
+        lockout_after: u32::MAX,
+        lockout: chrono::Duration::zero(),
+        max_keys,
+    }
+}
+
+impl Default for SecurityConfig {
+    /// Health's budget is generous because every CLI command proves the daemon first: 300
+    /// challenges in 5 minutes are free, and only then do answers slow, by at most 2 s.
+    fn default() -> Self {
+        SecurityConfig {
+            bearer: budget(10, 250, 10_000, 16),
+            claim: budget(5, 500, 30_000, 10_000),
+            health: budget(300, 10, 2_000, 4),
+            misuse: budget(20, 250, 10_000, 10_000),
+            event_interval: std::time::Duration::from_secs(1),
+        }
+    }
+}
+
 /// An opened daemon, ready to serve.
 pub struct Daemon {
-    shared: Arc<Shared>,
+    shared: Shared,
 }
 
 struct NoRevocations;
@@ -145,6 +308,11 @@ impl Daemon {
         }
         let keystore = Keystore::open(&cfg.home).map_err(DaemonError::Keystore)?;
         let store = RedbStore::open(&cfg.home.join("mailbox.redb")).map_err(DaemonError::Store)?;
+        let sink = FileSink::open(
+            cfg.home.join(SECURITY_EVENTS_FILE),
+            SECURITY_EVENTS_MAX_BYTES,
+        )
+        .map_err(|e| DaemonError::Security(e.to_string()))?;
         let started_at = Utc::now();
         let mailbox =
             Mailbox::open(store, MailConfig::default(), started_at).map_err(DaemonError::Mail)?;
@@ -152,7 +320,7 @@ impl Daemon {
         let instance_id = hex(&instance);
         let summary = keystore.account();
         Ok(Daemon {
-            shared: Arc::new(Shared {
+            shared: Shared {
                 mailbox: Mutex::new(mailbox),
                 sessions: Mutex::new(HashMap::new()),
                 presence: Mutex::new(HashMap::new()),
@@ -164,8 +332,17 @@ impl Daemon {
                 home: cfg.home.clone(),
                 started_at,
                 sweep_every: cfg.sweep_every,
-            }),
+                security: Security::new(SecurityConfig::default(), Arc::new(sink)),
+            },
         })
+    }
+
+    /// Replaces the default tuning. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_security(mut self, config: SecurityConfig) -> Daemon {
+        let sink = self.shared.security.sink.clone();
+        self.shared.security = Security::new(config, sink);
+        self
     }
 
     /// When the daemon opened its role table. Claims must be signed after this (M3), so clients
@@ -189,15 +366,16 @@ impl Daemon {
                 "synapsed serves on loopback addresses only",
             ));
         }
-        write_announce(&self.shared.home, bound, &self.shared.instance_id)?;
+        let shared = Arc::new(self.shared);
+        write_announce(&shared.home, bound, &shared.instance_id)?;
         // Removed however `serve` ends: shutdown, error or unwind (#74). A kill runs no code, which
         // is why clients rely on the health proof, not on the file's absence.
         let _announced = Announced {
-            home: self.shared.home.clone(),
-            instance_id: self.shared.instance_id.clone(),
+            home: shared.home.clone(),
+            instance_id: shared.instance_id.clone(),
         };
         let sweeper = {
-            let shared = self.shared.clone();
+            let shared = shared.clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(shared.sweep_every);
                 tick.tick().await; // the first tick is immediate
@@ -220,10 +398,12 @@ impl Daemon {
             .route("/v1/ack", post(ack))
             .route("/v1/heartbeat", post(heartbeat))
             .route("/v1/list", get(list))
+            // Inside `host_guard`, so a 421 is neither counted nor delayed.
+            .layer(middleware::from_fn(delay_failures))
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 host_guard(bound, req, next)
             }))
-            .with_state(self.shared.clone());
+            .with_state(shared);
         let result = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown)
             .await;
@@ -253,9 +433,32 @@ async fn host_guard(bound: SocketAddr, req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// A response extension: how long [`delay_failures`] holds the answer back before sending it.
+#[derive(Clone, Copy)]
+struct FailureDelay(std::time::Duration);
+
+/// Holds a response that carries a [`FailureDelay`] back before it is sent. The request has already
+/// been evaluated at full speed, so only the answer is late. This is the only `sleep` in the daemon.
+async fn delay_failures(req: Request, next: Next) -> Response {
+    let response = next.run(req).await;
+    if let Some(FailureDelay(delay)) = response.extensions().get::<FailureDelay>().copied() {
+        tokio::time::sleep(delay).await;
+    }
+    response
+}
+
+/// Marks `response` to be sent late, if a delay is owed.
+fn delayed(mut response: Response, delay: Option<std::time::Duration>) -> Response {
+    if let Some(delay) = delay {
+        response.extensions_mut().insert(FailureDelay(delay));
+    }
+    response
+}
+
 struct ApiError {
     status: StatusCode,
     body: Value,
+    delay: Option<std::time::Duration>,
 }
 
 impl ApiError {
@@ -263,13 +466,21 @@ impl ApiError {
         ApiError {
             status,
             body: json!({"error": kind, "message": message.to_string()}),
+            delay: None,
         }
+    }
+
+    /// Answer this error `delay` late.
+    fn after(mut self, delay: Option<std::time::Duration>) -> Self {
+        self.delay = delay;
+        self
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, axum::Json(self.body)).into_response()
+        let delay = self.delay;
+        delayed((self.status, axum::Json(self.body)).into_response(), delay)
     }
 }
 
@@ -279,6 +490,7 @@ impl From<MailError> for ApiError {
             MailError::Superseded(s) => ApiError {
                 status: StatusCode::CONFLICT,
                 body: json!({"error": "superseded", "current": s.current, "message": e.to_string()}),
+                delay: None,
             },
             MailError::MailboxFull => {
                 ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "mailbox_full", e)
@@ -427,12 +639,21 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
 /// The caller's session: Bearer token, looked up by its hash, then checked against the role's
 /// current epoch. Every authenticated call also counts as presence.
 fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
+    // Row 1: every 401 is counted and recorded before it is sent. A 409 `superseded` is not.
     let unauthorized = || {
+        let delay = Security::fail(&shared.security.bearer, "bearer");
+        shared.security.emit(
+            SecurityEventKind::AuthFailure,
+            "synapsed/bearer",
+            "bearer",
+            "unauthorized",
+        );
         ApiError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "a valid session is required",
         )
+        .after(delay)
     };
     let token = headers
         .get(header::AUTHORIZATION)
@@ -476,6 +697,16 @@ async fn health(
             .ok_or_else(|| malformed("challenge"))?;
         let tag = ring::hmac::sign(&shared.proof_key, &health_proof_message(bound, &challenge));
         reply["proof"] = Value::String(hex(tag.as_ref()));
+        // Row 3: a budget, not a failure count. Over it the proof is still sent (a non-ok reply
+        // would read as a squat to the client), only later.
+        let delay = shared.security.over_budget(
+            &shared.security.health,
+            "health",
+            "synapsed/health",
+            "health",
+            "challenged health over budget",
+        );
+        return Ok(delayed(axum::Json(reply).into_response(), delay));
     }
     Ok(axum::Json(reply).into_response())
 }
@@ -491,14 +722,55 @@ struct ClaimBody {
     signature_b64: String,
 }
 
+/// Row 2: a failed claim (400 `malformed` or 403 `claim_refused`; a 415 never read a body) is
+/// counted against the claimed global id and against `claim`, and answered after the larger delay.
 async fn claim(
     State(shared): State<Arc<Shared>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let body: ClaimBody = parse(&headers, &body)?;
+    let mut claimed = None;
+    match claim_inner(&shared, &headers, &body, &mut claimed) {
+        Err(error) if is_failed_claim(&error) => {
+            let by_id = claimed.as_deref().and_then(|id| {
+                let key = format!("id:{}", id.chars().take(256).collect::<String>());
+                Security::fail(&shared.security.claim, &key)
+            });
+            let backstop = Security::fail(&shared.security.claim, "claim");
+            let kind = error.body["error"].as_str().unwrap_or("claim").to_string();
+            shared.security.emit(
+                SecurityEventKind::AuthFailure,
+                "synapsed/claim",
+                claimed.as_deref().unwrap_or("claim"),
+                &kind,
+            );
+            Err(error.after(by_id.max(backstop)))
+        }
+        other => other,
+    }
+}
+
+fn is_failed_claim(error: &ApiError) -> bool {
+    matches!(
+        (error.status, error.body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("malformed"))
+            | (StatusCode::FORBIDDEN, Some("claim_refused"))
+    )
+}
+
+/// The claim itself. `claimed` is set as soon as the chain parses, so a later failure can be
+/// counted against the global id the caller claimed (attacker-supplied: `Security::emit` sanitizes it).
+fn claim_inner(
+    shared: &Shared,
+    headers: &HeaderMap,
+    body: &Bytes,
+    claimed: &mut Option<String>,
+) -> Result<Response, ApiError> {
+    let body: ClaimBody = parse(headers, body)?;
+    let chain = chain_from_pem(&body.chain_pem).map_err(|_| malformed("chain_pem"))?;
+    *claimed = chain.first().map(|cert| cert.subject_global_id.clone());
     let req = ClaimRequest {
-        chain: chain_from_pem(&body.chain_pem).map_err(|_| malformed("chain_pem"))?,
+        chain,
         nonce: unhex::<16>(&body.nonce_hex).ok_or_else(|| malformed("nonce_hex"))?,
         signed_at: body.signed_at,
         signature: B64
@@ -600,11 +872,20 @@ async fn send(
             .is_some_and(|(_, account)| account == shared.account)
             && mailbox.roles_snapshot().roles.contains_key(&envelope.to);
         if !known {
+            // Row 4: counted per sending role; recorded only once over budget.
+            let delay = shared.security.over_budget(
+                &shared.security.misuse,
+                &session.global_id,
+                "synapsed/recipient",
+                &session.global_id,
+                "unknown_recipient",
+            );
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "unknown_recipient",
                 "no such role on this daemon",
-            ));
+            )
+            .after(delay));
         }
         mailbox.enqueue(envelope, Utc::now())?
     };
@@ -675,12 +956,31 @@ async fn ack(
 ) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
     let body: AckBody = parse(&headers, &body)?;
-    let outcome = locked(&shared.mailbox)?.ack(
+    let result = locked(&shared.mailbox)?.ack(
         &session.global_id,
         session.epoch,
         &body.message_id,
         Utc::now(),
-    )?;
+    );
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e @ (MailError::NotFound | MailError::NotYourLease)) => {
+            // Row 5: counted per role; recorded only once over budget.
+            let delay = shared.security.over_budget(
+                &shared.security.misuse,
+                &session.global_id,
+                "synapsed/ack",
+                &session.global_id,
+                if matches!(e, MailError::NotFound) {
+                    "not_found"
+                } else {
+                    "not_your_lease"
+                },
+            );
+            return Err(ApiError::from(e).after(delay));
+        }
+        Err(e) => return Err(e.into()),
+    };
     Ok(axum::Json(json!({
         "outcome": match outcome { Acked::Removed => "removed", Acked::AlreadyAcked => "already_acked" },
     }))
@@ -737,6 +1037,27 @@ async fn list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P5: the defaults `synapsed` runs with are the plan's table, not `LimiterConfig::default()`
+    /// (5 free, 1 s to 60 s), which would slow the 6th CLI command in 5 minutes.
+    #[test]
+    fn the_default_budgets_are_the_planned_ones() {
+        let c = SecurityConfig::default();
+        let row = |l: &LimiterConfig| {
+            (
+                l.free_failures,
+                l.base_delay.num_milliseconds(),
+                l.max_delay.num_milliseconds(),
+                l.max_keys,
+                l.lockout_after,
+            )
+        };
+        assert_eq!(row(&c.bearer), (10, 250, 10_000, 16, u32::MAX));
+        assert_eq!(row(&c.claim), (5, 500, 30_000, 10_000, u32::MAX));
+        assert_eq!(row(&c.health), (300, 10, 2_000, 4, u32::MAX));
+        assert_eq!(row(&c.misuse), (20, 250, 10_000, 10_000, u32::MAX));
+        assert_eq!(c.event_interval, std::time::Duration::from_secs(1));
+    }
 
     /// #77 D2: `locked` on a poisoned mutex is 503 `store_unavailable`; on a healthy one it yields
     /// the guard. A poisoned lock is unreachable over HTTP without a test hook, so it is poisoned
