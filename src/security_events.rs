@@ -119,11 +119,14 @@ pub struct LimiterConfig {
     pub base_delay: Duration,
     /// The delay doubles per extra failure, capped here.
     pub max_delay: Duration,
-    /// Failures in `window` that lock the key.
+    /// Failures in `window` that lock the key. Attempts reserved with `try_reserve` count toward it
+    /// while in flight, so zero refuses every reserved attempt.
     pub lockout_after: u32,
     /// How long a lockout lasts.
     pub lockout: Duration,
-    /// Bound on tracked keys. When full, the least recently failed eighth is evicted at once.
+    /// Bound on tracked keys. When full, the least recently failed eighth is evicted at once. A key
+    /// with an attempt in flight is never evicted, so the map can exceed this by the number of
+    /// such keys, which the callers' concurrency bounds.
     pub max_keys: usize,
 }
 
@@ -235,21 +238,22 @@ impl FailureLimiter {
     /// each time, so a spray of fresh keys cost O(`max_keys`) per key; a batch makes it O(1)
     /// amortised.
     ///
-    /// A key still locked out, or with an attempt in flight, is evicted only if every tracked key
-    /// is: otherwise an attacker could clear its own lockout, or its reservations, by spraying fresh
-    /// keys until it was evicted.
+    /// A key still locked out is evicted only if every tracked key is: otherwise an attacker could
+    /// clear its own lockout by spraying fresh keys until it was evicted. A key with an attempt in
+    /// flight is never evicted: its release would land on a later attempt's slot.
     fn evict(&self, entries: &mut HashMap<String, Entry>, now: DateTime<Utc>) {
-        let locked = |e: &Entry| e.in_flight > 0 || e.locked_until.is_some_and(|until| now < until);
+        let locked = |e: &Entry| e.locked_until.is_some_and(|until| now < until);
         let mut order: Vec<_> = entries
             .iter()
+            .filter(|(_, e)| e.in_flight == 0)
             .map(|(k, e)| (locked(e), e.last_failure(), k))
             .collect();
         let unlocked = order.iter().filter(|(is_locked, ..)| !is_locked).count();
-        let excess = entries.len() + 1 - self.config.max_keys;
+        let excess = (entries.len() + 1).saturating_sub(self.config.max_keys);
         let n = if unlocked > 0 {
             (self.config.max_keys / 8).max(excess).min(unlocked)
         } else {
-            excess
+            excess.min(order.len())
         };
         if n < order.len() {
             order.select_nth_unstable(n);
@@ -314,6 +318,9 @@ impl FailureLimiter {
         if entry.locked_until.is_some()
             || failures.saturating_add(entry.in_flight) >= self.config.lockout_after
         {
+            if failures == 0 && entry.locked_until.is_none() && entry.in_flight == 0 {
+                entries.remove(key);
+            }
             return false;
         }
         entry.in_flight += 1;
@@ -321,10 +328,16 @@ impl FailureLimiter {
     }
 
     /// Ends an attempt reserved by [`try_reserve`](Self::try_reserve). Record a failure before
-    /// releasing it, so the key is never briefly under-counted.
+    /// releasing it, so the key is never briefly under-counted. A key left with no failures, no
+    /// lockout and nothing in flight is forgotten, so attempts that never fail leave no key.
     pub fn release(&self, key: &str) {
-        if let Some(entry) = self.lock().get_mut(key) {
-            entry.in_flight = entry.in_flight.saturating_sub(1);
+        let mut entries = self.lock();
+        let Some(entry) = entries.get_mut(key) else {
+            return;
+        };
+        entry.in_flight = entry.in_flight.saturating_sub(1);
+        if entry.in_flight == 0 && entry.failures.is_empty() && entry.locked_until.is_none() {
+            entries.remove(key);
         }
     }
 
@@ -334,7 +347,7 @@ impl FailureLimiter {
         self.lock().remove(key);
     }
 
-    /// How many keys are tracked (never more than `max_keys`).
+    /// How many keys are tracked (never more than `max_keys`, plus keys with attempts in flight).
     pub fn tracked_keys(&self) -> usize {
         self.lock().len()
     }

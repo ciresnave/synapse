@@ -131,5 +131,5 @@ resets after its window.
 
 - **The delay slows one connection, not a parallel attacker.** The lockout is the real bound.
 - **Check-then-record race (closed by the a1 follow-up).** This was: `login_allowed` and `login_failed` were separate steps with bcrypt between them, so parallel connections could each land about one guess past the limit per lockout cycle. Now `begin_login` reserves a slot in both limiters (`FailureLimiter::try_reserve`), and an attempt in flight counts as a presumed failure until it ends.
-- **Lock state is visible by timing.** A locked attempt answers at once (no bcrypt, no delay). It reveals nothing about passwords. An unknown username already skips bcrypt, which is the pre-existing enumeration oracle in `auth.rs`.
+- **Lock state is visible by timing.** A locked attempt answers at once (no bcrypt, no delay), and so (since the a1 follow-up) does one refused because attempts in flight would reach the lockout. It reveals nothing about passwords. An unknown username already skips bcrypt, which is the pre-existing enumeration oracle in `auth.rs`.
 - **Two paths enforce the limits but have no sink yet:** `router_merged`'s `ensure_email_transport` and its `SynapseEmailServer`. They are follow-ups.

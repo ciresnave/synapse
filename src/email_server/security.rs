@@ -231,8 +231,9 @@ impl EmailSecurity {
         let username = bounded(username);
         let key = source_key(source);
         let login = &self.login;
-        if login.per_user.try_reserve(&username, now) {
-            if login.per_source.try_reserve(&key, now) {
+        // The source first: it is the backstop, and a locked source then touches no user key.
+        if login.per_source.try_reserve(&key, now) {
+            if login.per_user.try_reserve(&username, now) {
                 return Some(LoginAttempt {
                     security: self.clone(),
                     surface: surface.to_string(),
@@ -241,10 +242,19 @@ impl EmailSecurity {
                     key,
                 });
             }
-            login.per_user.release(&username);
+            login.per_source.release(&key);
         }
+        // Refused either for a lockout, or because the attempts in flight would reach one.
+        let locked = |limiter: &FailureLimiter, k: &str| {
+            matches!(limiter.check(k, now), Verdict::Refuse { .. })
+        };
+        let detail = if locked(&login.per_user, &username) || locked(&login.per_source, &key) {
+            "locked"
+        } else {
+            "in_flight"
+        };
         let kind = SecurityEventKind::AuthFailure;
-        self.emit(&login.gate, kind, surface, &username, source, "locked", now);
+        self.emit(&login.gate, kind, surface, &username, source, detail, now);
         None
     }
 
@@ -427,6 +437,62 @@ mod tests {
         assert!(s.begin_login("t", "bob", "10.0.0.1", now).is_some());
         drop(second);
         assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_some());
+    }
+
+    // Review of a1, finding 3: when one limiter refuses, the slot already taken in the other is
+    // given back, or a locked username would pin its source's budget.
+    #[test]
+    fn a_refused_login_gives_back_the_slot_it_took() {
+        let mut limits = quick(2);
+        limits.per_source.lockout_after = 3;
+        let s = EmailSecurity::default().with_login(limits);
+        let now = t0();
+        for _ in 0..2 {
+            s.begin_login("t", "alice", "10.0.0.1", now)
+                .unwrap()
+                .failed(now);
+        }
+        // Alice is locked; the source has two failures of three.
+        assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_none());
+        // Negative control: had that refusal kept its source slot, two failures plus one slot would
+        // fill the source's budget and refuse bob.
+        assert!(s.begin_login("t", "bob", "10.0.0.1", now).is_some());
+    }
+
+    // Review of a1, finding 2: a refusal because attempts are in flight is not a lockout, and its
+    // event says so.
+    #[test]
+    fn a_busy_refusal_is_not_reported_as_locked() {
+        struct Capture(std::sync::Mutex<Vec<SecurityEvent>>);
+        impl SecuritySink for Capture {
+            fn record(&self, event: &SecurityEvent) {
+                self.0.lock().unwrap().push(event.clone());
+            }
+        }
+        let capture = Arc::new(Capture(std::sync::Mutex::new(Vec::new())));
+        let s = EmailSecurity::default().with_login(quick(2));
+        s.set_sink(capture.clone());
+        let now = t0();
+        let _first = s.begin_login("t", "alice", "10.0.0.1", now).unwrap();
+        let _second = s.begin_login("t", "alice", "10.0.0.1", now).unwrap();
+        assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_none());
+        // Positive control: a real lockout is still reported as locked.
+        drop((_first, _second));
+        for _ in 0..2 {
+            s.begin_login("t", "alice", "10.0.0.1", now)
+                .unwrap()
+                .failed(now);
+        }
+        assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_none());
+        let refusals: Vec<String> = capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.detail != "bad_credentials" && e.kind == SecurityEventKind::AuthFailure)
+            .map(|e| e.detail.clone())
+            .collect();
+        assert_eq!(refusals, ["in_flight", "locked"]);
     }
 
     #[test]

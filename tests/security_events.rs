@@ -541,3 +541,46 @@ fn eviction_never_drops_an_attempt_in_flight() {
     l.release("slow");
     assert!(l.try_reserve("slow", now + secs(200)));
 }
+
+// Review of a1, finding 1: a reservation that ends without a failure must leave no key behind.
+// Otherwise a locked source could plant empty keys with no bcrypt and no record, filling the map
+// until eviction cleared other accounts' partial counts.
+#[test]
+fn a_released_reservation_leaves_no_key_behind() {
+    let l = reserving(3, 100);
+    let now = t0();
+    assert!(l.try_reserve("alice", now));
+    l.release("alice");
+    // Negative control: nothing is tracked once the only attempt ends without a failure.
+    assert_eq!(l.tracked_keys(), 0, "a released reservation left its key");
+    // Positive control: a recorded failure is still tracked after its reservation ends.
+    assert!(l.try_reserve("bob", now));
+    l.record_failure("bob", now);
+    l.release("bob");
+    assert_eq!(l.tracked_keys(), 1);
+}
+
+// Review of a1, finding 4: when every tracked key has an attempt in flight, eviction must not drop
+// one, or its release lands on a later attempt's slot. The map may then exceed `max_keys` by the
+// attempts in flight, which the callers' worker threads bound.
+#[test]
+fn a_full_map_of_attempts_in_flight_evicts_none_of_them() {
+    let l = reserving(2, 2);
+    let now = t0();
+    for key in ["a", "b"] {
+        assert!(l.try_reserve(key, now));
+        assert!(l.try_reserve(key, now));
+    }
+    assert!(l.try_reserve("c", now));
+    // Negative control: "a" still has its two attempts in flight. Had it been evicted, it would
+    // reserve again.
+    assert!(
+        !l.try_reserve("a", now),
+        "eviction dropped an attempt in flight"
+    );
+    assert_eq!(l.tracked_keys(), 3);
+    // Positive control: once its attempts end, the map shrinks back as keys are released.
+    l.release("a");
+    l.release("a");
+    assert_eq!(l.tracked_keys(), 2);
+}
