@@ -38,8 +38,9 @@ Use `serde_json::to_vec` and `serde_json::from_slice` instead, which is the wire
   across both servers. A login whose password is still being checked now counts as a failure
   until it finishes. So while recent failures plus logins in progress reach a limit, even a
   correct password is refused. The refusal is logged as an `auth_failure` security event with
-  detail `in_flight`, unlike a real lockout, which has detail `locked`. It clears as soon as the
-  logins in progress finish. This closes a race in which parallel connections could each guess
+  detail `in_flight`, unlike a real lockout, which has detail `locked`. It clears when the logins
+  in progress finish, unless they fail: each wrong password becomes a recorded failure and can
+  complete a real lockout (15 minutes). This closes a race in which parallel connections could each guess
   past the limit.
 
 ## [1.0.0] - 2023-07-01

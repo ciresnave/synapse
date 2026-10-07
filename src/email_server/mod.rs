@@ -303,6 +303,21 @@ mod tests {
                 .is_none()
     }
 
+    fn accepted_on_both(
+        server: &SynapseEmailServer,
+        user: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> bool {
+        // Each attempt drops at once, which releases its slot without recording a failure.
+        let smtp = server.smtp_server.security();
+        let imap = server.imap_server.security();
+        smtp.begin_login("smtp_auth", user, "10.0.0.1", now)
+            .is_some()
+            && imap
+                .begin_login("imap_login", user, "10.0.0.1", now)
+                .is_some()
+    }
+
     // P7 follow-up (a2): an attacker who splits guesses between SMTP and IMAP gets one budget, not
     // one per server. The default per-user lockout is ten failures.
     #[test]
@@ -311,7 +326,7 @@ mod tests {
         let now = t0();
         fail_alternately(&server, 9, now);
         // Positive control: nine failures, five on SMTP and four on IMAP, leave one attempt.
-        assert!(!refused_on_both(&server, "alice", now));
+        assert!(accepted_on_both(&server, "alice", now));
         let imap = server.imap_server.security();
         imap.begin_login("imap_login", "alice", "10.0.0.1", now)
             .unwrap()
@@ -319,7 +334,7 @@ mod tests {
         // Negative control: the tenth failure locks alice on both servers, though neither saw ten.
         assert!(refused_on_both(&server, "alice", now));
         // Positive control: another user is unaffected.
-        assert!(!refused_on_both(&server, "bob", now));
+        assert!(accepted_on_both(&server, "bob", now));
     }
 
     // `with_login_limits` replaces the guard; both servers must take the same replacement.
@@ -345,7 +360,7 @@ mod tests {
         let now = t0();
         fail_alternately(&server, 1, now);
         // Positive control: one SMTP failure of two leaves IMAP an attempt.
-        assert!(!refused_on_both(&server, "alice", now));
+        assert!(accepted_on_both(&server, "alice", now));
         let imap = server.imap_server.security();
         imap.begin_login("imap_login", "alice", "10.0.0.1", now)
             .unwrap()
