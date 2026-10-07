@@ -31,6 +31,14 @@ Use `serde_json::to_vec` and `serde_json::from_slice` instead, which is the wire
 - `DateTimeWrapper` and `UuidWrapper` now live in `synapse::wire`. `synapse::types::…` and
   `synapse::blockchain::serialization::…` still re-export them.
 
+### Added
+
+- **`SynapseRouter::with_security_sink` (6.0.0-rc.15).** The router's email transport and email
+  server now record their own security events (Direct-mode inbound limits, email login failures
+  and lockouts) to the sink you give it. Before, they enforced the limits but recorded nothing.
+  Set it before the router's first send or receive. `SynapseEmailServer::set_security_sink` does
+  the same for a server already behind an `Arc`.
+
 ### Changed (behaviour)
 
 - **Email logins: attempts in progress count against the lockout (6.0.0-rc.13).** SMTP `AUTH` and

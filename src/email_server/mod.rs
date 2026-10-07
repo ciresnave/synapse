@@ -136,8 +136,19 @@ impl SynapseEmailServer {
     /// Where both servers' security events go (hardening P7). The first call wins.
     #[must_use]
     pub fn with_security_sink(self, sink: Arc<dyn crate::security_events::SecuritySink>) -> Self {
-        self.security.set_sink(sink);
+        self.set_security_sink(sink);
         self
+    }
+
+    /// [`Self::with_security_sink`] for a server already shared behind an `Arc`.
+    pub fn set_security_sink(&self, sink: Arc<dyn crate::security_events::SecuritySink>) {
+        self.security.set_sink(sink);
+    }
+
+    /// The guard both servers share, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn security(&self) -> &security::EmailSecurity {
+        &self.security
     }
 
     /// Replaces the login guard's tuning for both servers, which keep sharing one budget.
