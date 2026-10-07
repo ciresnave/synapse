@@ -9,6 +9,7 @@
 //! `synapse claim|send|inbox|ack|list --role <role>` (or `SYNAPSE_ROLE`). `inbox` and `list` print
 //! one JSON object per line. Session tokens are never printed.
 
+mod events;
 mod mail;
 
 use std::io::{IsTerminal, Read};
@@ -17,7 +18,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use synapse::certificate::Permission;
-use synapse::keystore::{Keystore, default_home, valid_name};
+use synapse::keystore::{Keystore, KeystoreError, default_home, valid_name};
+use synapse::security_events::SecurityEventKind;
 
 use mail::{Daemon, MailError};
 
@@ -100,6 +102,18 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
+            // Hardening P8, rows 6 and 7: every owner-only check the CLI reaches, in the keystore
+            // or in `mail`, propagates to here, so its refusal is recorded once, before exiting.
+            if let MailError::Keystore(KeystoreError::PermissionsTooOpen(item)) = &e {
+                events::record(
+                    default_home().ok().as_deref(),
+                    SecurityEventKind::PermissionsTooOpen,
+                    "synapsectl/files",
+                    item,
+                    None,
+                    "refused: accessible to more than its owner",
+                );
+            }
             eprintln!("error: {e}");
             ExitCode::from(2)
         }
