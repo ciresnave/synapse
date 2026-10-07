@@ -31,6 +31,17 @@ Use `serde_json::to_vec` and `serde_json::from_slice` instead, which is the wire
 - `DateTimeWrapper` and `UuidWrapper` now live in `synapse::wire`. `synapse::types::…` and
   `synapse::blockchain::serialization::…` still re-export them.
 
+### Changed (behaviour)
+
+- **Email logins: attempts in progress count against the lockout (6.0.0-rc.13).** SMTP `AUTH` and
+  IMAP `LOGIN` share one budget per username (10 failures) and per source address (50 failures)
+  across both servers. A login whose password is still being checked now counts as a failure
+  until it finishes. So while recent failures plus logins in progress reach a limit, even a
+  correct password is refused. The refusal is logged as an `auth_failure` security event with
+  detail `in_flight`, unlike a real lockout, which has detail `locked`. It clears as soon as the
+  logins in progress finish. This closes a race in which parallel connections could each guess
+  past the limit.
+
 ## [1.0.0] - 2023-07-01
 
 ### Added

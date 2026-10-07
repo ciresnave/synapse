@@ -75,33 +75,12 @@ impl SynapseEmailServer {
             },
         };
 
-        // Shared message store
-        let message_store = Arc::new(Mutex::new(HashMap::new()));
-
-        // Create servers, sharing one message store between them (previously the SMTP server held
-        // its own private store that the IMAP server, and everything else, could never read), and
-        // one login guard, so guesses split across SMTP and IMAP count against one budget.
-        let security = security::EmailSecurity::default();
-        let smtp_server = SynapseSmtpServer::new(
+        Ok(Self::assemble(
             smtp_config,
-            Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
-            Arc::clone(&message_store),
-        )
-        .with_security(security.clone());
-        let imap_server = SynapseImapServer::new(
             imap_config,
-            Arc::clone(&message_store),
-            Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
-        )
-        .with_security(security.clone());
-
-        Ok(Self {
-            smtp_server,
-            imap_server,
             connectivity,
             auth_handler,
-            security,
-        })
+        ))
     }
 
     /// Create email server with custom configuration
@@ -111,6 +90,24 @@ impl SynapseEmailServer {
         connectivity: ConnectivityAssessment,
     ) -> Result<Self> {
         let auth_handler = Arc::new(SynapseAuthHandler::new());
+        Ok(Self::assemble(
+            smtp_config,
+            imap_config,
+            connectivity,
+            auth_handler,
+        ))
+    }
+
+    /// Builds the pair both constructors return. The servers share one message store (previously
+    /// the SMTP server held its own private store that the IMAP server, and everything else, could
+    /// never read) and one login guard, so guesses split across SMTP and IMAP count against one
+    /// budget.
+    fn assemble(
+        smtp_config: SmtpServerConfig,
+        imap_config: ImapServerConfig,
+        connectivity: ConnectivityAssessment,
+        auth_handler: Arc<SynapseAuthHandler>,
+    ) -> Self {
         let message_store = Arc::new(Mutex::new(HashMap::new()));
         let security = security::EmailSecurity::default();
 
@@ -127,13 +124,13 @@ impl SynapseEmailServer {
         )
         .with_security(security.clone());
 
-        Ok(Self {
+        Self {
             smtp_server,
             imap_server,
             connectivity,
             auth_handler,
             security,
-        })
+        }
     }
 
     /// Where both servers' security events go (hardening P7). The first call wins.
@@ -244,5 +241,116 @@ impl SynapseEmailServer {
             self.connectivity.recommended_config,
             ServerRecommendation::RunLocalServer { .. } | ServerRecommendation::RelayOnly { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security_events::LimiterConfig;
+    use chrono::{Duration, TimeZone, Utc};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn t0() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap()
+    }
+
+    fn pair() -> SynapseEmailServer {
+        let connectivity = ConnectivityAssessment {
+            can_bind_smtp: false,
+            can_bind_imap: false,
+            has_external_ip: false,
+            external_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            firewall_status: connectivity::FirewallStatus::Unknown,
+            recommended_config: ServerRecommendation::ExternalProvider {
+                reason: "test".into(),
+            },
+        };
+        SynapseEmailServer::with_config(
+            SmtpServerConfig::default(),
+            ImapServerConfig::default(),
+            connectivity,
+        )
+        .unwrap()
+    }
+
+    /// One failed login on each server, alternating SMTP `AUTH` and IMAP `LOGIN`.
+    fn fail_alternately(server: &SynapseEmailServer, failures: u32, now: chrono::DateTime<Utc>) {
+        for i in 0..failures {
+            let (security, surface) = if i % 2 == 0 {
+                (server.smtp_server.security(), "smtp_auth")
+            } else {
+                (server.imap_server.security(), "imap_login")
+            };
+            security
+                .begin_login(surface, "alice", "10.0.0.1", now)
+                .expect("refused before the shared budget was spent")
+                .failed(now);
+        }
+    }
+
+    fn refused_on_both(
+        server: &SynapseEmailServer,
+        user: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> bool {
+        let smtp = server.smtp_server.security();
+        let imap = server.imap_server.security();
+        smtp.begin_login("smtp_auth", user, "10.0.0.1", now)
+            .is_none()
+            && imap
+                .begin_login("imap_login", user, "10.0.0.1", now)
+                .is_none()
+    }
+
+    // P7 follow-up (a2): an attacker who splits guesses between SMTP and IMAP gets one budget, not
+    // one per server. The default per-user lockout is ten failures.
+    #[test]
+    fn smtp_and_imap_failures_share_one_login_budget() {
+        let server = pair();
+        let now = t0();
+        fail_alternately(&server, 9, now);
+        // Positive control: nine failures, five on SMTP and four on IMAP, leave one attempt.
+        assert!(!refused_on_both(&server, "alice", now));
+        let imap = server.imap_server.security();
+        imap.begin_login("imap_login", "alice", "10.0.0.1", now)
+            .unwrap()
+            .failed(now);
+        // Negative control: the tenth failure locks alice on both servers, though neither saw ten.
+        assert!(refused_on_both(&server, "alice", now));
+        // Positive control: another user is unaffected.
+        assert!(!refused_on_both(&server, "bob", now));
+    }
+
+    // `with_login_limits` replaces the guard; both servers must take the same replacement.
+    #[test]
+    fn new_login_limits_keep_the_budget_shared() {
+        let limiter = LimiterConfig {
+            free_failures: 1,
+            window: Duration::minutes(15),
+            base_delay: Duration::milliseconds(1),
+            max_delay: Duration::milliseconds(5),
+            lockout_after: 2,
+            lockout: Duration::minutes(15),
+            max_keys: 100,
+        };
+        let server = pair().with_login_limits(security::LoginLimits {
+            per_user: limiter.clone(),
+            per_source: LimiterConfig {
+                lockout_after: 1_000,
+                ..limiter
+            },
+            event_interval: Duration::zero(),
+        });
+        let now = t0();
+        fail_alternately(&server, 1, now);
+        // Positive control: one SMTP failure of two leaves IMAP an attempt.
+        assert!(!refused_on_both(&server, "alice", now));
+        let imap = server.imap_server.security();
+        imap.begin_login("imap_login", "alice", "10.0.0.1", now)
+            .unwrap()
+            .failed(now);
+        // Negative control: one failure on each server reaches the new limit of two.
+        assert!(refused_on_both(&server, "alice", now));
     }
 }
