@@ -23,7 +23,7 @@
 //!   answered *later*, never differently. Only the failed answer is delayed, never the attempt, so
 //!   a legitimate caller is not slowed by anyone else's failures; there is no lockout anywhere.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -46,9 +46,9 @@ use serde_json::{Value, json};
 use synapse::certificate::{RevocationLookup, chain_from_pem};
 use synapse::keystore::{Keystore, KeystoreError};
 use synapse::mailbox::{
-    Acked, Enqueued, Envelope, MailConfig, MailError, Mailbox, RedbStore, StoreError,
+    Acked, Depth, Enqueued, Envelope, MailConfig, MailError, Mailbox, RedbStore, StoreError,
 };
-use synapse::roles::ClaimRequest;
+use synapse::roles::{ClaimRequest, RolesState};
 use synapse::security_events::{
     FailureLimiter, LimiterConfig, SecurityEvent, SecurityEventKind, SecuritySink, Verdict,
 };
@@ -1039,29 +1039,108 @@ async fn heartbeat(
 
 async fn list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<Response, ApiError> {
     authed(&shared, &headers)?;
-    let roles = locked(&shared.mailbox)?.roles_snapshot();
-    let presence = locked(&shared.presence)?;
     let now = Utc::now();
-    let out: Vec<Value> = roles
+    // One lock hold, so every depth is counted against the epoch listed beside it.
+    let (roles, depths) = {
+        let mailbox = locked(&shared.mailbox)?;
+        (mailbox.roles_snapshot(), mailbox.depths(now).ok())
+    };
+    let presence = locked(&shared.presence)?;
+    let out = list_entries(&roles, &presence, depths.as_ref(), now);
+    Ok(axum::Json(json!({ "roles": out })).into_response())
+}
+
+/// `list`'s entries. When the depths could not be read (a poisoned mailbox or a failed store),
+/// every `pending` is `null` and the rest is still served: presence lives in memory and is still
+/// right, and a watcher that also reads `online` here must not lose it to one unreadable field
+/// (S-1, PM amendment). Consumers treat `null` as unknown.
+fn list_entries(
+    roles: &RolesState,
+    presence: &HashMap<String, Presence>,
+    depths: Option<&BTreeMap<String, Depth>>,
+    now: DateTime<Utc>,
+) -> Vec<Value> {
+    roles
         .roles
         .iter()
         .map(|(global_id, record)| {
             let seen = presence.get(global_id);
+            let pending = depths.map(|all| {
+                let depth = all.get(global_id).copied().unwrap_or_default();
+                json!({
+                    "queued": depth.queued,
+                    "leased": depth.leased,
+                    "oldest_enqueued_at": depth.oldest_enqueued_at.map(|at| at.to_rfc3339()),
+                })
+            });
             json!({
                 "global_id": global_id,
                 "epoch": record.epoch,
                 "online": seen.is_some_and(|p| now - p.last_seen <= ONLINE_WINDOW),
                 "last_seen": seen.map(|p| p.last_seen.to_rfc3339()),
                 "summary": seen.and_then(|p| p.summary.clone()),
+                "pending": pending,
             })
         })
-        .collect();
-    Ok(axum::Json(json!({ "roles": out })).into_response())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use synapse::roles::RoleRecord;
+
+    /// S-1: with depths, each entry carries them; without (the mailbox could not be read), every
+    /// `pending` is `null` and presence is still served.
+    #[test]
+    fn list_entries_carry_pending_or_null() {
+        let now = Utc::now();
+        let mut roles = RolesState::default();
+        for role in ["alpha@acct", "beta@acct"] {
+            roles.roles.insert(
+                role.to_string(),
+                RoleRecord {
+                    epoch: 4,
+                    claimed_at: now,
+                },
+            );
+        }
+        let mut presence = HashMap::new();
+        presence.insert(
+            "alpha@acct".to_string(),
+            Presence {
+                last_seen: now,
+                summary: Some("busy".into()),
+            },
+        );
+        let mut depths = BTreeMap::new();
+        depths.insert(
+            "alpha@acct".to_string(),
+            Depth {
+                queued: 2,
+                leased: 1,
+                oldest_enqueued_at: Some(now),
+            },
+        );
+
+        let with = list_entries(&roles, &presence, Some(&depths), now);
+        assert_eq!(with[0]["pending"]["queued"], 2);
+        assert_eq!(with[0]["pending"]["leased"], 1);
+        assert_eq!(with[0]["pending"]["oldest_enqueued_at"], now.to_rfc3339());
+        assert_eq!(
+            with[1]["pending"],
+            json!({"queued": 0, "leased": 0, "oldest_enqueued_at": null}),
+            "a role with no mail"
+        );
+
+        let without = list_entries(&roles, &presence, None, now);
+        for entry in &without {
+            assert!(entry["pending"].is_null(), "{entry}");
+            assert_eq!(entry["epoch"], 4);
+        }
+        assert_eq!(without[0]["online"], true, "presence survives");
+        assert_eq!(without[0]["summary"], "busy");
+    }
 
     /// P5: the defaults `synapsed` runs with are the plan's table, not `LimiterConfig::default()`
     /// (5 free, 1 s to 60 s), which would slow the 6th CLI command in 5 minutes.

@@ -50,6 +50,8 @@ cases!(
     a_lease_outside_the_range_is_refused,
     mail_waits_for_a_role_that_has_not_claimed_yet,
     claims_are_written_through_the_store,
+    depths_count_queued_and_leased_per_role,
+    an_expired_or_superseded_lease_counts_as_queued,
 );
 
 const LANE: &str = "lane@acct";
@@ -342,4 +344,25 @@ fn an_update_with_another_body_keeps_the_stored_body_and_the_stats() {
         })
         .unwrap();
     assert_eq!(stats, Some((1, 2)), "only n (2 bytes) remains");
+}
+
+/// S-1: `list` polls depths every few seconds, so counting a queue must never load its bodies (a
+/// role may hold up to `max_bytes` of them).
+#[test]
+fn depths_read_no_body() {
+    let ids = suite::Ids::new();
+    let mut mb = suite::open(fresh());
+    ids.claim(&mut mb, "lane", suite::t0());
+    mb.enqueue(suite::env("m1", LANE, b"one"), suite::t0())
+        .unwrap();
+    mb.enqueue(suite::env("m2", LANE, b"two"), suite::t0())
+        .unwrap();
+    let before = mb.store().body_reads();
+    assert_eq!(mb.depths(suite::t0()).unwrap()[LANE].queued, 2);
+    assert_eq!(mb.store().body_reads(), before, "depths loaded a body");
+    // Control: a scan of the same queue does load them.
+    mb.store()
+        .write(&mut |txn| txn.scan(LANE, &mut |_| true).map_err(MailError::Store))
+        .unwrap();
+    assert_eq!(mb.store().body_reads(), before + 2);
 }

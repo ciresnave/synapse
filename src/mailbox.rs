@@ -128,6 +128,15 @@ pub enum Acked {
     AlreadyAcked,
 }
 
+/// One role's mailbox depth at a moment (S-1): what `fetch` would hand out next, what the role's
+/// current epoch holds, and when the oldest of either arrived. Acked mail is in neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Depth {
+    pub queued: usize,
+    pub leased: usize,
+    pub oldest_enqueued_at: Option<DateTime<Utc>>,
+}
+
 /// A store failure, described without message contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreError(pub String);
@@ -187,6 +196,18 @@ pub trait MailTxn {
     /// Visit the role's queue in ascending `seq`, stopping when `visit` returns `false`. Lets a
     /// store stop early instead of loading a whole queue (final review I2).
     fn scan(&self, role: &str, visit: &mut dyn FnMut(&Stored) -> bool) -> Result<(), StoreError>;
+    /// Visit each of the role's messages' `enqueued_at` and lease, never its body (S-1). The default
+    /// goes through [`MailTxn::scan`]; a store that keeps bodies apart should override it.
+    fn scan_leases(
+        &self,
+        role: &str,
+        visit: &mut dyn FnMut(DateTime<Utc>, Option<&Lease>),
+    ) -> Result<(), StoreError> {
+        self.scan(role, &mut |stored| {
+            visit(stored.enqueued_at, stored.lease.as_ref());
+            true
+        })
+    }
     fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError>;
     /// Insert, or replace by `envelope.message_id`.
     fn put(&mut self, role: &str, stored: Stored) -> Result<(), StoreError>;
@@ -356,6 +377,37 @@ impl<S: MailStore> Mailbox<S> {
     #[must_use]
     pub fn roles_snapshot(&self) -> RolesState {
         self.roles.snapshot()
+    }
+
+    /// Every claimed role's [`Depth`] at `now` (S-1, the daemon's `list`). Changes nothing. A lease
+    /// counts as leased only while `fetch` would withhold it: unexpired, and held by the role's
+    /// current epoch.
+    pub fn depths(&self, now: DateTime<Utc>) -> Result<BTreeMap<String, Depth>, MailError> {
+        self.live()?;
+        let roles = self.roles.snapshot();
+        let mut out = BTreeMap::new();
+        self.store.write(&mut |txn| {
+            out.clear();
+            for (role, record) in &roles.roles {
+                let mut depth = Depth::default();
+                txn.scan_leases(role, &mut |enqueued_at, lease| {
+                    if lease.is_some_and(|held| held.epoch == record.epoch && held.until > now) {
+                        depth.leased += 1;
+                    } else {
+                        depth.queued += 1;
+                    }
+                    depth.oldest_enqueued_at = Some(
+                        depth
+                            .oldest_enqueued_at
+                            .map_or(enqueued_at, |oldest| oldest.min(enqueued_at)),
+                    );
+                })
+                .map_err(MailError::Store)?;
+                out.insert(role.clone(), depth);
+            }
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// The underlying store (tests and the daemon's diagnostics).
@@ -563,6 +615,7 @@ impl<S: MailStore> Mailbox<S> {
 pub struct RedbStore {
     db: redb::Database,
     body_writes: std::sync::atomic::AtomicU64,
+    body_reads: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "mailbox-redb")]
@@ -640,6 +693,7 @@ impl RedbStore {
         Ok(RedbStore {
             db,
             body_writes: std::sync::atomic::AtomicU64::new(0),
+            body_reads: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -647,6 +701,12 @@ impl RedbStore {
     #[must_use]
     pub fn body_writes(&self) -> u64 {
         self.body_writes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many body rows this handle has read (a diagnostic: counting a queue must not add to it).
+    #[must_use]
+    pub fn body_reads(&self) -> u64 {
+        self.body_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -729,6 +789,7 @@ impl MailStore for RedbStore {
             let mut view = RedbTxn {
                 txn: &txn,
                 body_writes: &self.body_writes,
+                body_reads: &self.body_reads,
             };
             f(&mut view)
         };
@@ -749,6 +810,7 @@ impl MailStore for RedbStore {
 struct RedbTxn<'a> {
     txn: &'a redb::WriteTransaction,
     body_writes: &'a std::sync::atomic::AtomicU64,
+    body_reads: &'a std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "mailbox-redb")]
@@ -781,6 +843,8 @@ impl RedbTxn<'_> {
             .txn
             .open_table(redb_tables::BODIES)
             .map_err(|e| store_err("bodies")(&e))?;
+        self.body_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // A META row without its body is corruption: serving an empty body would deliver (and let
         // a consumer ack) a message whose signed content is gone (final review I4).
         t.get((role, seq))
@@ -874,6 +938,28 @@ impl MailTxn for RedbTxn<'_> {
             if !visit(&stored) {
                 break;
             }
+        }
+        Ok(())
+    }
+
+    /// META only: a queue is counted without loading a body (S-1).
+    fn scan_leases(
+        &self,
+        role: &str,
+        visit: &mut dyn FnMut(DateTime<Utc>, Option<&Lease>),
+    ) -> Result<(), StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::META)
+            .map_err(|e| store_err("meta")(&e))?;
+        let range = t
+            .range((role, 0u64)..=(role, u64::MAX))
+            .map_err(|e| store_err("meta")(&e))?;
+        for entry in range {
+            let (_, v) = entry.map_err(|e| store_err("meta")(&e))?;
+            let meta: Meta =
+                serde_json::from_slice(v.value()).map_err(|e| store_err("meta decode")(&e))?;
+            visit(meta.enqueued_at, meta.lease.as_ref());
         }
         Ok(())
     }

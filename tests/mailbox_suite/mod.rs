@@ -7,7 +7,9 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use synapse::certificate::RevocationLookup;
 use synapse::keystore::Keystore;
-use synapse::mailbox::{Acked, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox};
+use synapse::mailbox::{
+    Acked, Depth, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox,
+};
 use synapse::roles::{ClaimRequest, Superseded, sign_claim};
 
 pub fn t0() -> DateTime<Utc> {
@@ -398,4 +400,74 @@ pub fn claims_are_written_through_the_store<S: MailStore>(make: impl Fn() -> S) 
         })
         .unwrap();
     assert_eq!(seen, Some(epoch));
+}
+
+fn depth_of<S: MailStore>(mb: &Mailbox<S>, global_id: &str, now: DateTime<Utc>) -> Depth {
+    *mb.depths(now)
+        .expect("depths")
+        .get(global_id)
+        .expect("a claimed role has a depth")
+}
+
+fn depth(queued: usize, leased: usize, oldest: Option<DateTime<Utc>>) -> Depth {
+    Depth {
+        queued,
+        leased,
+        oldest_enqueued_at: oldest,
+    }
+}
+
+/// S-1: `queued` is what a fetch would hand out next, `leased` what the current epoch holds, and
+/// `oldest_enqueued_at` spans both. Acked mail is in neither.
+pub fn depths_count_queued_and_leased_per_role<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    assert_eq!(depth_of(&mb, LANE, t0()), depth(0, 0, None), "no mail yet");
+    let t1 = t0() + Duration::seconds(1);
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    mb.enqueue(env("m2", LANE, b"yy"), t1).unwrap();
+    assert_eq!(depth_of(&mb, LANE, t1), depth(2, 0, Some(t0())));
+    assert_eq!(ids_of(&mb.fetch(LANE, epoch, 1, None, t1).unwrap()), ["m1"]);
+    assert_eq!(
+        depth_of(&mb, LANE, t1),
+        depth(1, 1, Some(t0())),
+        "the oldest is leased, and still the oldest"
+    );
+    mb.ack(LANE, epoch, "m1", t1).unwrap();
+    assert_eq!(
+        depth_of(&mb, LANE, t1),
+        depth(1, 0, Some(t1)),
+        "acked mail is gone"
+    );
+    // Only roles in the role table are reported, as `list` reports only those.
+    mb.enqueue(env("w1", "waiting@acct", b"x"), t1).unwrap();
+    let all = mb.depths(t1).unwrap();
+    assert_eq!(all.keys().collect::<Vec<_>>(), [LANE]);
+}
+
+/// S-1: a lease that expired, or that an older epoch holds, is deliverable, so it counts as queued.
+pub fn an_expired_or_superseded_lease_counts_as_queued<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let old = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    mb.fetch(LANE, old, 1, Some(Duration::seconds(5)), t0())
+        .unwrap();
+    assert_eq!(depth_of(&mb, LANE, t0()), depth(0, 1, Some(t0())));
+    let expired = t0() + Duration::seconds(5);
+    assert_eq!(
+        depth_of(&mb, LANE, expired),
+        depth(1, 0, Some(t0())),
+        "a lease ends at its `until`, as fetch reads it"
+    );
+    mb.fetch(LANE, old, 1, None, expired).unwrap();
+    assert_eq!(depth_of(&mb, LANE, expired), depth(0, 1, Some(t0())));
+    let soon = expired + Duration::seconds(1);
+    ids.claim(&mut mb, "lane", soon);
+    assert_eq!(
+        depth_of(&mb, LANE, soon),
+        depth(1, 0, Some(t0())),
+        "a takeover voids the old epoch's lease"
+    );
 }

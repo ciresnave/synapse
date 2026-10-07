@@ -26,6 +26,8 @@ cases!(
     a_lease_outside_the_range_is_refused,
     mail_waits_for_a_role_that_has_not_claimed_yet,
     claims_are_written_through_the_store,
+    depths_count_queued_and_leased_per_role,
+    an_expired_or_superseded_lease_counts_as_queued,
 );
 
 /// MemoryStore's transaction contract: a closure that changes state and then fails leaves the
@@ -105,6 +107,9 @@ fn a_failed_claim_write_poisons_and_a_reopen_continues_from_the_store() {
         "persisted normally"
     );
 
+    // Control: before the failure, depths are readable.
+    assert!(mb.depths(later).unwrap().contains_key("lane@acct"));
+
     // The next store write fails: the claim is granted in memory but not recorded.
     store.fail_next.store(true, Ordering::SeqCst);
     let at = later + chrono::Duration::seconds(5);
@@ -118,6 +123,7 @@ fn a_failed_claim_write_poisons_and_a_reopen_continues_from_the_store() {
         mb.fetch("lane@acct", first + 2, 1, None, at).map(|_| ()),
         mb.ack("lane@acct", first + 2, "m", at).map(|_| ()),
         mb.sweep(at).map(|_| ()),
+        mb.depths(at).map(|_| ()),
     ] {
         assert_eq!(result, Err(MailError::Poisoned));
     }

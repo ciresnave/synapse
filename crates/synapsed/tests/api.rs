@@ -1162,3 +1162,56 @@ fn a_too_open_security_event_file_refuses_to_start() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(Daemon::open(&config(home.path())).is_ok());
 }
+
+/// S-1 (agentlife): `list` carries each role's mailbox depth, so a watcher can see mail waiting for
+/// a role and whether a running one still holds unacked mail.
+#[tokio::test]
+async fn list_shows_mailbox_depth_per_role() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (beta, _) = claim(&d, "beta", 2).await;
+    let pending = |listed: &Value, role: &str| {
+        listed["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["global_id"] == role)
+            .expect("role listed")["pending"]
+            .clone()
+    };
+    let first = send_to(&d, &alpha, "beta@acct", b"one").await;
+    send_to(&d, &alpha, "beta@acct", b"two").await;
+    let (s, listed, text) = post_get_list(&d, &alpha).await;
+    assert_eq!(s, 200, "{text}");
+    let beta_pending = pending(&listed, "beta@acct");
+    assert_eq!(beta_pending["queued"], 2, "{text}");
+    assert_eq!(beta_pending["leased"], 0, "{text}");
+    assert!(beta_pending["oldest_enqueued_at"].is_string(), "{text}");
+    assert_eq!(
+        pending(&listed, "alpha@acct"),
+        json!({"queued": 0, "leased": 0, "oldest_enqueued_at": null}),
+        "no mail for alpha"
+    );
+
+    let (s, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({"max": 1})).await;
+    assert_eq!(s, 200, "{got}");
+    assert_eq!(got["messages"][0]["message_id"], first.as_str());
+    let (_, listed, text) = post_get_list(&d, &alpha).await;
+    let beta_pending = pending(&listed, "beta@acct");
+    assert_eq!(
+        (&beta_pending["queued"], &beta_pending["leased"]),
+        (&json!(1), &json!(1)),
+        "{text}"
+    );
+
+    let (s, acked, _) = post(&d, "/v1/ack", Some(&beta), json!({"message_id": first})).await;
+    assert_eq!(s, 200, "{acked}");
+    let (_, listed, text) = post_get_list(&d, &alpha).await;
+    let beta_pending = pending(&listed, "beta@acct");
+    assert_eq!(
+        (&beta_pending["queued"], &beta_pending["leased"]),
+        (&json!(1), &json!(0)),
+        "{text}"
+    );
+    d.stop().await;
+}
