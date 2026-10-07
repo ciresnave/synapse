@@ -137,6 +137,7 @@ struct Shared {
 /// How the daemon waits out an owed failure delay before answering. The default sleeps on the tokio
 /// clock; tests inject one that records the delay instead, so they assert *which* answers were held
 /// back without measuring wall time (a shared CI runner can be slow for reasons of its own).
+/// A pause that returns at once disables the brute-force delay, so production never replaces it.
 pub type Pause = Arc<
     dyn Fn(std::time::Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
 >;
