@@ -131,6 +131,19 @@ struct Shared {
     started_at: DateTime<Utc>,
     sweep_every: std::time::Duration,
     security: Security,
+    pause: Pause,
+}
+
+/// How the daemon waits out an owed failure delay before answering. The default sleeps on the tokio
+/// clock; tests inject one that records the delay instead, so they assert *which* answers were held
+/// back without measuring wall time (a shared CI runner can be slow for reasons of its own).
+/// A pause that returns at once disables the brute-force delay, so production never replaces it.
+pub type Pause = Arc<
+    dyn Fn(std::time::Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+fn sleep_pause() -> Pause {
+    Arc::new(|delay| Box::pin(tokio::time::sleep(delay)))
 }
 
 /// The size at which the event file rotates to `<file>.1`.
@@ -333,6 +346,7 @@ impl Daemon {
                 started_at,
                 sweep_every: cfg.sweep_every,
                 security: Security::new(SecurityConfig::default(), Arc::new(sink)),
+                pause: sleep_pause(),
             },
         })
     }
@@ -342,6 +356,14 @@ impl Daemon {
     pub fn with_security(mut self, config: SecurityConfig) -> Daemon {
         let sink = self.shared.security.sink.clone();
         self.shared.security = Security::new(config, sink);
+        self
+    }
+
+    /// Replaces how an owed failure delay is waited out (default: `tokio::time::sleep`). Call after
+    /// `open`, before `serve`.
+    #[must_use]
+    pub fn with_pause(mut self, pause: Pause) -> Daemon {
+        self.shared.pause = pause;
         self
     }
 
@@ -367,6 +389,7 @@ impl Daemon {
             ));
         }
         let shared = Arc::new(self.shared);
+        let pause = shared.pause.clone();
         write_announce(&shared.home, bound, &shared.instance_id)?;
         // Removed however `serve` ends: shutdown, error or unwind (#74). A kill runs no code, which
         // is why clients rely on the health proof, not on the file's absence.
@@ -399,7 +422,9 @@ impl Daemon {
             .route("/v1/heartbeat", post(heartbeat))
             .route("/v1/list", get(list))
             // Inside `host_guard`, so a 421 is neither counted nor delayed.
-            .layer(middleware::from_fn(delay_failures))
+            .layer(middleware::from_fn(move |req: Request, next: Next| {
+                delay_failures(pause.clone(), req, next)
+            }))
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 host_guard(bound, req, next)
             }))
@@ -439,10 +464,10 @@ struct FailureDelay(std::time::Duration);
 
 /// Holds a response that carries a [`FailureDelay`] back before it is sent. The request has already
 /// been evaluated at full speed, so only the answer is late. This is the only `sleep` in the daemon.
-async fn delay_failures(req: Request, next: Next) -> Response {
+async fn delay_failures(pause: Pause, req: Request, next: Next) -> Response {
     let response = next.run(req).await;
     if let Some(FailureDelay(delay)) = response.extensions().get::<FailureDelay>().copied() {
-        tokio::time::sleep(delay).await;
+        pause(delay).await;
     }
     response
 }
