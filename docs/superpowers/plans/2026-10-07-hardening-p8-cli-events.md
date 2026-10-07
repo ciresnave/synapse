@@ -26,10 +26,11 @@ Recording at the one error exit covers every owner-only check the CLI reaches, i
 
 **Sinks** (spec §2.2: `FileSink` by default everywhere, `StderrSink` by default for CLI commands):
 - `StderrSink` always.
-- `FileSink` at `<home>/cli-security-events.jsonl`, 4 MiB cap like synapsed's, **only if the home
-  itself passes `check_owner_only`**. In a home others can write, an attacker could plant the file name
-  as a link to one of the owner's files, and the CLI would append to it. Then the event goes to stderr
-  only.
+- `FileSink` at `<home>/cli-security-events.jsonl`, 4 MiB cap like synapsed's, **unless others can
+  write the home**. There, an attacker could plant the file name as a link to one of the owner's
+  files, and the CLI would append to it, so the event goes to stderr only. On Unix that is a
+  group- or other-writable home (a 0755 `SYNAPSE_HOME` still gets the file; CI found that a
+  read-only gate wrote nothing there). On Windows, the keystore's owner-only check stands in.
 - **Its own file, not synapsed's `security-events.jsonl`:** synapsed holds that file open, and a
   `FileSink` rotates by renaming, which fails on Windows while another process holds the file. The
   mcp-server took its own file for the same reason (P6).
@@ -50,7 +51,7 @@ is not a flood source. Repeated runs are the caller's own.
 3. New (row 7): a too-open account key makes `synapse id show` fail **and** writes one
    `PermissionsTooOpen` line with subject `account key`.
 4. Positive control: a clean claim and send leaves no `cli-security-events.jsonl`.
-5. New: with the home itself too open, the event still reaches stderr, and no event file is created.
+5. New: with a home others can write, the event still reaches stderr, and no event file is created.
 
 ## Version
 

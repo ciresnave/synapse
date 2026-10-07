@@ -459,13 +459,31 @@ fn a_too_open_account_key_is_refused_and_recorded() {
     assert_eq!(events[0]["subject"], "account key");
 }
 
-/// Hardening P8: in a home others can reach, the event goes to stderr only. A file written there
+/// Open the directory `path` to writes by the broad Users group (on Unix, by everyone).
+fn open_to_writes(path: &Path) {
+    #[cfg(windows)]
+    {
+        let out = Command::new("icacls")
+            .arg(path)
+            .args(["/grant", "*S-1-5-32-545:(W)"])
+            .output()
+            .expect("icacls runs");
+        assert!(out.status.success(), "{out:?}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+}
+
+/// Hardening P8: in a home others can write, the event goes to stderr only. A file written there
 /// could be a planted link to one of the owner's files.
 #[test]
-fn a_too_open_home_gets_no_event_file() {
+fn a_home_others_can_write_gets_no_event_file() {
     let home = Home::new();
     loosen(&home.path().join("account").join("account.key.pem"));
-    loosen(home.path());
+    open_to_writes(home.path());
     let out = home.run(&["id", "show"]);
     assert_ne!(out.status.code(), Some(0), "{out:?}");
     let err = String::from_utf8_lossy(&out.stderr);
