@@ -454,10 +454,11 @@ impl SynapseSmtpServer {
 
                                     // A locked username or source reads exactly like a wrong
                                     // password, and the password is not checked (hardening P7).
-                                    if !self.security.login_allowed(surface, username, &source, now)
-                                    {
+                                    let Some(attempt) =
+                                        self.security.begin_login(surface, username, &source, now)
+                                    else {
                                         return Ok("535 Authentication failed\r\n".to_string());
-                                    }
+                                    };
                                     match self.auth_handler.authenticate(username, password) {
                                         Ok(true) => {
                                             session.authenticated = true;
@@ -467,9 +468,7 @@ impl SynapseSmtpServer {
                                         }
                                         Ok(false) => {
                                             // Recorded first, then answered after the delay.
-                                            let hold = self
-                                                .security
-                                                .login_failed(surface, username, &source, now);
+                                            let hold = attempt.failed(now);
                                             tokio::time::sleep(hold).await;
                                             return Ok("535 Authentication failed\r\n".to_string());
                                         }

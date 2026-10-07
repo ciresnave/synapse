@@ -217,32 +217,50 @@ impl EmailSecurity {
         }
     }
 
-    /// Before checking a password: false if the username or the source is locked out, in which case
-    /// the caller answers exactly as for a wrong password without checking it (bcrypt is costly).
-    pub(crate) fn login_allowed(
+    /// Before checking a password: `None` if the username or the source is locked out, or would be
+    /// if every attempt already in flight failed. The caller then answers exactly as for a wrong
+    /// password without checking it (bcrypt is costly). Otherwise the attempt holds a slot in both
+    /// limiters until it ends, so concurrent guesses cannot all pass before any is recorded.
+    pub(crate) fn begin_login(
         &self,
         surface: &str,
         username: &str,
         source: &str,
         now: DateTime<Utc>,
-    ) -> bool {
+    ) -> Option<LoginAttempt> {
         let username = bounded(username);
         let key = source_key(source);
-        let locked = |verdict| matches!(verdict, Verdict::Refuse { .. });
-        if locked(self.login.per_user.check(&username, now))
-            || locked(self.login.per_source.check(&key, now))
-        {
-            let kind = SecurityEventKind::AuthFailure;
-            let gate = &self.login.gate;
-            self.emit(gate, kind, surface, &username, source, "locked", now);
-            return false;
+        let login = &self.login;
+        // The source first: it is the backstop, and a locked source then touches no user key.
+        if login.per_source.try_reserve(&key, now) {
+            if login.per_user.try_reserve(&username, now) {
+                return Some(LoginAttempt {
+                    security: self.clone(),
+                    surface: surface.to_string(),
+                    username,
+                    source: source.to_string(),
+                    key,
+                });
+            }
+            login.per_source.release(&key);
         }
-        true
+        // Refused either for a lockout, or because the attempts in flight would reach one.
+        let locked = |limiter: &FailureLimiter, k: &str| {
+            matches!(limiter.check(k, now), Verdict::Refuse { .. })
+        };
+        let detail = if locked(&login.per_user, &username) || locked(&login.per_source, &key) {
+            "locked"
+        } else {
+            "in_flight"
+        };
+        let kind = SecurityEventKind::AuthFailure;
+        self.emit(&login.gate, kind, surface, &username, source, detail, now);
+        None
     }
 
     /// After a wrong password: records the failure and its events, and returns how long to hold the
     /// answer. Successes are never recorded, so a real login cannot reset an attacker's count.
-    pub(crate) fn login_failed(
+    fn login_failed(
         &self,
         surface: &str,
         username: &str,
@@ -309,6 +327,33 @@ impl EmailSecurity {
     }
 }
 
+/// A login whose password is being checked. It holds a slot in both login limiters until it ends:
+/// [`failed`](Self::failed) records the failure, then frees the slot; dropping it (a success, an
+/// error, or a dropped connection) frees the slot and records nothing.
+pub(crate) struct LoginAttempt {
+    security: EmailSecurity,
+    surface: String,
+    username: String,
+    source: String,
+    key: String,
+}
+
+impl LoginAttempt {
+    /// A wrong password: records it and returns how long to hold the answer.
+    pub(crate) fn failed(self, now: DateTime<Utc>) -> std::time::Duration {
+        self.security
+            .login_failed(&self.surface, &self.username, &self.source, now)
+    }
+}
+
+impl Drop for LoginAttempt {
+    fn drop(&mut self) {
+        let login = &self.security.login;
+        login.per_user.release(&self.username);
+        login.per_source.release(&self.key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,13 +404,108 @@ mod tests {
     fn a_login_lockout_ends_on_time() {
         let s = EmailSecurity::default().with_login(quick(2));
         let now = t0();
-        assert!(s.login_allowed("t", "alice", "10.0.0.1", now));
-        s.login_failed("t", "alice", "10.0.0.1", now);
-        s.login_failed("t", "alice", "10.0.0.1", now);
+        for _ in 0..2 {
+            s.begin_login("t", "alice", "10.0.0.1", now)
+                .unwrap()
+                .failed(now);
+        }
         // Negative control: locked.
-        assert!(!s.login_allowed("t", "alice", "10.0.0.1", now + Duration::minutes(14)));
+        let later = now + Duration::minutes(14);
+        assert!(s.begin_login("t", "alice", "10.0.0.1", later).is_none());
         // Positive control: the lockout ends.
-        assert!(s.login_allowed("t", "alice", "10.0.0.1", now + Duration::minutes(15)));
+        let later = now + Duration::minutes(15);
+        assert!(s.begin_login("t", "alice", "10.0.0.1", later).is_some());
+    }
+
+    // P7 follow-up (a1): the password is checked between `begin_login` and the outcome, on a worker
+    // thread. Attempts already begun count against the lockout, so concurrent guesses cannot all
+    // pass the check before any of them is recorded.
+    #[test]
+    fn concurrent_logins_cannot_pass_the_lockout() {
+        let s = EmailSecurity::default().with_login(quick(2));
+        let now = t0();
+        let first = s.begin_login("t", "alice", "10.0.0.1", now);
+        let second = s.begin_login("t", "alice", "10.0.0.1", now);
+        assert!(first.is_some() && second.is_some());
+        // Negative control: two attempts in flight fill a budget of two.
+        assert!(
+            s.begin_login("t", "alice", "10.0.0.1", now).is_none(),
+            "a third concurrent guess passed the lockout"
+        );
+        // Positive controls: another user is unaffected, and an attempt that ends without a
+        // failure (a success, or an error) frees its slot.
+        assert!(s.begin_login("t", "bob", "10.0.0.1", now).is_some());
+        drop(second);
+        assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_some());
+    }
+
+    // Review of a1, finding 3: when one limiter refuses, the slot already taken in the other is
+    // given back, or a locked username would pin its source's budget.
+    #[test]
+    fn a_refused_login_gives_back_the_slot_it_took() {
+        let mut limits = quick(2);
+        limits.per_source.lockout_after = 3;
+        let s = EmailSecurity::default().with_login(limits);
+        let now = t0();
+        for _ in 0..2 {
+            s.begin_login("t", "alice", "10.0.0.1", now)
+                .unwrap()
+                .failed(now);
+        }
+        // Alice is locked; the source has two failures of three.
+        assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_none());
+        // Negative control: had that refusal kept its source slot, two failures plus one slot would
+        // fill the source's budget and refuse bob.
+        assert!(s.begin_login("t", "bob", "10.0.0.1", now).is_some());
+    }
+
+    // Review of a1, finding 2: a refusal because attempts are in flight is not a lockout, and its
+    // event says so.
+    #[test]
+    fn a_busy_refusal_is_not_reported_as_locked() {
+        struct Capture(std::sync::Mutex<Vec<SecurityEvent>>);
+        impl SecuritySink for Capture {
+            fn record(&self, event: &SecurityEvent) {
+                self.0.lock().unwrap().push(event.clone());
+            }
+        }
+        let capture = Arc::new(Capture(std::sync::Mutex::new(Vec::new())));
+        let s = EmailSecurity::default().with_login(quick(2));
+        s.set_sink(capture.clone());
+        let now = t0();
+        let _first = s.begin_login("t", "alice", "10.0.0.1", now).unwrap();
+        let _second = s.begin_login("t", "alice", "10.0.0.1", now).unwrap();
+        assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_none());
+        // Positive control: a real lockout is still reported as locked.
+        drop((_first, _second));
+        for _ in 0..2 {
+            s.begin_login("t", "alice", "10.0.0.1", now)
+                .unwrap()
+                .failed(now);
+        }
+        assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_none());
+        let refusals: Vec<String> = capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.detail != "bad_credentials" && e.kind == SecurityEventKind::AuthFailure)
+            .map(|e| e.detail.clone())
+            .collect();
+        assert_eq!(refusals, ["in_flight", "locked"]);
+    }
+
+    #[test]
+    fn a_failed_attempt_is_recorded_and_frees_its_slot() {
+        let s = EmailSecurity::default().with_login(quick(2));
+        let now = t0();
+        let attempt = s.begin_login("t", "alice", "10.0.0.1", now).unwrap();
+        attempt.failed(now);
+        // Positive control: one failure leaves one attempt.
+        let attempt = s.begin_login("t", "alice", "10.0.0.1", now).unwrap();
+        attempt.failed(now);
+        // Negative control: two failures lock the account.
+        assert!(s.begin_login("t", "alice", "10.0.0.1", now).is_none());
     }
 
     #[test]
