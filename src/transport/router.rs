@@ -104,6 +104,24 @@ impl MultiTransportRouter {
         })
     }
 
+    /// Where the router's transports record their own security events (hardening P7, follow-up
+    /// a4): today only the email transport's Direct-mode SMTP listener, which enforces the inbound
+    /// limits. Every transport is given the sink, as `TransportManager` does. This router never
+    /// starts its transports itself, so call this before whoever starts them does.
+    pub fn set_security_sink(&self, sink: Arc<dyn crate::security_events::SecuritySink>) {
+        for transport in [
+            &self.tcp_transport,
+            &self.mdns_transport,
+            &self.nat_transport,
+            &self.email_transport,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            transport.attach_security_sink(Arc::clone(&sink));
+        }
+    }
+
     /// Send message with automatic transport selection
     pub async fn send_message(
         &self,
