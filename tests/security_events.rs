@@ -259,6 +259,40 @@ fn a_flood_of_new_keys_cannot_evict_a_lockout() {
     );
 }
 
+// 6c (P4 follow-up): a full limiter must not scan every tracked key for each new one, or a spray of
+// fresh keys costs O(max_keys) per key and the limiter becomes a CPU amplifier. The bound is loose
+// on purpose: a scan per key takes minutes here (50 000 x 50 000 visits); amortised eviction takes
+// well under a second.
+#[test]
+fn a_spray_of_fresh_keys_does_not_scan_every_key_per_insert() {
+    let max_keys = 50_000;
+    let l = limiter(max_keys);
+    let now = t0();
+    for i in 0..max_keys {
+        l.record_failure(&format!("fill-{i}"), now);
+    }
+    assert_eq!(l.tracked_keys(), max_keys);
+
+    let started = std::time::Instant::now();
+    for i in 0..max_keys {
+        l.record_failure(&format!("spray-{i}"), now + secs(1));
+        assert!(l.tracked_keys() <= max_keys);
+    }
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(10),
+        "{max_keys} new keys into a full limiter took {took:?}"
+    );
+
+    // Positive control: what survives is the most recent failures, so the newest key still counts.
+    let newest = format!("spray-{}", max_keys - 1);
+    assert_eq!(l.check(&newest, now + secs(1)), Verdict::Allow);
+    for _ in 0..5 {
+        l.record_failure(&newest, now + secs(1));
+    }
+    assert!(matches!(l.check(&newest, now + secs(1)), Verdict::Delay(_)));
+}
+
 // 7
 #[test]
 fn alert_policy_immediate_kinds_alert_and_threshold_kinds_wait() {

@@ -123,7 +123,7 @@ pub struct LimiterConfig {
     pub lockout_after: u32,
     /// How long a lockout lasts.
     pub lockout: Duration,
-    /// Bound on tracked keys; the least recently failed is evicted.
+    /// Bound on tracked keys. When full, the least recently failed eighth is evicted at once.
     pub max_keys: usize,
 }
 
@@ -228,6 +228,35 @@ impl FailureLimiter {
         }
     }
 
+    /// Makes room for new keys by evicting the least recently failed eighth of the tracked keys (at
+    /// least enough to fit one more) in a single pass. Evicting one key per new key scanned every key
+    /// each time, so a spray of fresh keys cost O(`max_keys`) per key; a batch makes it O(1)
+    /// amortised.
+    ///
+    /// A key still locked out is evicted only if every tracked key is: otherwise an attacker could
+    /// clear its own lockout by spraying fresh keys until it was evicted.
+    fn evict(&self, entries: &mut HashMap<String, Entry>, now: DateTime<Utc>) {
+        let locked = |e: &Entry| e.locked_until.is_some_and(|until| now < until);
+        let mut order: Vec<_> = entries
+            .iter()
+            .map(|(k, e)| (locked(e), e.last_failure(), k))
+            .collect();
+        let unlocked = order.iter().filter(|(is_locked, ..)| !is_locked).count();
+        let excess = entries.len() + 1 - self.config.max_keys;
+        let n = if unlocked > 0 {
+            (self.config.max_keys / 8).max(excess).min(unlocked)
+        } else {
+            excess
+        };
+        if n < order.len() {
+            order.select_nth_unstable(n);
+        }
+        let victims: Vec<String> = order.iter().take(n).map(|(.., k)| (*k).clone()).collect();
+        for k in victims {
+            entries.remove(&k);
+        }
+    }
+
     /// Before an attempt: `Allow`, or `Delay`/`Refuse` if the key is over its budget or locked.
     pub fn check(&self, key: &str, now: DateTime<Utc>) -> Verdict {
         let mut entries = self.lock();
@@ -242,20 +271,11 @@ impl FailureLimiter {
     /// value is true only on the failure that first locks the key.
     pub fn record_failure(&self, key: &str, now: DateTime<Utc>) -> (Verdict, bool) {
         let mut entries = self.lock();
-        if !entries.contains_key(key) {
-            while self.config.max_keys > 0 && entries.len() >= self.config.max_keys {
-                // A key still locked out is evicted only if every tracked key is: otherwise an
-                // attacker could clear its own lockout by spraying fresh keys until it was evicted.
-                let locked = |e: &Entry| e.locked_until.is_some_and(|until| now < until);
-                let oldest = entries
-                    .iter()
-                    .min_by_key(|(_, e)| (locked(e), e.last_failure()))
-                    .map(|(k, _)| k.clone());
-                match oldest {
-                    Some(k) => entries.remove(&k),
-                    None => break,
-                };
-            }
+        if !entries.contains_key(key)
+            && self.config.max_keys > 0
+            && entries.len() >= self.config.max_keys
+        {
+            self.evict(&mut entries, now);
         }
         let entry = entries.entry(key.to_string()).or_default();
         self.prune(entry, now);
