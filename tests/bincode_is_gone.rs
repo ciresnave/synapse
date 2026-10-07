@@ -39,9 +39,14 @@ fn files_containing(files: &[String], needle: &str) -> Vec<String> {
     files
         .iter()
         .filter(|f| {
-            // Bytes, read lossily: an unreadable file fails the test instead of counting as a miss.
-            let bytes = std::fs::read(root().join(f))
-                .unwrap_or_else(|e| panic!("cannot read tracked file {f}: {e}"));
+            // Bytes, read lossily. A tracked file missing from disk is skipped: CI's "core is
+            // model-agnostic" job deletes the adapter crates before testing. Any other read error
+            // fails the test instead of counting as a miss.
+            let bytes = match std::fs::read(root().join(f)) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+                Err(e) => panic!("cannot read tracked file {f}: {e}"),
+            };
             String::from_utf8_lossy(&bytes)
                 .to_lowercase()
                 .contains(&needle.to_lowercase())
