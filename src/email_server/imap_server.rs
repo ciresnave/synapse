@@ -3,12 +3,15 @@
 
 use crate::error::{Result, SynapseError};
 use crate::types::SecureMessage;
+use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
+
+use super::security::{EmailSecurity, LoginLimits};
 
 /// High-performance IMAP server optimized for EMRP
 pub struct SynapseImapServer {
@@ -20,6 +23,8 @@ pub struct SynapseImapServer {
     clients: Arc<Mutex<HashMap<String, ImapSession>>>,
     /// Authorization handler
     auth_handler: Arc<dyn super::smtp_server::AuthHandler + Send + Sync>,
+    /// The login guard and the event sink (hardening P7).
+    security: EmailSecurity,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +55,8 @@ pub struct ImapPerformanceConfig {
 struct ImapSession {
     #[allow(dead_code)]
     id: String,
+    /// The peer's IP, the key the login guard uses.
+    source: String,
     state: ImapState,
     authenticated_user: Option<String>,
     selected_mailbox: Option<String>,
@@ -94,7 +101,28 @@ impl SynapseImapServer {
             message_store,
             clients: Arc::new(Mutex::new(HashMap::new())),
             auth_handler,
+            security: EmailSecurity::default(),
         }
+    }
+
+    /// Replaces the login guard's tuning for IMAP `LOGIN` (hardening P7). The limits apply with or
+    /// without a sink.
+    #[must_use]
+    pub fn with_login_limits(mut self, limits: LoginLimits) -> Self {
+        self.security = self.security.with_login(limits);
+        self
+    }
+
+    /// Where security events go. The first call wins, and it reaches every clone of this server.
+    pub fn set_security_sink(&self, sink: Arc<dyn crate::security_events::SecuritySink>) {
+        self.security.set_sink(sink);
+    }
+
+    /// Shares one set of limiters with a paired SMTP server, so guesses split across the two still
+    /// count against one budget.
+    pub(crate) fn with_security(mut self, security: EmailSecurity) -> Self {
+        self.security = security;
+        self
     }
 
     /// Start the IMAP server
@@ -106,6 +134,12 @@ impl SynapseImapServer {
 
         info!("EMRP IMAP Server listening on {}", addr);
 
+        self.serve(listener).await
+    }
+
+    /// Accept connections on an already-bound `listener` forever, as `SynapseSmtpServer::serve`
+    /// does, so a caller can hold the port before serving it.
+    pub async fn serve(&self, listener: TcpListener) -> Result<()> {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
@@ -128,6 +162,7 @@ impl SynapseImapServer {
 
     /// Handle individual IMAP connection
     async fn handle_connection(&self, stream: TcpStream) -> Result<()> {
+        let source = super::security::source_ip(stream.peer_addr());
         let (read_half, write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
@@ -140,6 +175,7 @@ impl SynapseImapServer {
                     .unwrap()
                     .as_millis()
             ),
+            source,
             state: ImapState::NotAuthenticated,
             authenticated_user: None,
             selected_mailbox: None,
@@ -206,14 +242,31 @@ impl SynapseImapServer {
 
                 let username = parts[2].trim_matches('"');
                 let password = parts[3].trim_matches('"');
+                let surface = "email/imap-login";
+                let now = Utc::now();
 
+                // A locked username or source reads exactly like a wrong password, and the
+                // password is not checked (hardening P7).
+                if !self
+                    .security
+                    .login_allowed(surface, username, &session.source, now)
+                {
+                    return Ok(vec![format!("{} NO LOGIN failed\r\n", tag)]);
+                }
                 match self.auth_handler.authenticate(username, password) {
                     Ok(true) => {
                         session.state = ImapState::Authenticated;
                         session.authenticated_user = Some(username.to_string());
                         Ok(vec![format!("{} OK LOGIN completed\r\n", tag)])
                     }
-                    Ok(false) => Ok(vec![format!("{} NO LOGIN failed\r\n", tag)]),
+                    Ok(false) => {
+                        // Recorded first, then answered after the delay.
+                        let hold =
+                            self.security
+                                .login_failed(surface, username, &session.source, now);
+                        tokio::time::sleep(hold).await;
+                        Ok(vec![format!("{} NO LOGIN failed\r\n", tag)])
+                    }
                     Err(_) => Ok(vec![format!("{} NO LOGIN failed\r\n", tag)]),
                 }
             }
@@ -396,6 +449,7 @@ impl Clone for SynapseImapServer {
             message_store: Arc::clone(&self.message_store),
             clients: Arc::clone(&self.clients),
             auth_handler: Arc::clone(&self.auth_handler),
+            security: self.security.clone(),
         }
     }
 }

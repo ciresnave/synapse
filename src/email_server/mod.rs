@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod connectivity;
 pub mod imap_server;
+pub mod security;
 pub mod smtp_server;
 
 pub use auth::{SynapseAuthHandler, UserAccount, UserPermissions};
@@ -24,6 +25,8 @@ pub struct SynapseEmailServer {
     imap_server: SynapseImapServer,
     connectivity: ConnectivityAssessment,
     auth_handler: Arc<SynapseAuthHandler>,
+    /// The limiters and sink both servers share (hardening P7).
+    security: security::EmailSecurity,
 }
 
 impl SynapseEmailServer {
@@ -76,23 +79,28 @@ impl SynapseEmailServer {
         let message_store = Arc::new(Mutex::new(HashMap::new()));
 
         // Create servers, sharing one message store between them (previously the SMTP server held
-        // its own private store that the IMAP server, and everything else, could never read).
+        // its own private store that the IMAP server, and everything else, could never read), and
+        // one login guard, so guesses split across SMTP and IMAP count against one budget.
+        let security = security::EmailSecurity::default();
         let smtp_server = SynapseSmtpServer::new(
             smtp_config,
             Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
             Arc::clone(&message_store),
-        );
+        )
+        .with_security(security.clone());
         let imap_server = SynapseImapServer::new(
             imap_config,
             Arc::clone(&message_store),
             Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
-        );
+        )
+        .with_security(security.clone());
 
         Ok(Self {
             smtp_server,
             imap_server,
             connectivity,
             auth_handler,
+            security,
         })
     }
 
@@ -104,24 +112,44 @@ impl SynapseEmailServer {
     ) -> Result<Self> {
         let auth_handler = Arc::new(SynapseAuthHandler::new());
         let message_store = Arc::new(Mutex::new(HashMap::new()));
+        let security = security::EmailSecurity::default();
 
         let smtp_server = SynapseSmtpServer::new(
             smtp_config,
             Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
             Arc::clone(&message_store),
-        );
+        )
+        .with_security(security.clone());
         let imap_server = SynapseImapServer::new(
             imap_config,
             Arc::clone(&message_store),
             Arc::clone(&auth_handler) as Arc<dyn AuthHandler + Send + Sync>,
-        );
+        )
+        .with_security(security.clone());
 
         Ok(Self {
             smtp_server,
             imap_server,
             connectivity,
             auth_handler,
+            security,
         })
+    }
+
+    /// Where both servers' security events go (hardening P7). The first call wins.
+    #[must_use]
+    pub fn with_security_sink(self, sink: Arc<dyn crate::security_events::SecuritySink>) -> Self {
+        self.security.set_sink(sink);
+        self
+    }
+
+    /// Replaces the login guard's tuning for both servers, which keep sharing one budget.
+    #[must_use]
+    pub fn with_login_limits(mut self, limits: security::LoginLimits) -> Self {
+        self.security = self.security.with_login(limits);
+        self.smtp_server = self.smtp_server.with_security(self.security.clone());
+        self.imap_server = self.imap_server.with_security(self.security.clone());
+        self
     }
 
     /// Start both SMTP and IMAP servers

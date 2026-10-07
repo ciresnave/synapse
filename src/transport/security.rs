@@ -90,6 +90,11 @@ impl TransportEvents {
         }
     }
 
+    /// The sink, for transports that record events of their own.
+    pub(crate) fn sink(&self) -> Option<&Arc<dyn SecuritySink>> {
+        self.sink.as_ref()
+    }
+
     fn emit(
         &self,
         kind: SecurityEventKind,
