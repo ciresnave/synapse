@@ -222,6 +222,43 @@ fn limiter_is_bounded_and_evicts_the_oldest_failure() {
     }
 }
 
+// 6b (review): an attacker must not be able to clear its own lockout by spraying fresh keys until
+// the locked entry is evicted. A locked key is never evicted while an unlocked one can be.
+#[test]
+fn a_flood_of_new_keys_cannot_evict_a_lockout() {
+    let l = FailureLimiter::new(LimiterConfig {
+        free_failures: 1,
+        window: Duration::minutes(5),
+        base_delay: secs(1),
+        max_delay: secs(60),
+        lockout_after: 3,
+        lockout: Duration::minutes(15),
+        max_keys: 3,
+    });
+    let now = t0();
+    for i in 0..3 {
+        l.record_failure("attacker", now + secs(i));
+    }
+    assert!(matches!(
+        l.check("attacker", now + secs(3)),
+        Verdict::Refuse { .. }
+    ));
+    for i in 0..100 {
+        l.record_failure(&format!("spray-{i}"), now + secs(10 + i));
+        assert!(l.tracked_keys() <= 3);
+    }
+    // Negative control: still locked out after the spray.
+    assert!(
+        matches!(l.check("attacker", now + secs(200)), Verdict::Refuse { .. }),
+        "spraying fresh keys evicted the lockout"
+    );
+    // Positive control: the lockout still ends on time.
+    assert_eq!(
+        l.check("attacker", now + Duration::minutes(16)),
+        Verdict::Allow
+    );
+}
+
 // 7
 #[test]
 fn alert_policy_immediate_kinds_alert_and_threshold_kinds_wait() {

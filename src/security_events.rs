@@ -244,9 +244,12 @@ impl FailureLimiter {
         let mut entries = self.lock();
         if !entries.contains_key(key) {
             while self.config.max_keys > 0 && entries.len() >= self.config.max_keys {
+                // A key still locked out is evicted only if every tracked key is: otherwise an
+                // attacker could clear its own lockout by spraying fresh keys until it was evicted.
+                let locked = |e: &Entry| e.locked_until.is_some_and(|until| now < until);
                 let oldest = entries
                     .iter()
-                    .min_by_key(|(_, e)| e.last_failure())
+                    .min_by_key(|(_, e)| (locked(e), e.last_failure()))
                     .map(|(k, _)| k.clone());
                 match oldest {
                     Some(k) => entries.remove(&k),

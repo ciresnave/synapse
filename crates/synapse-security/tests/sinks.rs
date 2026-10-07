@@ -107,6 +107,21 @@ fn file_sink_creates_the_file_owner_only() {
     );
 }
 
+/// Review: the 0o600 mode applies only to a file created now. An existing event file others can
+/// read is refused, not appended to (negative); the owner-only file is accepted (positive).
+#[cfg(unix)]
+#[test]
+fn file_sink_refuses_an_existing_file_others_can_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("security-events.jsonl");
+    drop(FileSink::open(&path, 1 << 20).unwrap());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(FileSink::open(&path, 1 << 20).is_err());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(FileSink::open(&path, 1 << 20).is_ok());
+}
+
 #[test]
 fn file_sink_survives_an_unwritable_path_without_panicking() {
     // Negative control: opening under a missing directory reports an error to the caller.

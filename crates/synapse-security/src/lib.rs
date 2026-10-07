@@ -38,6 +38,11 @@ impl FileSink {
     pub fn open(path: impl AsRef<Path>, max_bytes: u64) -> std::io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = open_append(&path)?;
+        // The mode above applies only to a file created now; an existing one others can reach is
+        // refused, as the daemon refuses a too-open announce or session file.
+        synapse::keystore::check_owner_only(&path, "security event file").map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
+        })?;
         let size = file.metadata()?.len();
         Ok(Self {
             path,
