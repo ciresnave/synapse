@@ -33,11 +33,12 @@ Use `serde_json::to_vec` and `serde_json::from_slice` instead, which is the wire
 
 ### Added
 
-- **`SynapseRouter::with_security_sink` (6.0.0-rc.15).** The router's email transport and email
-  server now record their own security events (Direct-mode inbound limits, email login failures
-  and lockouts) to the sink you give it. Before, they enforced the limits but recorded nothing.
-  Set it before the router's first send or receive. `SynapseEmailServer::set_security_sink` does
-  the same for a server already behind an `Arc`.
+- **`SynapseRouter::set_security_sink` (6.0.0-rc.15).** The router's email transport now records
+  its own security events to the sink you give it. That happens only in Direct mode, where its SMTP
+  listener enforces the inbound limits. Before, it enforced them but recorded nothing. The router
+  also passes the sink to its `SynapseEmailServer` (login failures and lockouts), but nothing
+  populates that server yet. `SynapseEmailServer::set_security_sink` sets the sink on a server
+  already behind an `Arc`.
 
 ### Changed (behaviour)
 
