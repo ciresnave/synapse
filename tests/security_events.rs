@@ -475,3 +475,69 @@ fn a_zero_interval_gate_passes_everything() {
         );
     }
 }
+
+// P7 follow-up (a1): a check-then-record caller verifies between `check` and `record_failure`, so
+// attempts already past `check` were invisible to it and each could land past the lockout. A
+// reservation counts an attempt whose outcome is not yet known as a presumed failure.
+fn reserving(lockout_after: u32, max_keys: usize) -> FailureLimiter {
+    FailureLimiter::new(LimiterConfig {
+        free_failures: 1,
+        window: Duration::minutes(5),
+        base_delay: secs(1),
+        max_delay: secs(60),
+        lockout_after,
+        lockout: Duration::minutes(15),
+        max_keys,
+    })
+}
+
+#[test]
+fn reservations_in_flight_count_toward_the_lockout() {
+    let l = reserving(3, 100);
+    let now = t0();
+    l.record_failure("alice", now);
+    assert!(l.try_reserve("alice", now));
+    assert!(l.try_reserve("alice", now));
+    // Negative control: one failure and two attempts in flight fill the budget of three.
+    assert!(
+        !l.try_reserve("alice", now),
+        "a third attempt passed the lockout"
+    );
+    // Positive controls: another key is unaffected, and releasing one attempt frees its slot.
+    assert!(l.try_reserve("bob", now));
+    l.release("alice");
+    assert!(l.try_reserve("alice", now));
+}
+
+#[test]
+fn a_locked_key_reserves_nothing_until_its_lockout_ends() {
+    let l = reserving(2, 100);
+    let now = t0();
+    l.record_failure("alice", now);
+    l.record_failure("alice", now);
+    // Negative control: locked.
+    assert!(!l.try_reserve("alice", now + secs(1)));
+    // Positive control: the lockout ends on time.
+    assert!(l.try_reserve("alice", now + Duration::minutes(15)));
+}
+
+#[test]
+fn eviction_never_drops_an_attempt_in_flight() {
+    let l = reserving(2, 3);
+    let now = t0();
+    l.record_failure("slow", now);
+    assert!(l.try_reserve("slow", now));
+    for i in 0..100 {
+        l.record_failure(&format!("spray-{i}"), now + secs(1 + i));
+        assert!(l.tracked_keys() <= 3);
+    }
+    // Negative control: one failure plus the attempt still in flight fill the budget of two. Had
+    // the spray evicted the key, it would reserve again.
+    assert!(
+        !l.try_reserve("slow", now + secs(200)),
+        "the spray evicted a reservation"
+    );
+    // Positive control: once released, the key has one failure left before the lockout.
+    l.release("slow");
+    assert!(l.try_reserve("slow", now + secs(200)));
+}

@@ -159,6 +159,8 @@ pub enum Verdict {
 struct Entry {
     failures: VecDeque<DateTime<Utc>>,
     locked_until: Option<DateTime<Utc>>,
+    /// Attempts reserved by `try_reserve` and not yet released.
+    in_flight: u32,
 }
 
 impl Entry {
@@ -233,10 +235,11 @@ impl FailureLimiter {
     /// each time, so a spray of fresh keys cost O(`max_keys`) per key; a batch makes it O(1)
     /// amortised.
     ///
-    /// A key still locked out is evicted only if every tracked key is: otherwise an attacker could
-    /// clear its own lockout by spraying fresh keys until it was evicted.
+    /// A key still locked out, or with an attempt in flight, is evicted only if every tracked key
+    /// is: otherwise an attacker could clear its own lockout, or its reservations, by spraying fresh
+    /// keys until it was evicted.
     fn evict(&self, entries: &mut HashMap<String, Entry>, now: DateTime<Utc>) {
-        let locked = |e: &Entry| e.locked_until.is_some_and(|until| now < until);
+        let locked = |e: &Entry| e.in_flight > 0 || e.locked_until.is_some_and(|until| now < until);
         let mut order: Vec<_> = entries
             .iter()
             .map(|(k, e)| (locked(e), e.last_failure(), k))
@@ -292,7 +295,41 @@ impl FailureLimiter {
         (self.verdict(entry, now), false)
     }
 
-    /// After a success: forgets the key, so legitimate callers never accumulate.
+    /// Before an attempt whose outcome is not known yet: true if it may proceed, in which case it
+    /// counts as a failure in flight until [`release`](Self::release). A caller that verifies
+    /// between checking and recording must reserve rather than `check`: otherwise every attempt
+    /// already past `check` is invisible to the others, and each can land past the lockout. False if
+    /// the key is locked, or if its failures plus the attempts in flight reach `lockout_after`.
+    pub fn try_reserve(&self, key: &str, now: DateTime<Utc>) -> bool {
+        let mut entries = self.lock();
+        if !entries.contains_key(key)
+            && self.config.max_keys > 0
+            && entries.len() >= self.config.max_keys
+        {
+            self.evict(&mut entries, now);
+        }
+        let entry = entries.entry(key.to_string()).or_default();
+        self.prune(entry, now);
+        let failures = u32::try_from(entry.failures.len()).unwrap_or(u32::MAX);
+        if entry.locked_until.is_some()
+            || failures.saturating_add(entry.in_flight) >= self.config.lockout_after
+        {
+            return false;
+        }
+        entry.in_flight += 1;
+        true
+    }
+
+    /// Ends an attempt reserved by [`try_reserve`](Self::try_reserve). Record a failure before
+    /// releasing it, so the key is never briefly under-counted.
+    pub fn release(&self, key: &str) {
+        if let Some(entry) = self.lock().get_mut(key) {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
+        }
+    }
+
+    /// After a success: forgets the key, so legitimate callers never accumulate. It forgets any
+    /// reservations on the key too, so a caller that reserves never calls it.
     pub fn record_success(&self, key: &str) {
         self.lock().remove(key);
     }

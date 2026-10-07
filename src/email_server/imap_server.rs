@@ -247,12 +247,12 @@ impl SynapseImapServer {
 
                 // A locked username or source reads exactly like a wrong password, and the
                 // password is not checked (hardening P7).
-                if !self
-                    .security
-                    .login_allowed(surface, username, &session.source, now)
-                {
+                let Some(attempt) =
+                    self.security
+                        .begin_login(surface, username, &session.source, now)
+                else {
                     return Ok(vec![format!("{} NO LOGIN failed\r\n", tag)]);
-                }
+                };
                 match self.auth_handler.authenticate(username, password) {
                     Ok(true) => {
                         session.state = ImapState::Authenticated;
@@ -261,9 +261,7 @@ impl SynapseImapServer {
                     }
                     Ok(false) => {
                         // Recorded first, then answered after the delay.
-                        let hold =
-                            self.security
-                                .login_failed(surface, username, &session.source, now);
+                        let hold = attempt.failed(now);
                         tokio::time::sleep(hold).await;
                         Ok(vec![format!("{} NO LOGIN failed\r\n", tag)])
                     }
