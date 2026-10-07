@@ -20,6 +20,10 @@ use crate::security_events::{
 /// The longest attacker-supplied key id carried into an event's detail.
 const MAX_KEY_ID_CHARS: usize = 64;
 
+/// The longest claimed global id used in a budget key, as the knock record bounds it: one datagram
+/// can carry ~64 KB, and every tracked key would otherwise hold that much.
+const MAX_CLAIMED_ID_CHARS: usize = 256;
+
 /// Budgets for the knock record. Keys use the source's IP, never its port: a port is free to change.
 #[derive(Debug, Clone)]
 pub struct KnockLimits {
@@ -115,6 +119,11 @@ impl TransportEvents {
         if self.sink.is_none() {
             return;
         }
+        let claimed: String = claimed_global_id
+            .chars()
+            .take(MAX_CLAIMED_ID_CHARS)
+            .collect();
+        let claimed_global_id = claimed.as_str();
         let ip = source_ip(source);
         let new_source = self
             .seen_sources

@@ -136,7 +136,7 @@ fn send(from: &std::net::UdpSocket, port: u16, message: &SecureMessage) {
 /// Polls until `n` raw messages have been through the receive path, returning what was delivered.
 async fn pump(manager: &TransportManager, n: u64) -> Vec<synapse::transport::ReceivedMessage> {
     let mut delivered = Vec::new();
-    for _ in 0..40 {
+    for _ in 0..100 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         delivered.extend(manager.receive_messages().await.expect("receive"));
         let c = manager.inbound_counters().await;
@@ -461,4 +461,32 @@ async fn a_manager_with_no_sink_receives_as_before() {
     send(&from, port, &signed(&alice, SecurityLevel::Authenticated));
     assert_eq!(pump(&bob, 2).await.len(), 1);
     assert_eq!(bob.knocks().await.len(), 1);
+}
+
+// Row 9: a claimed id is attacker-supplied and can be ~64 KB in one datagram, so the budget key is
+// built from its first 256 characters, as the knock record's is. Two ids that differ only after
+// that share one budget; a key built from the whole id would hold up to 64 KB per tracked key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_budget_key_uses_the_claimed_ids_first_256_characters() {
+    let alice = signer();
+    let (bob, port, capture) = node(store_for(&alice), None, limits(1, 100)).await;
+    let from = sender();
+    let prefix = "x".repeat(256);
+    send(&from, port, &unsigned_from(&format!("{prefix}-one")));
+    send(&from, port, &unsigned_from(&format!("{prefix}-two")));
+    pump(&bob, 2).await;
+    let knocks = capture.on("transport/knock");
+    assert_eq!(
+        kinds(&knocks),
+        [
+            SecurityEventKind::UnverifiedSender,
+            SecurityEventKind::RateLimited
+        ],
+        "{knocks:?}"
+    );
+    // Positive control: ids that differ within the first 256 characters keep separate budgets.
+    send(&from, port, &unsigned_from(&format!("y{prefix}")));
+    pump(&bob, 3).await;
+    let last = capture.on("transport/knock").pop().unwrap();
+    assert_eq!(last.kind, SecurityEventKind::UnverifiedSender);
 }
