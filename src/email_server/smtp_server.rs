@@ -209,6 +209,12 @@ impl SynapseSmtpServer {
         self
     }
 
+    /// The guard this server checks logins against, for tests of the shared budget.
+    #[cfg(test)]
+    pub(crate) fn security(&self) -> &EmailSecurity {
+        &self.security
+    }
+
     /// Start the SMTP server: bind `config.port` and serve it. Callers that need to know the port
     /// is actually held before this returns (e.g. a `Transport::start` contract) should bind their
     /// own listener and call [`Self::serve`] directly instead -- see `email_unified.rs`.

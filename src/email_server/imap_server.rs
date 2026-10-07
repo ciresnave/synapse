@@ -125,6 +125,12 @@ impl SynapseImapServer {
         self
     }
 
+    /// The guard this server checks logins against, for tests of the shared budget.
+    #[cfg(test)]
+    pub(crate) fn security(&self) -> &EmailSecurity {
+        &self.security
+    }
+
     /// Start the IMAP server
     pub async fn start(&self) -> Result<()> {
         let addr = self.config.bind_scope.listen_addr(self.config.port);
