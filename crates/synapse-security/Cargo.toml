@@ -1,0 +1,21 @@
+[package]
+name = "synapse-security"
+version.workspace = true
+edition = "2024"
+rust-version = "1.89"
+authors = ["Eric Evans <ciresnave@gmail.com>"]
+description = "Sinks for Synapse security events: owner-only file, stderr, alert seam, fanout (hardening P4)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ciresnave/synapse"
+
+[lib]
+name = "synapse_security"
+path = "src/lib.rs"
+
+[dependencies]
+synapse = { path = "../..", version = "6.0.0-rc.3" }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+
+[dev-dependencies]
+tempfile = "3.0"
