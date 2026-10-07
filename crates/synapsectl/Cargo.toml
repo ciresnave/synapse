@@ -13,8 +13,8 @@ name = "synapse"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.14" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.14" }
+synapse = { path = "../..", version = "6.0.0-rc.15" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.15" }
 clap = { version = "4.5.41", features = ["derive", "env"] }
 chrono = "0.4"
 # Loopback HTTP only: no TLS stack and no system proxy (board 104: no new non-Rust deps).

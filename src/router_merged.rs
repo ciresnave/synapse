@@ -19,6 +19,7 @@ use crate::{
     email_server::SynapseEmailServer,
     error::Result,
     identity::IdentityRegistry,
+    security_events::SecuritySink,
     sender_auth::TrustStore,
     transport::{TransportRoute, abstraction::MessageUrgency, router::MultiTransportRouter},
     types::{MessageType, SecureMessage, SecurityLevel, SimpleMessage},
@@ -66,6 +67,9 @@ pub struct SynapseRouter {
     multi_transport_enabled: bool,
     /// Email server enabled
     email_server_enabled: bool,
+    /// Where the email transport's and the email server's own security events go (hardening P7,
+    /// follow-up a3). Set with [`Self::set_security_sink`]; clones share it.
+    security_sink: Arc<std::sync::OnceLock<Arc<dyn SecuritySink>>>,
 }
 
 impl SynapseRouter {
@@ -87,7 +91,28 @@ impl SynapseRouter {
             our_global_id,
             multi_transport_enabled: false,
             email_server_enabled: false,
+            security_sink: Arc::new(std::sync::OnceLock::new()),
         })
+    }
+
+    /// Where the router's email transport and email server record their own security events
+    /// (hardening P7). The transport records only in Direct mode, whose SMTP listener enforces the
+    /// inbound limits; RelayOut and External bind no listener. A transport built later
+    /// is given the sink before `start`, as `TransportManager` does, and one already built is given
+    /// it now. Clones share the sink. The first call wins; later ones are ignored.
+    pub async fn set_security_sink(&self, sink: Arc<dyn SecuritySink>) {
+        if self.security_sink.set(sink).is_err() {
+            return;
+        }
+        let Some(sink) = self.security_sink.get() else {
+            return;
+        };
+        if let Some(server) = &self.email_server {
+            server.set_security_sink(Arc::clone(sink));
+        }
+        if let Some(transport) = self.email.read().await.as_ref() {
+            transport.attach_security_sink(Arc::clone(sink));
+        }
     }
 
     /// Start all router services.
@@ -296,24 +321,47 @@ impl SynapseRouter {
     async fn ensure_email_transport(
         &self,
     ) -> Result<Arc<dyn crate::transport::abstraction::Transport>> {
+        use crate::transport::providers::TransportProvider as _;
+        self.ensure_email_transport_with(async {
+            crate::transport::providers::ProductionTransportProvider
+                .create_email_transport(&self.config)
+                .await?
+                .ok_or_else(|| {
+                    crate::error::SynapseError::TransportError(
+                        "email transport construction returned None".to_string(),
+                    )
+                })
+        })
+        .await
+    }
+
+    /// `ensure_email_transport` with the construction step injected, so a test can hand in a
+    /// transport that records what it is given. `build` runs only when no transport exists yet.
+    async fn ensure_email_transport_with(
+        &self,
+        build: impl std::future::Future<
+            Output = Result<Arc<dyn crate::transport::abstraction::Transport>>,
+        >,
+    ) -> Result<Arc<dyn crate::transport::abstraction::Transport>> {
         {
             let existing = self.email.read().await;
             if let Some(t) = existing.as_ref() {
                 return Ok(Arc::clone(t));
             }
         }
-        use crate::transport::providers::TransportProvider as _;
-        let provider = crate::transport::providers::ProductionTransportProvider;
-        let transport = provider
-            .create_email_transport(&self.config)
-            .await?
-            .ok_or_else(|| {
-                crate::error::SynapseError::TransportError(
-                    "email transport construction returned None".to_string(),
-                )
-            })?;
-        transport.start().await?;
+        let transport = build.await?;
+        // The sink is read, and the transport started and stored, under one write lock.
+        // `set_security_sink` sets the sink before it reads this slot, so either this attaches the
+        // sink or `set_security_sink` finds the stored transport and attaches it there.
         let mut slot = self.email.write().await;
+        if let Some(existing) = slot.as_ref() {
+            // Another caller built one first; ours was never started.
+            return Ok(Arc::clone(existing));
+        }
+        if let Some(sink) = self.security_sink.get() {
+            transport.attach_security_sink(Arc::clone(sink));
+        }
+        transport.start().await?;
         *slot = Some(Arc::clone(&transport));
         Ok(transport)
     }
@@ -797,9 +845,18 @@ mod tests {
     /// anywhere, so a test can inspect exactly what `send_message_smart`'s fast branch built.
     /// `MockTransport` in `transport::providers` already exists but its `send_message` ignores
     /// the message entirely -- it cannot be reused here for that reason.
+    ///
+    /// It also logs `attach_security_sink` and `start` in call order, with the address of the sink
+    /// it was given, for the P7 (a3) sink tests.
     #[derive(Debug, Default)]
     struct RecordingTransport {
         sent: Arc<std::sync::Mutex<Option<SecureMessage>>>,
+        log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        attached: Arc<std::sync::Mutex<Option<usize>>>,
+    }
+
+    fn sink_addr(sink: &Arc<dyn crate::security_events::SecuritySink>) -> usize {
+        Arc::as_ptr(sink) as *const () as usize
     }
 
     #[async_trait::async_trait]
@@ -888,7 +945,13 @@ mod tests {
             })
         }
 
+        fn attach_security_sink(&self, sink: Arc<dyn crate::security_events::SecuritySink>) {
+            self.log.lock().expect("lock").push("attach");
+            *self.attached.lock().expect("lock") = Some(sink_addr(&sink));
+        }
+
         async fn start(&self) -> Result<()> {
+            self.log.lock().expect("lock").push("start");
             Ok(())
         }
 
@@ -1000,6 +1063,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(None));
         let recording_transport = Arc::new(RecordingTransport {
             sent: Arc::clone(&sent),
+            ..Default::default()
         });
         let provider = StubTransportProvider {
             email_transport: recording_transport,
@@ -1217,6 +1281,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(None));
         let recording_transport = Arc::new(RecordingTransport {
             sent: Arc::clone(&sent),
+            ..Default::default()
         });
         let provider = StubTransportProvider {
             email_transport: recording_transport,
@@ -1447,6 +1512,117 @@ mod tests {
             "a message signed by an unpinned, unrelated key was delivered anyway -- \
              receive_messages must drop an unverifiable sender, not just an unsigned one: \
              {delivered:?}"
+        );
+    }
+
+    #[derive(Default)]
+    struct Capture(std::sync::Mutex<Vec<crate::security_events::SecurityEvent>>);
+
+    impl crate::security_events::SecuritySink for Capture {
+        fn record(&self, event: &crate::security_events::SecurityEvent) {
+            self.0.lock().expect("lock").push(event.clone());
+        }
+    }
+
+    // P7 follow-up (a3): the router's email transport records its own events (Direct mode's
+    // inbound limits) to the router's sink, given before `start`, as `TransportManager` does.
+    #[tokio::test]
+    async fn the_email_transport_gets_the_sink_before_it_starts() {
+        let config = Config::default_for_entity("Test", "tool");
+        let sink: Arc<dyn crate::security_events::SecuritySink> = Arc::new(Capture::default());
+        let router = SynapseRouter::new(config.clone(), "alice@synapse.local".to_string())
+            .await
+            .expect("router");
+        // A clone made before the sink is set shares it (review of a3, finding 1).
+        let earlier_clone = router.clone();
+        router.set_security_sink(Arc::clone(&sink)).await;
+        let recording = Arc::new(RecordingTransport::default());
+        let (log, attached) = (Arc::clone(&recording.log), Arc::clone(&recording.attached));
+        earlier_clone
+            .ensure_email_transport_with(async move {
+                Ok(recording as Arc<dyn crate::transport::abstraction::Transport>)
+            })
+            .await
+            .expect("email transport");
+        assert_eq!(*log.lock().expect("lock"), ["attach", "start"]);
+        assert_eq!(*attached.lock().expect("lock"), Some(sink_addr(&sink)));
+
+        // A transport built before the sink is set is given it when it is set.
+        let late = SynapseRouter::new(config.clone(), "alice@synapse.local".to_string())
+            .await
+            .expect("router");
+        let recording = Arc::new(RecordingTransport::default());
+        let (log, attached) = (Arc::clone(&recording.log), Arc::clone(&recording.attached));
+        late.ensure_email_transport_with(async move {
+            Ok(recording as Arc<dyn crate::transport::abstraction::Transport>)
+        })
+        .await
+        .expect("email transport");
+        late.set_security_sink(Arc::clone(&sink)).await;
+        assert_eq!(*log.lock().expect("lock"), ["start", "attach"]);
+        assert_eq!(*attached.lock().expect("lock"), Some(sink_addr(&sink)));
+
+        // Negative control: a router given no sink attaches nothing, and still starts.
+        let plain = SynapseRouter::new(config, "alice@synapse.local".to_string())
+            .await
+            .expect("router");
+        let recording = Arc::new(RecordingTransport::default());
+        let log = Arc::clone(&recording.log);
+        plain
+            .ensure_email_transport_with(async move {
+                Ok(recording as Arc<dyn crate::transport::abstraction::Transport>)
+            })
+            .await
+            .expect("email transport");
+        assert_eq!(*log.lock().expect("lock"), ["start"]);
+    }
+
+    // P7 follow-up (a3): a router holding a `SynapseEmailServer` passes its sink on, so the
+    // server's login guard records to it.
+    #[tokio::test]
+    async fn the_email_server_records_to_the_routers_sink() {
+        use crate::email_server::{
+            connectivity::{ConnectivityAssessment, FirewallStatus, ServerRecommendation},
+            imap_server::ImapServerConfig,
+            smtp_server::SmtpServerConfig,
+        };
+        let connectivity = ConnectivityAssessment {
+            can_bind_smtp: false,
+            can_bind_imap: false,
+            has_external_ip: false,
+            external_ip: None,
+            firewall_status: FirewallStatus::Unknown,
+            recommended_config: ServerRecommendation::ExternalProvider {
+                reason: "test".into(),
+            },
+        };
+        let server = Arc::new(
+            SynapseEmailServer::with_config(
+                SmtpServerConfig::default(),
+                ImapServerConfig::default(),
+                connectivity,
+            )
+            .expect("email server"),
+        );
+        let config = Config::default_for_entity("Test", "tool");
+        let mut router = SynapseRouter::new(config, "alice@synapse.local".to_string())
+            .await
+            .expect("router");
+        router.email_server = Some(Arc::clone(&server));
+        let capture = Arc::new(Capture::default());
+        router.set_security_sink(capture.clone()).await;
+
+        let now = chrono::Utc::now();
+        server
+            .security()
+            .begin_login("smtp_auth", "alice", "10.0.0.1", now)
+            .expect("not locked")
+            .failed(now);
+        let events = capture.0.lock().expect("lock");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events[0].kind,
+            crate::security_events::SecurityEventKind::AuthFailure
         );
     }
 }
