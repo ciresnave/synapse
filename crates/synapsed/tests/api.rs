@@ -5,6 +5,7 @@
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
@@ -15,7 +16,7 @@ use synapse::certificate::chain_to_pem;
 use synapse::keystore::Keystore;
 use synapse::roles::{sign_claim, sign_claim_for};
 use synapse::security_events::LimiterConfig;
-use synapsed::{Daemon, DaemonConfig, DaemonError, SECURITY_EVENTS_FILE, SecurityConfig};
+use synapsed::{Daemon, DaemonConfig, DaemonError, Pause, SECURITY_EVENTS_FILE, SecurityConfig};
 
 struct Running {
     addr: SocketAddr,
@@ -53,11 +54,18 @@ async fn start() -> Running {
 }
 
 async fn start_with(security: Option<SecurityConfig>) -> Running {
+    start_daemon(security, None).await
+}
+
+async fn start_daemon(security: Option<SecurityConfig>, pause: Option<Pause>) -> Running {
     let home = tempfile::tempdir().unwrap();
     Keystore::init_account(home.path(), "acct").expect("init account");
     let mut daemon = Daemon::open(&config(home.path())).expect("open daemon");
     if let Some(security) = security {
         daemon = daemon.with_security(security);
+    }
+    if let Some(pause) = pause {
+        daemon = daemon.with_pause(pause);
     }
     let started_at = daemon.started_at();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -915,29 +923,70 @@ fn on(events: &[Value], kind: &str, surface: &str) -> Vec<Value> {
         .collect()
 }
 
-async fn timed_post(
-    d: &Running,
-    path: &str,
-    token: Option<&str>,
-    body: Value,
-) -> (u16, Value, Duration) {
-    let started = std::time::Instant::now();
-    let (status, reply, _) = post(d, path, token, body).await;
-    (status, reply, started.elapsed())
+/// The delays the daemon owed, in order. Recorded instead of slept, so the tests below assert which
+/// answers were held back without timing them: a slow shared runner once took 260 ms over a valid
+/// claim and failed a `< 200 ms` bound that measured the runner, not the daemon.
+#[derive(Clone, Default)]
+struct Pauses(Arc<Mutex<Vec<Duration>>>);
+
+impl Pauses {
+    fn pause(&self) -> Pause {
+        let owed = self.0.clone();
+        Arc::new(move |delay| {
+            owed.lock().unwrap().push(delay);
+            Box::pin(std::future::ready(()))
+        })
+    }
+
+    /// The delays owed since the last call.
+    fn take(&self) -> Vec<Duration> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+
+    /// The one delay owed since the last call, if any.
+    fn owed(&self) -> Option<Duration> {
+        let owed = self.take();
+        assert!(owed.len() <= 1, "one request owed {owed:?}");
+        owed.first().copied()
+    }
+}
+
+/// [`small`] limits, with every owed delay recorded rather than slept.
+async fn start_recorded() -> (Running, Pauses) {
+    let pauses = Pauses::default();
+    let d = start_daemon(Some(small()), Some(pauses.pause())).await;
+    (d, pauses)
+}
+
+#[tokio::test]
+async fn an_owed_delay_is_really_waited_out() {
+    // The real clock, and only a lower bound: an answer cannot arrive before its sleep ends,
+    // however slow the machine is.
+    let d = start_with(Some(small())).await;
+    let mut last = Duration::ZERO;
+    for token in ["a1", "b2", "c3"].map(|b| b.repeat(32)) {
+        let started = std::time::Instant::now();
+        let (s, _, _) = post(&d, "/v1/heartbeat", Some(&token), json!({})).await;
+        last = started.elapsed();
+        assert_eq!(s, 401);
+    }
+    assert!(last >= SLOW, "the 3rd failure was answered in {last:?}");
+    d.stop().await;
 }
 
 #[tokio::test]
 async fn bad_bearers_are_delayed_and_recorded() {
-    let d = start_with(Some(small())).await;
+    let (d, pauses) = start_recorded().await;
     let (good, _) = claim(&d, "alpha", 1).await;
+    pauses.take();
     let bad = ["a1", "b2", "c3"].map(|b| b.repeat(32));
-    let mut last = Duration::ZERO;
+    let mut last = None;
     for token in &bad {
-        let (s, _, took) = timed_post(&d, "/v1/heartbeat", Some(token), json!({})).await;
+        let (s, _, _) = post(&d, "/v1/heartbeat", Some(token), json!({})).await;
         assert_eq!(s, 401);
-        last = took;
+        last = pauses.owed();
     }
-    assert!(last >= SLOW, "the 3rd failure was answered in {last:?}");
+    assert!(last >= Some(SLOW), "the 3rd failure owed {last:?}");
     let text = events_text(&d);
     let lines = on(&events(&d), "auth_failure", "synapsed/bearer");
     assert!(lines.len() >= 3, "{text}");
@@ -949,17 +998,17 @@ async fn bad_bearers_are_delayed_and_recorded() {
         );
     }
     // Positive control: the failures do not slow a valid caller.
-    let (s, _, took) = timed_post(&d, "/v1/heartbeat", Some(&good), json!({})).await;
+    let (s, _, _) = post(&d, "/v1/heartbeat", Some(&good), json!({})).await;
     assert_eq!(s, 200);
-    assert!(took < SLOW, "a valid token took {took:?}");
+    assert_eq!(pauses.owed(), None, "a valid token was held back");
     d.stop().await;
 }
 
 #[tokio::test]
 async fn refused_claims_are_delayed_and_recorded() {
-    let d = start_with(Some(small())).await;
+    let (d, pauses) = start_recorded().await;
     let mut secrets = Vec::new();
-    let mut last = Duration::ZERO;
+    let mut last = None;
     for n in [0x71u8, 0x72, 0x73] {
         let mut body = claim_body(&d, "alpha", n);
         let mut sig = B64.decode(body["signature_b64"].as_str().unwrap()).unwrap();
@@ -967,16 +1016,20 @@ async fn refused_claims_are_delayed_and_recorded() {
         body["signature_b64"] = json!(B64.encode(&sig));
         secrets.push(body["nonce_hex"].as_str().unwrap().to_string());
         secrets.push(body["signature_b64"].as_str().unwrap().to_string());
-        let (s, reply, took) = timed_post(&d, "/v1/claim", None, body).await;
+        let (s, reply, _) = post(&d, "/v1/claim", None, body).await;
         assert_eq!(s, 403, "{reply}");
         assert_eq!(reply["error"], "claim_refused");
-        last = took;
+        last = pauses.owed();
     }
-    assert!(last >= SLOW, "the 3rd refusal was answered in {last:?}");
+    assert!(last >= Some(SLOW), "the 3rd refusal owed {last:?}");
     let mut malformed = claim_body(&d, "alpha", 0x74);
     malformed["nonce_hex"] = json!("zz");
-    let (s, reply, _) = timed_post(&d, "/v1/claim", None, malformed).await;
+    let (s, reply, _) = post(&d, "/v1/claim", None, malformed).await;
     assert_eq!(s, 400, "{reply}");
+    assert!(
+        pauses.owed().is_some(),
+        "a malformed claim was not held back"
+    );
     let text = events_text(&d);
     let lines = on(&events(&d), "auth_failure", "synapsed/claim");
     assert!(lines.len() >= 4, "{text}");
@@ -988,90 +1041,93 @@ async fn refused_claims_are_delayed_and_recorded() {
         );
     }
     // Positive control: a valid claim is not slowed by the failures before it.
-    let (s, reply, took) = timed_post(&d, "/v1/claim", None, claim_body(&d, "alpha", 0x75)).await;
+    let (s, reply, _) = post(&d, "/v1/claim", None, claim_body(&d, "alpha", 0x75)).await;
     assert_eq!(s, 200, "{reply}");
-    assert!(took < SLOW, "a valid claim took {took:?}");
+    assert_eq!(pauses.owed(), None, "a valid claim was held back");
     d.stop().await;
 }
 
 #[tokio::test]
 async fn challenged_health_over_budget_is_slowed_not_refused() {
-    let d = start_with(Some(small())).await;
+    let (d, pauses) = start_recorded().await;
     let id = instance_id(&d);
     let challenge = [0x5a; 16];
     let hexed: String = challenge.iter().map(|b| format!("{b:02x}")).collect();
     let url = d.url(&format!("/v1/health?challenge={hexed}"));
-    let mut last = Duration::ZERO;
+    let mut last = None;
     for n in 1..=3 {
-        let started = std::time::Instant::now();
         let resp = client().get(&url).send().await.unwrap();
-        last = started.elapsed();
+        last = pauses.owed();
         assert_eq!(resp.status(), 200, "request {n}");
         let reply: Value = resp.json().await.unwrap();
         let proof = reply["proof"].as_str().expect("a proof");
         assert!(proof_holds(&id, d.addr, &challenge, proof), "request {n}");
         if n == 1 {
-            assert!(last < SLOW, "the first challenge took {last:?}");
+            assert_eq!(last, None, "the first challenge was held back");
             assert!(on(&events(&d), "rate_limited", "synapsed/health").is_empty());
         }
     }
-    assert!(last >= SLOW, "the 3rd challenge was answered in {last:?}");
+    assert!(last >= Some(SLOW), "the 3rd challenge owed {last:?}");
     // Requests 2 and 3 each owed a delay, so each left an event.
     let lines = on(&events(&d), "rate_limited", "synapsed/health");
     assert_eq!(lines.len(), 2, "{}", events_text(&d));
     assert!(lines.iter().all(|e| e["subject"] == "health"));
     // Positive control: an unchallenged health is not counted or slowed.
-    let started = std::time::Instant::now();
     let resp = client().get(d.url("/v1/health")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
-    assert!(started.elapsed() < SLOW);
+    assert_eq!(pauses.owed(), None, "an unchallenged health was held back");
     d.stop().await;
 }
 
 #[tokio::test]
 async fn repeated_unknown_recipients_are_delayed_per_role() {
-    let d = start_with(Some(small())).await;
+    let (d, pauses) = start_recorded().await;
     let (alpha, _) = claim(&d, "alpha", 1).await;
     let (beta, _) = claim(&d, "beta", 2).await;
+    pauses.take();
     let body = json!({"to": "ghost@acct", "body_b64": B64.encode(b"x")});
-    let mut last = Duration::ZERO;
+    let mut last = None;
     for _ in 0..3 {
-        let (s, reply, took) = timed_post(&d, "/v1/send", Some(&alpha), body.clone()).await;
+        let (s, reply, _) = post(&d, "/v1/send", Some(&alpha), body.clone()).await;
         assert_eq!(s, 404, "{reply}");
         assert_eq!(reply["error"], "unknown_recipient");
-        last = took;
+        last = pauses.owed();
     }
-    assert!(last >= SLOW, "the 3rd unknown recipient took {last:?}");
+    assert!(
+        last >= Some(SLOW),
+        "the 3rd unknown recipient owed {last:?}"
+    );
     let lines = on(&events(&d), "rate_limited", "synapsed/recipient");
     assert!(!lines.is_empty(), "{}", events_text(&d));
     assert!(lines.iter().all(|e| e["subject"] == "alpha@acct"));
     // Positive control: another role has its own key.
-    let (s, _, took) = timed_post(&d, "/v1/send", Some(&beta), body).await;
+    let (s, _, _) = post(&d, "/v1/send", Some(&beta), body).await;
     assert_eq!(s, 404);
-    assert!(took < SLOW, "beta's first 404 took {took:?}");
+    assert_eq!(pauses.owed(), None, "beta's first 404 was held back");
     d.stop().await;
 }
 
 #[tokio::test]
 async fn repeated_bad_acks_are_delayed_per_role() {
-    let d = start_with(Some(small())).await;
+    let (d, pauses) = start_recorded().await;
     let (alpha, _) = claim(&d, "alpha", 1).await;
     let (beta, _) = claim(&d, "beta", 2).await;
+    pauses.take();
     let body = json!({"message_id": "alpha@acct/nothing"});
-    let mut last = Duration::ZERO;
+    let mut last = None;
     for _ in 0..3 {
-        let (s, reply, took) = timed_post(&d, "/v1/ack", Some(&alpha), body.clone()).await;
+        let (s, reply, _) = post(&d, "/v1/ack", Some(&alpha), body.clone()).await;
         assert_eq!(s, 404, "{reply}");
-        last = took;
+        last = pauses.owed();
     }
-    assert!(last >= SLOW, "the 3rd bad ack took {last:?}");
+    assert!(last >= Some(SLOW), "the 3rd bad ack owed {last:?}");
     let lines = on(&events(&d), "rate_limited", "synapsed/ack");
     assert!(!lines.is_empty(), "{}", events_text(&d));
     assert!(lines.iter().all(|e| e["subject"] == "alpha@acct"));
     // Positive control: another role's ack is unaffected.
-    let (s, _, took) = timed_post(&d, "/v1/ack", Some(&beta), body).await;
+    let (s, _, _) = post(&d, "/v1/ack", Some(&beta), body).await;
     assert_eq!(s, 404);
-    assert!(took < SLOW, "beta's first bad ack took {took:?}");
+    assert_eq!(pauses.owed(), None, "beta's first bad ack was held back");
     d.stop().await;
 }
 
