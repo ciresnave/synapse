@@ -3,7 +3,7 @@
 use chrono::Utc;
 use std::collections::HashMap;
 use synapse::{
-    email_server::{ConnectivityDetector, create_test_auth_handler},
+    email_server::{ConnectivityDetector, SynapseAuthHandler},
     error::Result,
     synapse::blockchain::serialization::UuidWrapper,
     types::{DateTimeWrapper, SecureMessage, SecurityLevel},
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
 
     // Step 2: Test authentication system
     info!("🔐 Testing authentication system...");
-    let _auth_handler = create_test_auth_handler();
+    let _auth_handler = SynapseAuthHandler::new();
 
     info!("✅ Authentication handler created successfully!");
 
