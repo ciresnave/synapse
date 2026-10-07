@@ -230,8 +230,7 @@
 // This type system provides the foundation for EMRP's flexibility while
 // maintaining strong typing and security throughout the communication process.
 
-pub use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
-use bincode::{Decode, Encode};
+pub use crate::wire::{DateTimeWrapper, UuidWrapper};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -266,7 +265,7 @@ impl std::fmt::Display for EntityType {
 }
 
 /// Types of messages in the protocol
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageType {
     /// Direct communication between entities
@@ -297,7 +296,7 @@ impl std::fmt::Display for MessageType {
 }
 
 /// Security levels for different message types
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityLevel {
     /// No encryption needed
@@ -323,8 +322,7 @@ impl std::fmt::Display for SecurityLevel {
 }
 
 /// The simple message format that users interact with
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-// Always derive bincode traits for monolithic build
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleMessage {
     /// Recipient's local name (e.g., "Eric", "Assistant", "FileSystem")
     pub to: String,
@@ -389,13 +387,6 @@ impl SimpleMessage {
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
-    }
-
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
-        bincode::encode_to_vec(self, bincode::config::standard())
-    }
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
     }
 }
 
@@ -463,7 +454,7 @@ pub fn default_protocol_version() -> u16 {
 }
 
 /// Secure message for network transport
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecureMessage {
     pub message_id: UuidWrapper,
     pub to_global_id: String,
@@ -550,13 +541,6 @@ impl SecureMessage {
     /// Check if content is empty (for testing compatibility)
     pub fn content_is_empty(&self) -> bool {
         self.encrypted_content.is_empty()
-    }
-
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
-        bincode::encode_to_vec(self, bincode::config::standard())
-    }
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
     }
 }
 
@@ -648,7 +632,7 @@ pub struct ImapConfig {
 }
 
 /// Stream priority levels
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamPriority {
     /// < 100ms latency required
@@ -662,7 +646,7 @@ pub enum StreamPriority {
 }
 
 /// Types of streaming scenarios
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     /// Tool streaming results back
@@ -681,7 +665,7 @@ pub enum StreamType {
     Interactive,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamChunk {
     /// Stream identifier
     pub stream_id: UuidWrapper,
@@ -734,16 +718,8 @@ impl StreamChunk {
             compression: "none".to_string(),
         }
     }
-
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
-        bincode::encode_to_vec(self, bincode::config::standard())
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
-    }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamMetadata {
     /// Stream identifier
     pub stream_id: UuidWrapper,
@@ -786,14 +762,6 @@ impl StreamMetadata {
             compression: "gzip".to_string(),
             encryption: "none".to_string(),
         }
-    }
-
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::error::EncodeError> {
-        bincode::encode_to_vec(self, bincode::config::standard())
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::error::DecodeError> {
-        bincode::decode_from_slice(bytes, bincode::config::standard()).map(|r| r.0)
     }
 }
 

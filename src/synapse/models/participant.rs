@@ -212,7 +212,6 @@ pub struct Relationship {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-// Manual bincode impls are provided elsewhere; do not derive here
 pub enum RelationshipType {
     // Work relationships
     Boss,

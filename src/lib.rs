@@ -192,6 +192,7 @@
 //! performance-optimized - perfect for the AI-driven future.
 pub mod synapse;
 pub mod types;
+pub mod wire;
 pub use crate::types::SecureMessage;
 
 pub mod config;
