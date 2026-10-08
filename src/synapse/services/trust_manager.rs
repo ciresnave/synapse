@@ -101,6 +101,19 @@ pub struct TrustManager {
     pub blockchain: Arc<SynapseBlockchain>,
 }
 
+#[async_trait::async_trait]
+impl crate::synapse::services::trust_source::TrustSource for TrustManager {
+    async fn trust_of(
+        &self,
+        subject_id: &str,
+        requester_id: &str,
+    ) -> Result<crate::synapse::services::trust_source::TrustAnswer> {
+        Ok(crate::synapse::services::trust_source::TrustAnswer::Score(
+            self.get_trust_score(subject_id, requester_id).await?,
+        ))
+    }
+}
+
 impl TrustManager {
     /// Create new trust manager
     pub async fn new(database: Arc<Database>, blockchain: Arc<SynapseBlockchain>) -> Result<Self> {

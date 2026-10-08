@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Added (rc.20)
+
+- `synapse::services::TrustSource`, an optional hook for a trust score, with `NoTrustSource` (the default) and
+  `TrustAnswer::{Score, Unsupported}`. Contact search (`min_trust_score`) and the privacy policy
+  (`trust_threshold`) read through it. `ParticipantRegistry::with_trust_source` and
+  `PrivacyManager::with_trust_source` set it.
+
+### Changed (rc.20, behaviour)
+
+- `PrivacyManager::evaluate_contact_request` no longer allows contact when a positive `trust_threshold` has no
+  score. With no source, or a failing one, it returns an error (`TrustUnsupported` for no source). It used to log a warning and allow.
+- `ParticipantRegistry` contact search with `min_trust_score` returns an error when the source fails. It used to
+  treat a failure as a score of 0.0, and one failing lookup now fails the whole search rather than dropping that
+  profile. A `min_trust_score` of 0.0 or less consults no source, as in `PrivacyManager`.
+
 ### Removed (breaking)
 
 The binary codec that RUSTSEC-2025-0141 flags as unmaintained has been removed from the core types
