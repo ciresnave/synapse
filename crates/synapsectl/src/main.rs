@@ -9,9 +9,6 @@
 //! `synapse claim|send|inbox|ack|list --role <role>` (or `SYNAPSE_ROLE`). `inbox` and `list` print
 //! one JSON object per line. Session tokens are never printed.
 
-mod events;
-mod mail;
-
 use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
 
@@ -21,7 +18,7 @@ use synapse::certificate::Permission;
 use synapse::keystore::{Keystore, KeystoreError, default_home, valid_name};
 use synapse::security_events::SecurityEventKind;
 
-use mail::{Daemon, MailError};
+use synapse_client::{Daemon, MailError, encode_body, events, inbox_line, printable};
 
 #[derive(Parser)]
 #[command(name = "synapse", about = "Synapse command line")]
@@ -154,7 +151,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
         Command::Claim { role } => {
             let daemon = connect(&home, &role)?;
             let claimed = daemon.claim(&role.role)?;
-            println!("identity: {}", mail::printable(&claimed.global_id));
+            println!("identity: {}", printable(&claimed.global_id));
             println!("epoch: {}", claimed.epoch);
         }
         Command::Send {
@@ -188,9 +185,9 @@ fn run(cli: Cli) -> Result<(), MailError> {
             let reply = daemon.call(
                 &role.role,
                 "/v1/send",
-                Some(&json!({"to": to, "message_id": id, "body_b64": mail::encode_body(&body)})),
+                Some(&json!({"to": to, "message_id": id, "body_b64": encode_body(&body)})),
             )?;
-            let field = |name: &str| mail::printable(reply[name].as_str().unwrap_or(""));
+            let field = |name: &str| printable(reply[name].as_str().unwrap_or(""));
             println!("message id: {}", field("message_id"));
             println!("outcome: {}", field("outcome"));
         }
@@ -206,7 +203,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 Some(&json!({"max": max, "lease_secs": lease_secs})),
             )?;
             for message in reply["messages"].as_array().into_iter().flatten() {
-                println!("{}", mail::inbox_line(message));
+                println!("{}", inbox_line(message));
             }
         }
         Command::Ack { role, message_id } => {
@@ -218,7 +215,7 @@ fn run(cli: Cli) -> Result<(), MailError> {
             )?;
             println!(
                 "outcome: {}",
-                mail::printable(reply["outcome"].as_str().unwrap_or(""))
+                printable(reply["outcome"].as_str().unwrap_or(""))
             );
         }
         Command::List { role } => {

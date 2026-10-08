@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Added (rc.23): `synapse-client` crate (M6a)
+
+The blocking client for `synapsed` (find the daemon, prove it, claim a role, keep one session) moves out of
+`synapsectl` into its own library crate, `synapse-client`, so the CLI and the coming MCP adapters share one
+implementation. Pure move: `synapsectl` keeps its behaviour and its `tests/cli.rs` and `tests/mail.rs` pass
+unchanged. The security-events surface string is still `synapsectl/health-proof`. A new test pins the exports
+(`Daemon`, `MailError`, `encode_body`, `inbox_line`, `printable`, `events`).
+Note: migration `002_drop_trust_tables.sql` is not applied anywhere.
+
 ### Changed (rc.22): auth-framework 0.3.0 -> 0.5.0-rc26
 
 The optional `auth-framework` dependency moves to the newest published release. 0.3.0 pulled reqwest 0.11,
