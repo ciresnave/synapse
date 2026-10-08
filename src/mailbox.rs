@@ -189,6 +189,15 @@ impl fmt::Display for MailError {
 
 impl std::error::Error for MailError {}
 
+/// Whether `epoch` may lease a message holding `lease` at `now`: it has none, it expired, or it
+/// belongs to an older epoch (a takeover voids it).
+fn is_free(lease: Option<&Lease>, epoch: u64, now: DateTime<Utc>) -> bool {
+    match lease {
+        None => true,
+        Some(held) => held.until <= now || held.epoch != epoch,
+    }
+}
+
 /// One write transaction's view of the store.
 pub trait MailTxn {
     /// How many messages the role has queued, and their total body bytes.
@@ -206,6 +215,24 @@ pub trait MailTxn {
         self.scan(role, &mut |stored| {
             visit(stored.enqueued_at, stored.lease.as_ref());
             true
+        })
+    }
+    /// Visit the role's messages that `epoch` may lease at `now` (see [`is_free`]), in ascending
+    /// `seq`, stopping when `visit` returns `false`. The default filters [`MailTxn::scan`]; a store
+    /// that keeps bodies apart should override it so a skipped message's body is never loaded.
+    fn scan_free(
+        &self,
+        role: &str,
+        epoch: u64,
+        now: DateTime<Utc>,
+        visit: &mut dyn FnMut(&Stored) -> bool,
+    ) -> Result<(), StoreError> {
+        self.scan(role, &mut |stored| {
+            if is_free(stored.lease.as_ref(), epoch, now) {
+                visit(stored)
+            } else {
+                true
+            }
         })
     }
     fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError>;
@@ -522,14 +549,8 @@ impl<S: MailStore> Mailbox<S> {
             out.clear();
             // Collect up to `max` free messages in order, stopping the scan early, then lease them.
             let mut picked: Vec<Stored> = Vec::new();
-            txn.scan(role, &mut |stored| {
-                let free = match &stored.lease {
-                    None => true,
-                    Some(held) => held.until <= now || held.epoch != epoch,
-                };
-                if free {
-                    picked.push(stored.clone());
-                }
+            txn.scan_free(role, epoch, now, &mut |stored| {
+                picked.push(stored.clone());
                 picked.len() < max
             })
             .map_err(MailError::Store)?;
@@ -935,6 +956,38 @@ impl MailTxn for RedbTxn<'_> {
             let meta: Meta =
                 serde_json::from_slice(&raw).map_err(|e| store_err("meta decode")(&e))?;
             let stored = self.assemble(role, seq, meta)?;
+            if !visit(&stored) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Decides from META alone, so only the bodies of messages that are visited are loaded. Rows
+    /// are decoded as they are reached, so scanning stops at the first `false` from `visit` and a
+    /// row after it is never read.
+    fn scan_free(
+        &self,
+        role: &str,
+        epoch: u64,
+        now: DateTime<Utc>,
+        visit: &mut dyn FnMut(&Stored) -> bool,
+    ) -> Result<(), StoreError> {
+        let t = self
+            .txn
+            .open_table(redb_tables::META)
+            .map_err(|e| store_err("meta")(&e))?;
+        let range = t
+            .range((role, 0u64)..=(role, u64::MAX))
+            .map_err(|e| store_err("meta")(&e))?;
+        for entry in range {
+            let (k, v) = entry.map_err(|e| store_err("meta")(&e))?;
+            let meta: Meta =
+                serde_json::from_slice(v.value()).map_err(|e| store_err("meta decode")(&e))?;
+            if !is_free(meta.lease.as_ref(), epoch, now) {
+                continue;
+            }
+            let stored = self.assemble(role, k.value().1, meta)?;
             if !visit(&stored) {
                 break;
             }
