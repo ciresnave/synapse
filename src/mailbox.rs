@@ -963,7 +963,9 @@ impl MailTxn for RedbTxn<'_> {
         Ok(())
     }
 
-    /// Decides from META alone, so only the bodies of messages that are visited are loaded.
+    /// Decides from META alone, so only the bodies of messages that are visited are loaded. Rows
+    /// are decoded as they are reached, so scanning stops at the first `false` from `visit` and a
+    /// row after it is never read.
     fn scan_free(
         &self,
         role: &str,
@@ -971,27 +973,21 @@ impl MailTxn for RedbTxn<'_> {
         now: DateTime<Utc>,
         visit: &mut dyn FnMut(&Stored) -> bool,
     ) -> Result<(), StoreError> {
-        let free: Vec<(u64, Meta)> = {
-            let t = self
-                .txn
-                .open_table(redb_tables::META)
-                .map_err(|e| store_err("meta")(&e))?;
-            let range = t
-                .range((role, 0u64)..=(role, u64::MAX))
-                .map_err(|e| store_err("meta")(&e))?;
-            let mut free = Vec::new();
-            for entry in range {
-                let (k, v) = entry.map_err(|e| store_err("meta")(&e))?;
-                let meta: Meta =
-                    serde_json::from_slice(v.value()).map_err(|e| store_err("meta decode")(&e))?;
-                if is_free(meta.lease.as_ref(), epoch, now) {
-                    free.push((k.value().1, meta));
-                }
+        let t = self
+            .txn
+            .open_table(redb_tables::META)
+            .map_err(|e| store_err("meta")(&e))?;
+        let range = t
+            .range((role, 0u64)..=(role, u64::MAX))
+            .map_err(|e| store_err("meta")(&e))?;
+        for entry in range {
+            let (k, v) = entry.map_err(|e| store_err("meta")(&e))?;
+            let meta: Meta =
+                serde_json::from_slice(v.value()).map_err(|e| store_err("meta decode")(&e))?;
+            if !is_free(meta.lease.as_ref(), epoch, now) {
+                continue;
             }
-            free
-        };
-        for (seq, meta) in free {
-            let stored = self.assemble(role, seq, meta)?;
+            let stored = self.assemble(role, k.value().1, meta)?;
             if !visit(&stored) {
                 break;
             }

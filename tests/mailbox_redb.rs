@@ -395,3 +395,45 @@ fn fetch_loads_only_the_bodies_it_hands_out() {
         "fetch loaded the bodies of messages it skipped"
     );
 }
+
+/// Review of #99: `fetch` must decode META rows as it visits them and stop at `max`, so a malformed row
+/// *after* enough free messages cannot fail a fetch that has already found what it needs.
+#[test]
+fn fetch_stops_at_max_before_reading_a_malformed_row_after_it() {
+    let path = fresh_path();
+    let ids = suite::Ids::new();
+    {
+        let mut mb = suite::open(RedbStore::open(&path).unwrap());
+        ids.claim(&mut mb, "lane", suite::t0());
+        for n in 0..3 {
+            mb.enqueue(suite::env(&format!("m{n}"), LANE, b"body"), suite::t0())
+                .unwrap();
+        }
+    }
+    // A META row that is not JSON, ordered after every real one.
+    {
+        let db = redb::Database::open(&path).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let meta: redb::TableDefinition<(&str, u64), &[u8]> =
+                redb::TableDefinition::new("meta");
+            let mut t = txn.open_table(meta).unwrap();
+            t.insert((LANE, u64::MAX - 1), b"not json".as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let mut mb = suite::open(RedbStore::open(&path).unwrap());
+    let epoch = ids.claim(&mut mb, "lane", suite::t0());
+    let got = mb
+        .fetch(LANE, epoch, 2, Some(Duration::seconds(60)), suite::t0())
+        .expect("fetch found two free messages before the bad row");
+    let got: Vec<&str> = got.iter().map(|d| d.envelope.message_id.as_str()).collect();
+    assert_eq!(got, ["m0", "m1"]);
+    // Control: asking for more than exist does reach the bad row, so the row really is malformed.
+    assert!(
+        mb.fetch(LANE, epoch, 10, Some(Duration::seconds(60)), suite::t0())
+            .is_err(),
+        "the injected row should be undecodable"
+    );
+}
