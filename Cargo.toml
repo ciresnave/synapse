@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.21"
+version = "6.0.0-rc.22"
 
 [package]
 name = "synapse"
@@ -70,7 +70,9 @@ tracing = { version = "0.1", features = ["std", "attributes"] }
 url = "2.0"
 
 # Cryptography
-ring = { version = "0.17", optional = true }
+# `std` makes ring's errors `std::error::Error`; src/synapse/auth/utils.rs converts them with `?` into
+# anyhow. It used to be switched on by another crate's graph, which auth-framework 0.5 no longer has.
+ring = { version = "0.17", optional = true, features = ["std"] }
 # Sealing (P2 slice d): HPKE base mode, X25519 + HKDF-SHA256 + ChaCha20-Poly1305.
 hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"], optional = true }
 aes-gcm = { version = "0.10", optional = true }
@@ -115,7 +117,9 @@ async-smtp = { version = "0.10", optional = true }
 # `default-features = false` + `runtime-tokio`: this crate is built on tokio throughout, never
 # async-std (async-imap's own default runtime).
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
-lettre = { version = "0.11" }
+# auth-framework 0.5 enables lettre's `tokio1`; with lettre's default `native-tls` that is a compile_error
+# unless `tokio1-native-tls` is on too. It keeps the TLS backend we already had (no new one).
+lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 mail-parser = { version = "0.11", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
@@ -132,15 +136,12 @@ sqlx = { version = "0.8.6", features = [
 redis = { version = "0.32.4", features = ["tokio-comp"], optional = true }
 
 # Authentication framework.
-# NOTE: the feature list below is the set that actually exists in auth-framework 0.3.0.
-# The previous list also requested "config-management", "enterprise-features" and
-# "token-to-profile"; those three names have never existed in ANY published version of
-# auth-framework (checked 0.1.1 through 0.5.0-rc19 against index.crates.io, 2026-09-09).
-# Cargo rejects unknown dependency features at RESOLUTION time, which made every single
-# feature configuration of this crate unresolvable -- including `--no-default-features
-# --features minimal`, which does not enable auth at all. Removing them is not a version
-# migration; the 0.3 -> 0.4/0.5 question is deliberately left open for the merge.
-auth-framework = { version = "0.3.0", optional = true, features = [
+# 0.3.0 pulled reqwest 0.11 -> hyper 0.14 -> h2 0.3.27 (RUSTSEC-2026-0258, no fix on the 0.3 line)
+# and rustls-pemfile 1.0.4 (RUSTSEC-2025-0134, unmaintained). 0.5.0-rc26, the newest PUBLISHED
+# release, resolves h2 0.4.x and reqwest 0.12/0.13 only. The feature names below exist in it.
+# (The old "config-management", "enterprise-features" and "token-to-profile" never existed in any
+# published version; cargo rejects unknown features at resolution time, so they must stay out.)
+auth-framework = { version = "0.5.0-rc26", optional = true, features = [
     "oauth-device-flows",
     "enhanced-device-flow",
 ] }
@@ -329,7 +330,7 @@ default = ["native"]
 
 # Auth features
 # ⚠️ KNOWN BROKEN, DELIBERATELY. Gates src/auth_integration_enhanced.rs, which imports nine
-# items that exist in no published auth-framework (0.1.1..0.5.0-rc19). Enabling this feature
+# items that exist in no published auth-framework (checked 0.1.1..0.5.0-rc19; not re-checked against rc26). Enabling this feature
 # fails to compile. It is wired up rather than deleted so the module's status is explicit
 # and the merge can decide its fate. Before this commit the feature was declared but gated
 # nothing at all, while src/synapse/auth/README.md told users to build with it.
