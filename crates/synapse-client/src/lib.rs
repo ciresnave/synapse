@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The mail commands' client for `synapsed` (M5b): find the daemon through its owner-only announce
+//! The client for `synapsed` (M5b; its own crate since M6a, so the CLI and the MCP adapters share
+//! it): find the daemon through its owner-only announce
 //! file, start it if nothing answers, and keep one session per role.
 //!
 //! Design: `docs/superpowers/specs/2026-10-02-m5-synapsed-design.md` (Q2, Q4) and the M5b plan.
@@ -21,6 +22,8 @@
 //! the owner-only file and the real daemon know. A [`Daemon`] exists only after that proof, and
 //! every claim and Bearer token goes through one, so a process squatting a stale announced port
 //! gets neither. A listener that fails the proof is reported on stderr and ignored.
+
+pub mod events;
 
 use std::fmt;
 use std::path::{Path, PathBuf};

@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version = "1.89"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
-description = "The `synapse` command line: a plain adapter for any agent or person (M2: identity; M5b: mail over synapsed)."
+description = "The `synapse` command line: a plain adapter for any agent or person (M2: identity; M5b: mail over synapsed, through `synapse-client`)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ciresnave/synapse"
 
@@ -13,27 +13,13 @@ name = "synapse"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.22" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.22" }
+synapse = { path = "../..", version = "6.0.0-rc.23" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.23" }
+synapse-client = { path = "../synapse-client", version = "6.0.0-rc.23" }
 clap = { version = "4.5.41", features = ["derive", "env"] }
 chrono = "0.4"
-# Loopback HTTP only: no TLS stack and no system proxy (board 104: no new non-Rust deps).
-reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json"] }
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-base64 = "0.22"
-ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }
-
-[target.'cfg(unix)'.dependencies]
-# Only for `setsid` when auto-starting the daemon, `flock` for the role lock, and `kill(pid, 0)` to
-# check that an announced daemon is alive (see mail.rs).
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-# Only to stop the auto-started daemon inheriting this process's stdio handles, `LockFileEx` for the
-# role lock, and checking that an announced daemon is alive (see mail.rs).
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = "3.0"
