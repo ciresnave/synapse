@@ -400,7 +400,8 @@ impl ParticipantRegistry {
         mut results: Vec<ParticipantProfile>,
         query: &ContactSearchQuery,
     ) -> Result<Vec<ParticipantProfile>> {
-        if let Some(min_trust) = query.min_trust_score {
+        // A threshold of zero or less asks for nothing, so no source is consulted (as in PrivacyManager).
+        if let Some(min_trust) = query.min_trust_score.filter(|t| *t > 0.0) {
             let mut filtered_results = Vec::new();
 
             for profile in results {

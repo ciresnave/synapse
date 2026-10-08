@@ -22,7 +22,8 @@ the earlier candidates are recorded in their pull requests (`ciresnave/synapse`)
 - `PrivacyManager` no longer allows contact when a positive `trust_threshold` has no score. With no source, or a
   failing one, `can_contact` returns an error (`TrustUnsupported` for no source). It used to log a warning and allow.
 - `ParticipantRegistry` contact search with `min_trust_score` returns an error when the source fails. It used to
-  treat a failure as a score of 0.0.
+  treat a failure as a score of 0.0, and one failing lookup now fails the whole search rather than dropping that
+  profile. A `min_trust_score` of 0.0 or less consults no source, as in `PrivacyManager`.
 
 ### Removed (breaking)
 
