@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Removed (breaking, rc.21): the trust system is spun out
+
+The blockchain, staking, consensus and trust-score system is removed from the core. It was in-memory,
+unwired in places (`ConsensusEngine`, `VerificationEngine` had no caller), unreachable from every shipped
+binary, and is to be rebuilt as its own project around vouchers and revocations. Source is preserved at the
+git tag `pre-trust-removal` (`30a6e06`). Core keeps authenticated senders (`sender_auth::TrustStore`,
+`certificate`) and the optional `services::TrustSource` hook.
+
+- `synapse::blockchain` and everything in it: `SynapseBlockchain`, `BlockchainConfig`, `StakingManager`,
+  `ConsensusEngine`, `VerificationEngine`, `Block`, `Transaction`, `TrustReport`, and the bincode impls.
+- `synapse::synapse::blockchain::serialization::*`: `DateTimeWrapper` and `UuidWrapper` are at `synapse::wire`
+  (also re-exported from `synapse::types`).
+- `SynapseNode` and `SynapseConfig`.
+- `services::TrustManager`, `api::TrustAPI`, `models::trust` (`TrustBalance`, `TrustRatings`,
+  `EntityTrustRatings`, `NetworkTrustRating`, `TrustCalculator` and the rest).
+- `ParticipantProfile::trust_ratings` is now an opaque `serde_json::Value` (default `{}`, as the column's). Stored profiles
+  still load: the old JSON is kept as is.
+- `ParticipantRegistry::new(database, cache)` and `ParticipantAPI::new(registry, discovery, telemetry)` no longer
+  take a `TrustManager`. `ParticipantStatistics` loses `trust_reports_today` and `average_trust_score`.
+- `PrivacyManager::new_with_trust` (use `with_trust_source`) and `PrivacyManager::can_contact`, a stub with no
+  caller that approved every request.
+- `storage::Database`: `upsert_trust_balance`, `get_trust_balance`, `get_balances_for_decay`,
+  `count_reports_since`, `record_trust_report`, `count_trust_reports_today`, `get_average_trust_score`.
+  `storage::Cache`: `cache_trust_score`, `get_cached_trust_score`, `cache_block_hash`, `get_block_hash`.
+- `From<bincode::error::{EncodeError, DecodeError}> for SynapseError`, and the `bincode` dependency
+  (RUSTSEC-2025-0141 no longer applies).
+- Migration `002_drop_trust_tables.sql` drops `trust_balances`, `trust_ratings`, `trust_reports`,
+  `blockchain_blocks`, `blockchain_transactions` and two views (`DROP ... IF EXISTS`; `trust_reports` was never
+  created by a migration). `participant_relationships.trust_score` is left alone.
+- `[blockchain]` in `config/example.toml`; the README and API-reference trust sections;
+  `docs/BLOCKCHAIN_TRUST_SYSTEM.md`.
+
+### Fixed (rc.21)
+
+- `ParticipantRegistry::search_participants` re-applies the privacy and trust filters to cached results. It
+  used to return cached ids without checking the current policy or trust source.
+
 ### Added (rc.20)
 
 - `synapse::services::TrustSource`, an optional hook for a trust score, with `NoTrustSource` (the default) and

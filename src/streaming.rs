@@ -14,8 +14,8 @@ pub struct StreamSession {
     pub chunk_counter: u64,
 }
 use crate::router_merged::SynapseRouter;
-use crate::synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 use crate::types::{MessageType, SimpleMessage, StreamChunk};
+use crate::wire::{DateTimeWrapper, UuidWrapper};
 use base64::Engine;
 
 use std::collections::HashMap;

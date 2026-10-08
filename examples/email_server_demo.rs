@@ -5,8 +5,7 @@ use std::collections::HashMap;
 use synapse::{
     email_server::{ConnectivityDetector, SynapseAuthHandler},
     error::Result,
-    synapse::blockchain::serialization::UuidWrapper,
-    types::{DateTimeWrapper, SecureMessage, SecurityLevel},
+    types::{DateTimeWrapper, SecureMessage, SecurityLevel, UuidWrapper},
 };
 use tokio::time::{Duration, sleep};
 use tracing::{Level, info};

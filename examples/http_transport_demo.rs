@@ -228,12 +228,12 @@ fn create_sample_message(
     content: &str,
 ) -> SecureMessage {
     let mut message = SecureMessage {
-        message_id: synapse::blockchain::serialization::UuidWrapper(Uuid::new_v4()),
+        message_id: synapse::wire::UuidWrapper(Uuid::new_v4()),
         to_global_id: "http-demo-recipient".to_string(),
         from_global_id: "http-demo-sender".to_string(),
         encrypted_content: content.as_bytes().to_vec(),
         sender_proof: synapse::sender_auth::SenderProof::unsigned(),
-        timestamp: synapse::blockchain::serialization::DateTimeWrapper(Utc::now()),
+        timestamp: synapse::wire::DateTimeWrapper(Utc::now()),
         security_level: SecurityLevel::Public,
         routing_path: Vec::new(),
         metadata: {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 /// Cryptographic operations for EMRP: Ed25519 signatures (ring) and HPKE sealing (crate::sealing)
 use crate::error::{CryptoError, Result};
-use crate::synapse::blockchain::serialization::UuidWrapper;
+use crate::wire::UuidWrapper;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use pem::{EncodeConfig, LineEnding, Pem, encode_config, parse};

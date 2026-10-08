@@ -5,8 +5,7 @@
 // Core registry for managing participant profiles and relationships
 
 use crate::synapse::models::{DiscoverabilityLevel, ParticipantProfile};
-use crate::synapse::services::trust_manager::TrustManager;
-use crate::synapse::services::trust_source::{TrustSource, meets_threshold};
+use crate::synapse::services::trust_source::{NoTrustSource, TrustSource, meets_threshold};
 // Feature gating removed
 use crate::synapse::storage::Cache;
 // Feature gating removed
@@ -21,8 +20,8 @@ use std::sync::Arc;
 pub struct ParticipantRegistry {
     database: Arc<Database>,
     cache: Arc<Cache>,
-    trust_manager: Arc<TrustManager>,
-    /// Where `min_trust_score` is read from. Defaults to the trust manager.
+    /// Where `min_trust_score` is read from. Defaults to [`NoTrustSource`], which makes a thresholded
+    /// search an error rather than a pass.
     trust_source: Arc<dyn TrustSource>,
 }
 
@@ -45,27 +44,22 @@ impl ParticipantRegistry {
         }
         Ok(results)
     }
-    /// Create new registry instance (monolithic build: always database, cache, trust_manager)
-    pub async fn new(
-        database: Arc<Database>,
-        cache: Arc<Cache>,
-        trust_manager: Arc<TrustManager>,
-    ) -> Result<Self> {
+    /// Create new registry instance (monolithic build: always database, cache)
+    pub async fn new(database: Arc<Database>, cache: Arc<Cache>) -> Result<Self> {
         Ok(Self {
             database,
             cache,
-            trust_source: trust_manager.clone(),
-            trust_manager,
+            trust_source: Arc::new(NoTrustSource),
         })
     }
 
-    /// Read `min_trust_score` from `source` instead of the built-in trust manager.
+    /// Read `min_trust_score` from `source`.
     pub fn with_trust_source(mut self, source: Arc<dyn TrustSource>) -> Self {
         self.trust_source = source;
         self
     }
 
-    /// Register a new participant (monolithic: always database, cache, trust_manager)
+    /// Register a new participant (monolithic: always database, cache)
     pub async fn register_participant(&self, mut profile: ParticipantProfile) -> Result<()> {
         // Set timestamps
         let now = Utc::now();
@@ -89,17 +83,11 @@ impl ParticipantRegistry {
             .await // 1 hour TTL
             .context("Failed to cache participant")?;
 
-        // Initialize trust balance
-        self.trust_manager
-            .initialize_participant(&profile.global_id)
-            .await
-            .context("Failed to initialize trust balance")?;
-
         info!("Registered new participant: {}", profile.global_id);
         Ok(())
     }
 
-    /// Update an existing participant profile (monolithic: always database, cache, trust_manager)
+    /// Update an existing participant profile (monolithic: always database, cache)
     pub async fn update_participant(&self, mut profile: ParticipantProfile) -> Result<()> {
         // Check if participant exists
         let existing = self.get_participant(&profile.global_id).await?;
@@ -133,7 +121,7 @@ impl ParticipantRegistry {
         Ok(())
     }
 
-    /// Get participant by global ID (monolithic: always database, cache, trust_manager)
+    /// Get participant by global ID (monolithic: always database, cache)
     pub async fn get_participant(&self, global_id: &str) -> Result<Option<ParticipantProfile>> {
         let cache_key = format!("participant:{global_id}");
 
@@ -179,6 +167,10 @@ impl ParticipantRegistry {
                 }
             }
             if !results.is_empty() {
+                // A cached id list says who matched when it was written, not who passes now: the
+                // privacy policy and the trust source can both have changed since.
+                results = self.apply_privacy_filters(results, query).await?;
+                results = self.apply_trust_filters(results, query).await?;
                 return Ok(results);
             }
         }
@@ -297,7 +289,7 @@ impl ParticipantRegistry {
             .context("Failed to query participants by topic")
     }
 
-    /// Get participant by alias (monolithic: always database, cache, trust_manager)
+    /// Get participant by alias (monolithic: always database, cache)
     pub async fn get_participant_by_alias(
         &self,
         alias: &str,
@@ -326,7 +318,7 @@ impl ParticipantRegistry {
         Ok(results.pop())
     }
 
-    /// Update participant's last seen timestamp (monolithic: always database, cache, trust_manager)
+    /// Update participant's last seen timestamp (monolithic: always database, cache)
     pub async fn update_last_seen(&self, global_id: &str) -> Result<()> {
         if let Some(mut profile) = self.get_participant(global_id).await? {
             profile.last_seen = Utc::now();

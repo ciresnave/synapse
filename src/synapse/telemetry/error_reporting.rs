@@ -41,7 +41,7 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::blockchain::serialization::UuidWrapper;
+use crate::wire::UuidWrapper;
 
 /// Error source categories
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

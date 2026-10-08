@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use synapse::CryptoManager;
-use synapse::blockchain::serialization::{DateTimeWrapper, UuidWrapper};
 use synapse::sender_auth::{
     ContradictedReason, ProofAlg, SenderProof, SenderVerdict, TrustStore, UnverifiableReason,
     canonical_input, key_id,
@@ -16,6 +15,7 @@ use synapse::transport::{
     UdpTransportFactory,
 };
 use synapse::types::{SecureMessage, SecurityLevel};
+use synapse::wire::{DateTimeWrapper, UuidWrapper};
 
 fn unsigned_message() -> SecureMessage {
     SecureMessage::new(

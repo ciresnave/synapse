@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Synapse Participant Registry - Core Data Models
-use crate::synapse::TrustRatings;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+fn empty_json_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticipantProfile {
     // Core identity
@@ -18,7 +21,10 @@ pub struct ParticipantProfile {
     pub contact_preferences: ContactPreferences,
 
     // Trust and relationships
-    pub trust_ratings: TrustRatings,
+    /// Opaque. Core neither reads nor writes it; it is kept so stored profiles keep their shape for an
+    /// external trust system (see `services::TrustSource`). Defaults to `{}`.
+    #[serde(default = "empty_json_object")]
+    pub trust_ratings: serde_json::Value,
     pub relationships: Vec<Relationship>,
 
     // Capabilities and interests
@@ -46,7 +52,7 @@ impl Default for ParticipantProfile {
             discovery_permissions: DiscoveryPermissions::default(),
             availability: AvailabilityStatus::default(),
             contact_preferences: ContactPreferences::default(),
-            trust_ratings: TrustRatings::default(),
+            trust_ratings: empty_json_object(),
             relationships: vec![],
             topic_subscriptions: vec![],
             organizational_context: None,
@@ -322,7 +328,7 @@ impl ParticipantProfile {
             discovery_permissions: DiscoveryPermissions::default(),
             availability: AvailabilityStatus::default(),
             contact_preferences: ContactPreferences::default(),
-            trust_ratings: TrustRatings::default(),
+            trust_ratings: empty_json_object(),
             relationships: Vec::new(),
             topic_subscriptions: Vec::new(),
             organizational_context: None,

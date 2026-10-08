@@ -81,9 +81,9 @@ use auth_framework::{
 };
 
 use crate::{
-    blockchain::serialization::{DateTimeWrapper, UuidWrapper},
     error::SynapseError,
     types::{SecureMessage, SecurityLevel},
+    wire::{DateTimeWrapper, UuidWrapper},
 };
 use uuid::Uuid;
 

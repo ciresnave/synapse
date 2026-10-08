@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::synapse::services::trust_manager::TrustManager;
 use crate::synapse::services::trust_source::{NoTrustSource, TrustSource, meets_threshold};
 use crate::synapse::storage::{Cache, Database};
 
@@ -406,31 +405,6 @@ impl PrivacyManager {
             trust_source: source,
             privacy_cache: HashMap::new(),
         }
-    }
-
-    /// Create a new PrivacyManager with trust integration
-    pub fn new_with_trust(
-        database: Database,
-        cache: Cache,
-        trust_manager: Arc<TrustManager>,
-    ) -> Self {
-        Self {
-            database,
-            cache,
-            trust_source: trust_manager,
-            privacy_cache: HashMap::new(),
-        }
-    }
-
-    /// Check if a contact request should be allowed (simplified version without storage)
-    pub async fn can_contact(
-        &self,
-        _from_id: &str,
-        _to_id: &str,
-        _request: &ContactRequest,
-    ) -> Result<ContactApproval> {
-        // Default policy: allow all contacts when storage is not available
-        Ok(ContactApproval::Approved)
     }
 
     async fn has_connection_context(&self, _from_id: &str, _to_id: &str) -> Result<bool> {

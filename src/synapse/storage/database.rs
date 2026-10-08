@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-use crate::blockchain::serialization::DateTimeWrapper;
 use crate::synapse::models::ParticipantProfile;
-use crate::synapse::models::TrustBalance;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -272,69 +270,6 @@ impl Database {
         Ok(results)
     }
 
-    /// Store trust balance for a participant
-    pub async fn upsert_trust_balance(&self, balance: &TrustBalance) -> Result<()> {
-        let query = r#"
-            INSERT INTO trust_balances (
-                participant_id, total_points, available_points, staked_points,
-                earned_lifetime, last_activity, decay_rate
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (participant_id) DO UPDATE SET
-                total_points = EXCLUDED.total_points,
-                available_points = EXCLUDED.available_points,
-                staked_points = EXCLUDED.staked_points,
-                earned_lifetime = EXCLUDED.earned_lifetime,
-                last_activity = EXCLUDED.last_activity,
-                decay_rate = EXCLUDED.decay_rate
-        "#;
-
-        sqlx::query(query)
-            .bind(&balance.participant_id)
-            .bind(balance.total_points as i32)
-            .bind(balance.available_points as i32)
-            .bind(balance.staked_points as i32)
-            .bind(balance.earned_lifetime as i32)
-            .bind(Some(balance.last_activity.clone().into_inner()))
-            .bind(balance.decay_rate)
-            .execute(&self.pool)
-            .await
-            .context("Failed to upsert trust balance")?;
-
-        Ok(())
-    }
-
-    /// Get trust balance for a participant
-    pub async fn get_trust_balance(&self, participant_id: &str) -> Result<Option<TrustBalance>> {
-        let query = r#"
-            SELECT participant_id, total_points, available_points, staked_points,
-                   earned_lifetime, last_activity, decay_rate
-            FROM trust_balances
-            WHERE participant_id = $1
-        "#;
-
-        let row = sqlx::query(query)
-            .bind(participant_id)
-            .fetch_optional(&self.pool)
-            .await
-            .context("Failed to fetch trust balance")?;
-
-        match row {
-            Some(row) => {
-                let balance = TrustBalance {
-                    participant_id: row.get("participant_id"),
-                    total_points: row.get::<i32, _>("total_points") as u32,
-                    available_points: row.get::<i32, _>("available_points") as u32,
-                    staked_points: row.get::<i32, _>("staked_points") as u32,
-                    earned_lifetime: row.get::<i32, _>("earned_lifetime") as u32,
-                    last_activity: DateTimeWrapper::new(row.get("last_activity")),
-                    decay_rate: row.get("decay_rate"),
-                };
-                Ok(Some(balance))
-            }
-            None => Ok(None),
-        }
-    }
-
     /// Execute a custom SQL query to retrieve participants
     pub async fn query_participants(
         &self,
@@ -373,41 +308,6 @@ impl Database {
                 metadata: dashmap::DashMap::new(),
             };
             results.push(profile);
-        }
-
-        Ok(results)
-    }
-
-    /// Get all trust balances that need decay processing
-    pub async fn get_balances_for_decay(
-        &self,
-        cutoff_time: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<TrustBalance>> {
-        let query = r#"
-            SELECT participant_id, total_points, available_points, staked_points,
-                   earned_lifetime, last_activity, decay_rate
-            FROM trust_balances
-            WHERE last_activity < $1 AND total_points > 0
-        "#;
-
-        let rows = sqlx::query(query)
-            .bind(Some(cutoff_time))
-            .fetch_all(&self.pool)
-            .await
-            .context("Failed to fetch balances for decay")?;
-
-        let mut results = Vec::new();
-        for row in rows {
-            let balance = TrustBalance {
-                participant_id: row.get("participant_id"),
-                total_points: row.get::<i32, _>("total_points") as u32,
-                available_points: row.get::<i32, _>("available_points") as u32,
-                staked_points: row.get::<i32, _>("staked_points") as u32,
-                earned_lifetime: row.get::<i32, _>("earned_lifetime") as u32,
-                last_activity: DateTimeWrapper::new(row.get("last_activity")),
-                decay_rate: row.get("decay_rate"),
-            };
-            results.push(balance);
         }
 
         Ok(results)
@@ -665,30 +565,6 @@ impl Database {
         Ok(())
     }
 
-    /// Count reports submitted by a reporter since a specific time
-    pub async fn count_reports_since(
-        &self,
-        reporter_id: &str,
-        since: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
-        let query = r#"
-            SELECT COUNT(*) as report_count
-            FROM trust_reports
-            WHERE reporter_id = $1
-            AND timestamp > $2
-        "#;
-
-        let row = sqlx::query(query)
-            .bind(reporter_id)
-            .bind(Some(since))
-            .fetch_one(&self.pool)
-            .await
-            .context("Failed to query recent reports")?;
-
-        let count: i64 = row.get("report_count");
-        Ok(count as u64)
-    }
-
     /// Check if two participants have direct message interactions
     pub async fn has_direct_interaction(&self, user_a: &str, user_b: &str) -> Result<bool> {
         // Check for direct messages exchanged
@@ -728,37 +604,6 @@ impl Database {
 
         let count: i64 = row.get("event_count");
         Ok(count > 0)
-    }
-
-    /// Record a new trust report submission
-    pub async fn record_trust_report(
-        &self,
-        reporter_id: &str,
-        subject_id: &str,
-        score: i8,
-        category: &str,
-        transaction_id: &str,
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<()> {
-        let query = r#"
-            INSERT INTO trust_reports (
-                reporter_id, subject_id, score, category,
-                transaction_id, timestamp
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-        "#;
-
-        sqlx::query(query)
-            .bind(reporter_id)
-            .bind(subject_id)
-            .bind(score as i16)
-            .bind(category)
-            .bind(transaction_id)
-            .bind(Some(timestamp))
-            .execute(&self.pool)
-            .await
-            .context("Failed to record trust report")?;
-
-        Ok(())
     }
 
     /// Execute a raw SQL query with parameters for strings
@@ -808,27 +653,5 @@ impl Database {
                 .await
                 .context("Failed to count new participants")?;
         Ok(row as u64)
-    }
-
-    /// Count trust reports submitted today
-    pub async fn count_trust_reports_today(&self) -> Result<u64> {
-        let row: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM trust_reports WHERE created_at > CURRENT_DATE",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to count trust reports")?;
-        Ok(row as u64)
-    }
-
-    /// Get average trust score across all participants
-    pub async fn get_average_trust_score(&self) -> Result<f64> {
-        let row: Option<f64> = sqlx::query_scalar(
-            "SELECT AVG(trust_score) FROM participants WHERE trust_score IS NOT NULL",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("Failed to get average trust score")?;
-        Ok(row.unwrap_or(50.0))
     }
 }

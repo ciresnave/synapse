@@ -3,7 +3,7 @@
 
 use crate::synapse::api::errors::{ApiError, ApiResponse};
 use crate::synapse::models::participant::{DiscoverabilityLevel, EntityType, ParticipantProfile};
-use crate::synapse::services::{DiscoveryService, ParticipantRegistry, TrustManager};
+use crate::synapse::services::{DiscoveryService, ParticipantRegistry};
 use crate::synapse::telemetry::ErrorTelemetry;
 use anyhow::Result;
 use chrono::Utc;
@@ -15,8 +15,6 @@ use tracing::{debug, error, info, warn};
 /// HTTP API for participant registry operations
 pub struct ParticipantAPI {
     registry: ParticipantRegistry,
-    #[allow(dead_code)] // Used for internal trust calculations and future API expansion
-    trust_manager: TrustManager,
     discovery: DiscoveryService,
     error_telemetry: Arc<ErrorTelemetry>,
 }
@@ -94,13 +92,11 @@ impl<T> From<ApiResponse<T>> for APIResponse<T> {
 impl ParticipantAPI {
     pub fn new(
         registry: ParticipantRegistry,
-        trust_manager: TrustManager,
         discovery: DiscoveryService,
         error_telemetry: Arc<ErrorTelemetry>,
     ) -> Self {
         Self {
             registry,
-            trust_manager,
             discovery,
             error_telemetry,
         }
@@ -549,35 +545,15 @@ impl ParticipantAPI {
             .await
             .unwrap_or(0);
 
-        let trust_reports_today = self
-            .registry
-            .get_database()
-            .count_trust_reports_today()
-            .await
-            .unwrap_or(0);
-
-        let average_trust_score = self
-            .registry
-            .get_database()
-            .get_average_trust_score()
-            .await
-            .unwrap_or(50.0);
-
         let stats = ParticipantStatistics {
             total_participants,
             active_participants,
             new_participants_today,
-            trust_reports_today,
-            average_trust_score,
         };
 
         debug!(
-            "Retrieved participant statistics: total={}, active={}, new_today={}, reports_today={}, avg_trust={:.2}",
-            stats.total_participants,
-            stats.active_participants,
-            stats.new_participants_today,
-            stats.trust_reports_today,
-            stats.average_trust_score
+            "Retrieved participant statistics: total={}, active={}, new_today={}",
+            stats.total_participants, stats.active_participants, stats.new_participants_today
         );
 
         Ok(APIResponse {
@@ -667,6 +643,4 @@ pub struct ParticipantStatistics {
     pub total_participants: u64,
     pub active_participants: u64,
     pub new_participants_today: u64,
-    pub trust_reports_today: u64,
-    pub average_trust_score: f64,
 }

@@ -293,32 +293,7 @@ println!("Circuit state: {:?}, failures: {}", stats.state, stats.failure_count);
 - **External triggers** for performance degradation
 - **Comprehensive monitoring** with real-time statistics
 
-### 4. Blockchain Trust System
-
-Decentralized trust verification with staking mechanisms:
-
-```rust
-// Blockchain-based trust verification
-let blockchain = SynapseBlockchain::new(config).await?;
-
-// Stake tokens to vouch for network participants
-blockchain.stake_for_participant("alice@ai-lab.com", 1000).await?;
-
-// Verify trust scores before communication
-let trust_score = blockchain.get_trust_score("alice@ai-lab.com").await?;
-if trust_score.reputation > 0.8 {
-    // Proceed with high-trust communication
-}
-```
-
-**Key Features:**
-
-- **Proof-of-stake consensus** for network trust
-- **Reputation scoring** with decay mechanisms
-- **Staking requirements** for network participation
-- **Trust decay** based on activity and time
-
-### 5. Real-Time Streaming
+### 4. Real-Time Streaming
 
 Live streaming capabilities for continuous communication:
 
@@ -341,7 +316,7 @@ stream.finalize().await?;
 - **Session management** for multiple concurrent streams
 - **Reliability guarantees** with acknowledgment tracking
 
-### 6. OAuth & Federated Authentication
+### 5. OAuth & Federated Authentication
 
 Enterprise-grade authentication with OAuth 2.0 support:
 
@@ -363,7 +338,7 @@ let user_context = auth_manager.get_user_context(&token).await?;
 - **JWT token management** with automatic refresh
 - **Federated identity** across organizations
 
-### 7. Advanced Monitoring & Metrics
+### 6. Advanced Monitoring & Metrics
 
 Comprehensive system monitoring and performance tracking:
 
@@ -387,7 +362,7 @@ while let Some(alert) = alerts.recv().await {
 - **Alert system** for performance degradation
 - **Health diagnostics** for system components
 
-### 8. Security by Default
+### 7. Security by Default
 
 - **🔒 Content Confidentiality**: Not implemented -- `SecurityLevel::Private`/`Secure` are refused
   (see `SynapseError::UnsupportedSecurityLevel`); messages are signed, not encrypted
@@ -398,7 +373,7 @@ while let Some(alert) = alerts.recv().await {
   automatic key distribution
 - **🚪 Access Control**: Domain-based and user-based permissions
 
-### 9. Federation & Interoperability
+### 8. Federation & Interoperability
 
 ```rust
 // Your Synapse system automatically interoperates with:
@@ -424,7 +399,6 @@ while let Some(alert) = alerts.recv().await {
 - **[Message Types](docs/API_REFERENCE.md#-message-types)**: Communication patterns
 - **[Streaming API](docs/API_REFERENCE.md#-streaming-api)**: Real-time streaming support
 - **[WebRTC Transport](docs/API_REFERENCE.md#-webrtc-transport)**: Browser-based communication
-- **[Trust System](docs/API_REFERENCE.md#-trust-system)**: Blockchain-based trust verification
 
 ### Examples
 
@@ -553,7 +527,6 @@ tests/                  # Integration tests
 - **[Identity Resolution](docs/IDENTITY_RESOLUTION_TROUBLESHOOTING.md)** - Name resolution troubleshooting
 - **[Unknown Name Handling](docs/UNKNOWN_NAME_HANDLING_COOKBOOK.md)** - Handling unknown entities
 - **[Circuit Breaker System](docs/CIRCUIT_BREAKER_SYSTEM.md)** - Fault tolerance patterns
-- **[Blockchain Trust System](docs/BLOCKCHAIN_TRUST_SYSTEM.md)** - Trust verification system
 - **[OAuth Authentication](docs/OAUTH_AUTHENTICATION.md)** - Authentication integration
 - **[WASM Support](docs/WASM_README.md)** - WebAssembly and browser support
 

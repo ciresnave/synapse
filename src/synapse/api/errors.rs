@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-use crate::synapse::blockchain::serialization::UuidWrapper;
+use crate::wire::UuidWrapper;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
