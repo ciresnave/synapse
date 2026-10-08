@@ -13,7 +13,8 @@ use std::fmt;
 /// What a [`TrustSource`] knows about a participant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrustAnswer {
-    /// A score in `0.0..=1.0`, higher is more trusted.
+    /// A score, higher is more trusted. The source and the thresholds it is compared with must share a
+    /// scale; the built-in `TrustManager` reports its native 0-100 score unchanged.
     Score(f64),
     /// This source has no opinion. Not "zero"; not "trusted".
     Unsupported,
@@ -27,7 +28,7 @@ pub struct TrustUnsupported;
 impl fmt::Display for TrustUnsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
-            "a trust threshold was requested but no TrustSource is configured; \
+            "a trust threshold was requested but the TrustSource gave no answer (none is configured, or it has no opinion); \
              refusing to treat that as a pass",
         )
     }
