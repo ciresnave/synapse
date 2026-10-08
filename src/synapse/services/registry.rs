@@ -6,6 +6,7 @@
 
 use crate::synapse::models::{DiscoverabilityLevel, ParticipantProfile};
 use crate::synapse::services::trust_manager::TrustManager;
+use crate::synapse::services::trust_source::{TrustSource, meets_threshold};
 // Feature gating removed
 use crate::synapse::storage::Cache;
 // Feature gating removed
@@ -21,6 +22,8 @@ pub struct ParticipantRegistry {
     database: Arc<Database>,
     cache: Arc<Cache>,
     trust_manager: Arc<TrustManager>,
+    /// Where `min_trust_score` is read from. Defaults to the trust manager.
+    trust_source: Arc<dyn TrustSource>,
 }
 
 impl ParticipantRegistry {
@@ -51,8 +54,15 @@ impl ParticipantRegistry {
         Ok(Self {
             database,
             cache,
+            trust_source: trust_manager.clone(),
             trust_manager,
         })
+    }
+
+    /// Read `min_trust_score` from `source` instead of the built-in trust manager.
+    pub fn with_trust_source(mut self, source: Arc<dyn TrustSource>) -> Self {
+        self.trust_source = source;
+        self
     }
 
     /// Register a new participant (monolithic: always database, cache, trust_manager)
@@ -394,13 +404,15 @@ impl ParticipantRegistry {
             let mut filtered_results = Vec::new();
 
             for profile in results {
-                let trust_score = self
-                    .trust_manager
-                    .get_trust_score(&profile.global_id, &query.requester_id)
-                    .await
-                    .unwrap_or(0.0);
-
-                if trust_score >= min_trust {
+                // Unsupported or failing sources are errors, not a pass and not a zero.
+                if meets_threshold(
+                    self.trust_source.as_ref(),
+                    &profile.global_id,
+                    &query.requester_id,
+                    min_trust,
+                )
+                .await?
+                {
                     filtered_results.push(profile);
                 }
             }

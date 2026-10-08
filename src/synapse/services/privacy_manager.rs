@@ -9,13 +9,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::synapse::services::trust_manager::TrustManager;
+use crate::synapse::services::trust_source::{NoTrustSource, TrustSource, meets_threshold};
 use crate::synapse::storage::{Cache, Database};
 
 /// Privacy management service for the Synapse network
 pub struct PrivacyManager {
     database: Database,
     cache: Cache,
-    trust_manager: Option<Arc<TrustManager>>,
+    trust_source: Arc<dyn TrustSource>,
     /// Privacy policies cached by participant ID
     privacy_cache: HashMap<String, PrivacyPolicy>,
 }
@@ -289,36 +290,22 @@ impl PrivacyManager {
             return Ok(true); // No trust requirement
         }
 
-        // If trust manager is available, get actual trust score
-        if let Some(trust_manager) = &self.trust_manager {
-            match trust_manager.get_trust_score(from_id, to_id).await {
-                Ok(trust_score) => {
-                    let meets_threshold =
-                        trust_score >= target_policy.contact_filtering.trust_threshold;
-                    debug!(
-                        "Trust check: {} -> {} = {:.2} (threshold: {:.2}) - {}",
-                        from_id,
-                        to_id,
-                        trust_score,
-                        target_policy.contact_filtering.trust_threshold,
-                        if meets_threshold { "PASS" } else { "FAIL" }
-                    );
-                    Ok(meets_threshold)
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to get trust score for {} -> {}: {}",
-                        from_id, to_id, e
-                    );
-                    // Default to allowing contact if trust score calculation fails
-                    Ok(true)
-                }
-            }
-        } else {
-            // No trust manager available - log warning and allow
-            warn!("Trust manager not available for privacy check, allowing contact");
-            Ok(true)
-        }
+        // Unsupported or failing sources are errors: a threshold is never silently waived.
+        let passed = meets_threshold(
+            self.trust_source.as_ref(),
+            from_id,
+            to_id,
+            target_policy.contact_filtering.trust_threshold,
+        )
+        .await?;
+        debug!(
+            "Trust check: {} -> {} (threshold: {:.2}) - {}",
+            from_id,
+            to_id,
+            target_policy.contact_filtering.trust_threshold,
+            if passed { "PASS" } else { "FAIL" }
+        );
+        Ok(passed)
     }
 
     /// Update privacy settings for a participant
@@ -402,7 +389,21 @@ impl PrivacyManager {
         Self {
             database,
             cache,
-            trust_manager: None,
+            trust_source: Arc::new(NoTrustSource),
+            privacy_cache: HashMap::new(),
+        }
+    }
+
+    /// Create a new PrivacyManager that reads trust from `source`
+    pub fn with_trust_source(
+        database: Database,
+        cache: Cache,
+        source: Arc<dyn TrustSource>,
+    ) -> Self {
+        Self {
+            database,
+            cache,
+            trust_source: source,
             privacy_cache: HashMap::new(),
         }
     }
@@ -416,7 +417,7 @@ impl PrivacyManager {
         Self {
             database,
             cache,
-            trust_manager: Some(trust_manager),
+            trust_source: trust_manager,
             privacy_cache: HashMap::new(),
         }
     }
