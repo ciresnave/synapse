@@ -25,7 +25,7 @@ git tag `pre-trust-removal` (`30a6e06`). Core keeps authenticated senders (`send
 - `SynapseNode` and `SynapseConfig`.
 - `services::TrustManager`, `api::TrustAPI`, `models::trust` (`TrustBalance`, `TrustRatings`,
   `EntityTrustRatings`, `NetworkTrustRating`, `TrustCalculator` and the rest).
-- `ParticipantProfile::trust_ratings` is now an opaque `serde_json::Value` (default `null`). Stored profiles
+- `ParticipantProfile::trust_ratings` is now an opaque `serde_json::Value` (default `{}`, as the column's). Stored profiles
   still load: the old JSON is kept as is.
 - `ParticipantRegistry::new(database, cache)` and `ParticipantAPI::new(registry, discovery, telemetry)` no longer
   take a `TrustManager`. `ParticipantStatistics` loses `trust_reports_today` and `average_trust_score`.
@@ -37,7 +37,8 @@ git tag `pre-trust-removal` (`30a6e06`). Core keeps authenticated senders (`send
 - `From<bincode::error::{EncodeError, DecodeError}> for SynapseError`, and the `bincode` dependency
   (RUSTSEC-2025-0141 no longer applies).
 - Migration `002_drop_trust_tables.sql` drops `trust_balances`, `trust_ratings`, `trust_reports`,
-  `blockchain_blocks`, `blockchain_transactions`, two views and `participants.trust_score`.
+  `blockchain_blocks`, `blockchain_transactions` and two views (`DROP ... IF EXISTS`; `trust_reports` was never
+  created by a migration). `participant_relationships.trust_score` is left alone.
 - `[blockchain]` in `config/example.toml`; the README and API-reference trust sections;
   `docs/BLOCKCHAIN_TRUST_SYSTEM.md`.
 

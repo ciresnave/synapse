@@ -3,6 +3,10 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+fn empty_json_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticipantProfile {
     // Core identity
@@ -18,8 +22,8 @@ pub struct ParticipantProfile {
 
     // Trust and relationships
     /// Opaque. Core neither reads nor writes it; it is kept so stored profiles keep their shape for an
-    /// external trust system (see `services::TrustSource`). Defaults to JSON null.
-    #[serde(default)]
+    /// external trust system (see `services::TrustSource`). Defaults to `{}`.
+    #[serde(default = "empty_json_object")]
     pub trust_ratings: serde_json::Value,
     pub relationships: Vec<Relationship>,
 
@@ -48,7 +52,7 @@ impl Default for ParticipantProfile {
             discovery_permissions: DiscoveryPermissions::default(),
             availability: AvailabilityStatus::default(),
             contact_preferences: ContactPreferences::default(),
-            trust_ratings: serde_json::Value::Null,
+            trust_ratings: empty_json_object(),
             relationships: vec![],
             topic_subscriptions: vec![],
             organizational_context: None,
@@ -324,7 +328,7 @@ impl ParticipantProfile {
             discovery_permissions: DiscoveryPermissions::default(),
             availability: AvailabilityStatus::default(),
             contact_preferences: ContactPreferences::default(),
-            trust_ratings: serde_json::Value::Null,
+            trust_ratings: empty_json_object(),
             relationships: Vec::new(),
             topic_subscriptions: Vec::new(),
             organizational_context: None,

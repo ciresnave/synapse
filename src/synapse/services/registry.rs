@@ -59,7 +59,7 @@ impl ParticipantRegistry {
         self
     }
 
-    /// Register a new participant (monolithic: always database, cache, trust_manager)
+    /// Register a new participant (monolithic: always database, cache)
     pub async fn register_participant(&self, mut profile: ParticipantProfile) -> Result<()> {
         // Set timestamps
         let now = Utc::now();
@@ -87,7 +87,7 @@ impl ParticipantRegistry {
         Ok(())
     }
 
-    /// Update an existing participant profile (monolithic: always database, cache, trust_manager)
+    /// Update an existing participant profile (monolithic: always database, cache)
     pub async fn update_participant(&self, mut profile: ParticipantProfile) -> Result<()> {
         // Check if participant exists
         let existing = self.get_participant(&profile.global_id).await?;
@@ -121,7 +121,7 @@ impl ParticipantRegistry {
         Ok(())
     }
 
-    /// Get participant by global ID (monolithic: always database, cache, trust_manager)
+    /// Get participant by global ID (monolithic: always database, cache)
     pub async fn get_participant(&self, global_id: &str) -> Result<Option<ParticipantProfile>> {
         let cache_key = format!("participant:{global_id}");
 
@@ -289,7 +289,7 @@ impl ParticipantRegistry {
             .context("Failed to query participants by topic")
     }
 
-    /// Get participant by alias (monolithic: always database, cache, trust_manager)
+    /// Get participant by alias (monolithic: always database, cache)
     pub async fn get_participant_by_alias(
         &self,
         alias: &str,
@@ -318,7 +318,7 @@ impl ParticipantRegistry {
         Ok(results.pop())
     }
 
-    /// Update participant's last seen timestamp (monolithic: always database, cache, trust_manager)
+    /// Update participant's last seen timestamp (monolithic: always database, cache)
     pub async fn update_last_seen(&self, global_id: &str) -> Result<()> {
         if let Some(mut profile) = self.get_participant(global_id).await? {
             profile.last_seen = Utc::now();

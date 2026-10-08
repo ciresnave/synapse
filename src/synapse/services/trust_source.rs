@@ -14,7 +14,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrustAnswer {
     /// A score, higher is more trusted. The source and the thresholds it is compared with must share a
-    /// scale; the built-in `TrustManager` reports its native 0-100 score unchanged.
+    /// scale; a source may use any range, for example 0-100.
     Score(f64),
     /// This source has no opinion. Not "zero"; not "trusted".
     Unsupported,

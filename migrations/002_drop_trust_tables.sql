@@ -8,4 +8,3 @@ DROP TABLE IF EXISTS blockchain_blocks;
 DROP TABLE IF EXISTS trust_reports;
 DROP TABLE IF EXISTS trust_ratings;
 DROP TABLE IF EXISTS trust_balances;
-ALTER TABLE participants DROP COLUMN IF EXISTS trust_score;
