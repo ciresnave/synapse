@@ -3,8 +3,10 @@
 //!
 //! # ⚠️ ASPIRATIONAL — THIS MODULE HAS NEVER COMPILED AGAINST A REAL auth-framework
 //!
-//! Measured 2026-09-09 against rustc 1.100.0-nightly and auth-framework 0.3.0 (the pinned
-//! version, and the only one `^0.3.0` admits). This module is gated behind the
+//! Measured 2026-09-09 against rustc 1.100.0-nightly and auth-framework 0.3.0, which was then
+//! the pinned version. The manifest now requests 0.5.0-rc26 (rc.22); the findings below have NOT
+//! been re-measured against it (the CI canary only confirms the feature still fails to build).
+//! This module is gated behind the
 //! `enhanced-auth` feature, which is OFF by default. **Enabling `enhanced-auth` does not
 //! build.** It is retained in-tree, unmodified, so that the pending Synapse/FAM merge and
 //! the auth-framework upgrade decision can dispose of it deliberately.

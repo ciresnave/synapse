@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Changed (rc.22): auth-framework 0.3.0 -> 0.5.0-rc26
+
+The optional `auth-framework` dependency moves to the newest published release. 0.3.0 pulled reqwest 0.11,
+hyper 0.14 and h2 0.3.27 (RUSTSEC-2026-0258, no fix on the 0.3 line) and rustls-pemfile 1.0.4
+(RUSTSEC-2025-0134, unmaintained); 0.5.0-rc26 resolves h2 0.4 and reqwest 0.12/0.13 only. `cargo audit`
+at this change reports no vulnerabilities. Nothing that compiles today calls auth-framework (its only user,
+`src/auth_integration_enhanced.rs`, is behind the deliberately broken `enhanced-auth` feature), so no
+Synapse API changes. The `auth` feature now builds against a pre-release crate.
+Two manifest lines had to follow: `lettre` gains `tokio1-native-tls` (auth-framework 0.5 enables lettre's
+`tokio1`, which fails to compile beside the default `native-tls` without it; same TLS backend as before), and
+`ring` gains `std` (another crate's graph used to switch it on; `src/synapse/auth/utils.rs` needs ring's errors
+to be `std::error::Error`).
+
 ### Removed (breaking, rc.21): the trust system is spun out
 
 The blockchain, staking, consensus and trust-score system is removed from the core. It was in-memory,
