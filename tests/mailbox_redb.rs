@@ -366,3 +366,32 @@ fn depths_read_no_body() {
         .unwrap();
     assert_eq!(mb.store().body_reads(), before + 2);
 }
+
+/// Perf follow-up: `fetch` scans past a role's leased messages, and must not load their bodies. At 10k
+/// messages with half leased the scan cost 46 ms p50 on one laptop (`tests/mailbox_depth_cost.rs`).
+#[test]
+fn fetch_loads_only_the_bodies_it_hands_out() {
+    let ids = suite::Ids::new();
+    let mut mb = suite::open(fresh());
+    let epoch = ids.claim(&mut mb, "lane", suite::t0());
+    for n in 0..6 {
+        mb.enqueue(suite::env(&format!("m{n}"), LANE, b"body"), suite::t0())
+            .unwrap();
+    }
+    // Lease the first four (a long lease, so they stay leased).
+    let held = mb
+        .fetch(LANE, epoch, 4, Some(Duration::seconds(60)), suite::t0())
+        .unwrap();
+    assert_eq!(held.len(), 4);
+    let before = mb.store().body_reads();
+    let got = mb
+        .fetch(LANE, epoch, 1, Some(Duration::seconds(60)), suite::t0())
+        .unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].envelope.message_id, "m4");
+    assert_eq!(
+        mb.store().body_reads() - before,
+        1,
+        "fetch loaded the bodies of messages it skipped"
+    );
+}
