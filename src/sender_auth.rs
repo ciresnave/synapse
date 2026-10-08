@@ -1452,7 +1452,7 @@ mod tests {
     #[test]
     fn truncation_leaves_whole_microseconds() {
         let mut m = SecureMessage::new("b", "a", vec![], SecurityLevel::Public);
-        m.timestamp = crate::synapse::blockchain::serialization::DateTimeWrapper::new(
+        m.timestamp = crate::wire::DateTimeWrapper::new(
             chrono::DateTime::parse_from_rfc3339("2026-09-17T04:00:00.123456789Z")
                 .unwrap()
                 .with_timezone(&chrono::Utc),

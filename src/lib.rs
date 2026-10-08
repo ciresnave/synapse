@@ -10,8 +10,8 @@
 //! - **⚡ Intelligent Routing**: Multi-speed communication with smart transport selection
 //! - **🔒 Privacy First**: Advanced privacy controls with stealth and unlisted modes
 //! - **🤖 AI-Native**: Designed for AI-to-AI and human-to-AI interaction
-//! - **🏛️ Dual Trust**: Entity-to-entity and blockchain-verified network trust
-//! - **⛓️ Blockchain Trust**: Staking, verification, and decay mechanisms
+//! - **🏛️ Pluggable Trust**: authenticated senders (pinned keys, certificate chains, revocations) in
+//!   the core, and an optional `TrustSource` hook for a score from elsewhere
 //!
 //! ## 🎯 The Neural Identity System
 //! One of Synapse's most powerful features is its **contextual identity system**:
@@ -253,11 +253,9 @@ pub use router_merged::SynapseRouter;
 
 // Re-export Synapse key types (only on non-WASM platforms)
 pub use synapse::models::{DiscoverabilityLevel, EntityType, ParticipantProfile};
-pub use synapse::{SynapseConfig, SynapseNode};
 
 // Re-export synapse submodules
 pub use synapse::api;
-pub use synapse::blockchain;
 pub use synapse::models;
 pub use synapse::services;
 pub use synapse::storage;

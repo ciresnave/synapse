@@ -140,18 +140,6 @@ impl From<&str> for SynapseError {
     }
 }
 
-impl From<bincode::error::EncodeError> for SynapseError {
-    fn from(e: bincode::error::EncodeError) -> Self {
-        SynapseError::SerializationError(e.to_string())
-    }
-}
-
-impl From<bincode::error::DecodeError> for SynapseError {
-    fn from(e: bincode::error::DecodeError) -> Self {
-        SynapseError::SerializationError(e.to_string())
-    }
-}
-
 impl From<IoError> for SynapseError {
     fn from(e: IoError) -> Self {
         SynapseError::Io(e.to_string())

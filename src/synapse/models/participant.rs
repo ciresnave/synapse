@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Synapse Participant Registry - Core Data Models
-use crate::synapse::TrustRatings;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -18,7 +17,10 @@ pub struct ParticipantProfile {
     pub contact_preferences: ContactPreferences,
 
     // Trust and relationships
-    pub trust_ratings: TrustRatings,
+    /// Opaque. Core neither reads nor writes it; it is kept so stored profiles keep their shape for an
+    /// external trust system (see `services::TrustSource`). Defaults to JSON null.
+    #[serde(default)]
+    pub trust_ratings: serde_json::Value,
     pub relationships: Vec<Relationship>,
 
     // Capabilities and interests
@@ -46,7 +48,7 @@ impl Default for ParticipantProfile {
             discovery_permissions: DiscoveryPermissions::default(),
             availability: AvailabilityStatus::default(),
             contact_preferences: ContactPreferences::default(),
-            trust_ratings: TrustRatings::default(),
+            trust_ratings: serde_json::Value::Null,
             relationships: vec![],
             topic_subscriptions: vec![],
             organizational_context: None,
@@ -322,7 +324,7 @@ impl ParticipantProfile {
             discovery_permissions: DiscoveryPermissions::default(),
             availability: AvailabilityStatus::default(),
             contact_preferences: ContactPreferences::default(),
-            trust_ratings: TrustRatings::default(),
+            trust_ratings: serde_json::Value::Null,
             relationships: Vec::new(),
             topic_subscriptions: Vec::new(),
             organizational_context: None,

@@ -48,36 +48,6 @@ enable_rate_limiting = true
 # Rate limit requests per minute
 rate_limit_rpm = 60
 
-[blockchain]
-# Enable blockchain features
-enabled = true
-# Genesis trust points for new participants
-genesis_trust_points = 100
-# Block time in seconds
-block_time_seconds = 30
-# Minimum consensus nodes required
-min_consensus_nodes = 3
-
-[blockchain.staking]
-# Minimum stake amount
-min_stake_amount = 10
-# Maximum stake amount
-max_stake_amount = 10000
-# Minimum stake for submitting reports
-min_stake_for_report = 10
-# Minimum stake for consensus participation
-min_stake_for_consensus = 50
-# Percentage to slash for false reports (0.0-1.0)
-slash_percentage = 0.1
-
-[blockchain.trust_decay]
-# Monthly decay rate (0.0-1.0)
-monthly_decay_rate = 0.02
-# Days without activity before decay starts
-min_activity_days = 30
-# How often to check decay (hours)
-decay_check_interval_hours = 24
-
 [transport]
 # Default transport protocol (http, websocket, webrtc)
 default_protocol = "websocket"

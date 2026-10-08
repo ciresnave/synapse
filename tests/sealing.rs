@@ -90,8 +90,7 @@ fn the_ciphertext_is_bound_to_its_header() {
         }),
         ("from_global_id", |m| m.from_global_id = ALIAS.to_string()),
         ("message_id", |m| {
-            m.message_id =
-                synapse::blockchain::serialization::UuidWrapper::new(uuid::Uuid::new_v4())
+            m.message_id = synapse::wire::UuidWrapper::new(uuid::Uuid::new_v4())
         }),
     ];
     let mut wrong = Vec::new();

@@ -5,8 +5,7 @@
 // Core registry for managing participant profiles and relationships
 
 use crate::synapse::models::{DiscoverabilityLevel, ParticipantProfile};
-use crate::synapse::services::trust_manager::TrustManager;
-use crate::synapse::services::trust_source::{TrustSource, meets_threshold};
+use crate::synapse::services::trust_source::{NoTrustSource, TrustSource, meets_threshold};
 // Feature gating removed
 use crate::synapse::storage::Cache;
 // Feature gating removed
@@ -21,8 +20,8 @@ use std::sync::Arc;
 pub struct ParticipantRegistry {
     database: Arc<Database>,
     cache: Arc<Cache>,
-    trust_manager: Arc<TrustManager>,
-    /// Where `min_trust_score` is read from. Defaults to the trust manager.
+    /// Where `min_trust_score` is read from. Defaults to [`NoTrustSource`], which makes a thresholded
+    /// search an error rather than a pass.
     trust_source: Arc<dyn TrustSource>,
 }
 
@@ -45,21 +44,16 @@ impl ParticipantRegistry {
         }
         Ok(results)
     }
-    /// Create new registry instance (monolithic build: always database, cache, trust_manager)
-    pub async fn new(
-        database: Arc<Database>,
-        cache: Arc<Cache>,
-        trust_manager: Arc<TrustManager>,
-    ) -> Result<Self> {
+    /// Create new registry instance (monolithic build: always database, cache)
+    pub async fn new(database: Arc<Database>, cache: Arc<Cache>) -> Result<Self> {
         Ok(Self {
             database,
             cache,
-            trust_source: trust_manager.clone(),
-            trust_manager,
+            trust_source: Arc::new(NoTrustSource),
         })
     }
 
-    /// Read `min_trust_score` from `source` instead of the built-in trust manager.
+    /// Read `min_trust_score` from `source`.
     pub fn with_trust_source(mut self, source: Arc<dyn TrustSource>) -> Self {
         self.trust_source = source;
         self
@@ -88,12 +82,6 @@ impl ParticipantRegistry {
             .cache_participant(&cache_key, &profile, 3600)
             .await // 1 hour TTL
             .context("Failed to cache participant")?;
-
-        // Initialize trust balance
-        self.trust_manager
-            .initialize_participant(&profile.global_id)
-            .await
-            .context("Failed to initialize trust balance")?;
 
         info!("Registered new participant: {}", profile.global_id);
         Ok(())
@@ -179,6 +167,10 @@ impl ParticipantRegistry {
                 }
             }
             if !results.is_empty() {
+                // A cached id list says who matched when it was written, not who passes now: the
+                // privacy policy and the trust source can both have changed since.
+                results = self.apply_privacy_filters(results, query).await?;
+                results = self.apply_trust_filters(results, query).await?;
                 return Ok(results);
             }
         }

@@ -4,7 +4,7 @@
 //! This module provides solutions for entities behind NAT firewalls,
 //! IPv6-only networks, and other connectivity challenges.
 
-use crate::synapse::blockchain::serialization::UuidWrapper;
+use crate::wire::UuidWrapper;
 use crate::{
     config::Config,
     error::Result,

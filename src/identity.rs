@@ -118,7 +118,7 @@
 //! ```rust
 //! # use synapse::identity::IdentityRegistry;
 //! # use synapse::types::{GlobalIdentity, EntityType};
-//! # use synapse::blockchain::serialization::DateTimeWrapper;
+//! # use synapse::wire::DateTimeWrapper;
 //! # use chrono::Utc;
 //! # use std::collections::HashMap;
 //! # #[tokio::main]
@@ -400,10 +400,10 @@
 //! The identity system makes EMRP communication feel natural and intuitive while
 //! handling all the complex networking, security, and protocol details automatically.
 
-use crate::blockchain::serialization::UuidWrapper;
 use crate::error::{IdentityError, Result};
-use crate::synapse::blockchain::serialization::DateTimeWrapper;
 use crate::types::{EntityType, GlobalIdentity};
+use crate::wire::DateTimeWrapper;
+use crate::wire::UuidWrapper;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

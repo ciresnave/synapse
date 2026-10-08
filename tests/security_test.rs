@@ -2,12 +2,10 @@
 //! Comprehensive Security Tests for Synapse
 //!
 //! This file validates all security implementations across the codebase,
-//! ensuring cryptographic functions, authentication, and blockchain security
+//! ensuring cryptographic functions and authentication
 //! work correctly and defend against known attack vectors.
 
-use chrono::Utc;
 use synapse::synapse::auth::utils::{KeyAlgorithm, KeyDerivationParams, SynapseKeyManager};
-use synapse::synapse::blockchain::block::Block;
 
 /// Test cryptographic key generation produces valid key pairs
 #[tokio::test]
@@ -172,89 +170,6 @@ async fn test_password_key_derivation_security() {
     );
 }
 
-/// Test blockchain block SIGNING. Named for what it asserts.
-///
-/// ⚠️ IT DOES NOT VERIFY A SIGNATURE, AND IT NEVER DID. It was previously
-/// called `test_blockchain_signature_verification`, which is what `cargo test`
-/// printed on every green run — so anyone asking "does this project test that
-/// block signatures are verified?" got a yes from a test that only signs.
-///
-/// The verification half is blocked on a function that does not exist:
-/// `verify_block_signature` appears exactly ONCE in this repository, inside a
-/// comment deferring it. Not renamed, not private — never written.
-/// `tests/blockchain_verification_is_still_unbuilt.rs` reddens when it appears.
-#[tokio::test]
-async fn test_blockchain_block_signing() {
-    use synapse::synapse::blockchain::serialization::DateTimeWrapper;
-
-    let mut block = Block {
-        number: 1,
-        timestamp: DateTimeWrapper::new(Utc::now()),
-        previous_hash: "genesis_hash".to_string(),
-        transactions: vec![],
-        hash: "block_hash".to_string(),
-        nonce: 12345,
-        validator: "test_validator".to_string(),
-        signature: None,
-    };
-
-    // Test signing a block (with validator key)
-    let crypto = SynapseKeyManager::new().await.unwrap();
-    let mut crypto = crypto;
-    let validator_keypair = crypto
-        .generate_keypair("validator_key", KeyAlgorithm::Ed25519)
-        .await
-        .unwrap();
-    let validator_private_key = validator_keypair.private_key;
-
-    let sign_result = block.sign_block(&validator_private_key, "Ed25519").await;
-    assert!(
-        sign_result.is_ok(),
-        "Block signing should succeed: {:?}",
-        sign_result.err()
-    );
-
-    // Verify block now has signature
-    assert!(
-        block.signature.is_some(),
-        "Block should have signature after signing"
-    );
-    let signature = block.signature.as_ref().unwrap();
-    assert!(
-        !signature.data.is_empty(),
-        "Signature data should not be empty"
-    );
-    assert!(
-        !signature.algorithm.is_empty(),
-        "Signature algorithm should be specified"
-    );
-    assert_eq!(
-        signature.algorithm, "Ed25519",
-        "Signature should use secure algorithm"
-    );
-
-    // ⚠️ WHAT FOLLOWS IS NOT AN INTEGRITY CHECK, AND ITS OLD COMMENT SAID IT
-    // WAS. The assertion compares a field to the literal assigned two lines
-    // above it, so it is true by construction and cannot fail. It confirms that
-    // `clone()` and a field assignment work. It says nothing about whether a
-    // tampered block's SIGNATURE stops verifying, which is the property the
-    // surrounding comments claimed.
-    //
-    // It is kept rather than deleted because it is harmless and it does pin the
-    // clone-then-mutate step; only the claim about it was wrong.
-    let mut tampered_block = block.clone();
-    tampered_block.hash = "tampered_hash".to_string();
-    assert_ne!(
-        tampered_block.hash, block.hash,
-        "the assignment above took effect — true by construction, NOT an integrity check"
-    );
-
-    // ⚠️ THE REAL CHECK CANNOT BE WRITTEN YET: it needs a verifier that does
-    // not exist. When `verify_block_signature` is implemented, assert here that
-    // it ACCEPTS `block` and REJECTS `tampered_block`, and delete the tripwire
-    // in tests/blockchain_verification_is_still_unbuilt.rs.
-}
-
 // `encrypt_with_public_key` / `decrypt_with_private_key` were removed: they
 // derived the AES key from the PUBLIC key, so holding the public key was enough
 // to decrypt. Public-key encryption is `synapse::sealing` (HPKE), tested in
@@ -347,7 +262,7 @@ async fn test_cryptographic_algorithm_security() {
 /// Integration test: End-to-end security validation
 #[tokio::test]
 async fn test_end_to_end_security_integration() {
-    // Test complete security flow: key generation -> block signing -> signature verification -> key derivation
+    // Test complete security flow: key generation -> signature verification -> key derivation
 
     // 1. Generate cryptographic keys
     let crypto = SynapseKeyManager::new().await.unwrap();
@@ -357,38 +272,7 @@ async fn test_end_to_end_security_integration() {
         .await
         .unwrap();
 
-    // 2. Create and sign blockchain block
-    use synapse::synapse::blockchain::serialization::DateTimeWrapper;
-    let mut block = Block {
-        number: 42,
-        timestamp: DateTimeWrapper::new(Utc::now()),
-        previous_hash: "previous_block_hash".to_string(),
-        transactions: vec![],
-        hash: "computed_block_hash".to_string(),
-        nonce: 98765,
-        validator: "secure_validator".to_string(),
-        signature: None,
-    };
-
-    let signed_bytes = serde_json::to_vec(&block).unwrap();
-    block
-        .sign_block(&signing_keypair.private_key, "Ed25519")
-        .await
-        .unwrap();
-    let block_signature = block.signature.as_ref().expect("Block should be signed");
-    assert!(
-        crypto
-            .verify(
-                &signing_keypair.public_key,
-                &signed_bytes,
-                &block_signature.data
-            )
-            .await
-            .unwrap(),
-        "Block signature should verify under the validator's key"
-    );
-
-    // 3. Test signature verification
+    // 2. Test signature verification
     let test_data = b"Important data requiring authentication";
     let signature = crypto.sign("signing_key", test_data).await.unwrap();
     let verified = crypto
@@ -397,7 +281,7 @@ async fn test_end_to_end_security_integration() {
         .unwrap();
     assert!(verified, "Signature should verify correctly");
 
-    // 4. Test key derivation for password-based security
+    // 3. Test key derivation for password-based security
     let password = "user_secure_password_123!";
     let params = KeyDerivationParams {
         salt: "unique_salt_per_user".to_string(),
@@ -416,7 +300,6 @@ async fn test_end_to_end_security_integration() {
     println!("✅ End-to-end security integration test passed");
     println!("✅ Cryptographic key generation: SECURE");
     println!("✅ Digital signatures: SECURE");
-    println!("✅ Block signing: signs with the validator's key");
     println!("✅ Key derivation: SECURE");
 }
 

@@ -89,6 +89,11 @@ impl MigrationManager {
                 name: "Create initial Synapse schema".to_string(),
                 sql: include_str!("../../../migrations/001_create_synapse_schema.sql").to_string(),
             },
+            Migration {
+                version: 2,
+                name: "Drop the removed trust tables".to_string(),
+                sql: include_str!("../../../migrations/002_drop_trust_tables.sql").to_string(),
+            },
             // Add more migrations here as needed
         ]
     }

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Removing bincode (RUSTSEC-2025-0141), step B1: the core no longer uses it. Plan:
+//! Removing bincode (RUSTSEC-2025-0141): nothing in the tree uses it. Plan:
 //! docs/superpowers/plans/2026-10-07-remove-bincode.md.
 //!
-//! Sources are enumerated from the git index, never by walking the disk. B1 scopes the scan to the
-//! core; B2 widens it to the whole tree once the legacy trees are deleted or ported.
+//! Sources are enumerated from the git index, never by walking the disk. The scan covers the whole
+//! tree: sources, tests, examples and every manifest. Docs are not scanned; they may name the history.
 
 use std::path::Path;
 use std::process::Command;
@@ -55,16 +55,14 @@ fn files_containing(files: &[String], needle: &str) -> Vec<String> {
         .collect()
 }
 
-/// The core, for B1: everything except the legacy trees and `error.rs`, which B2 handles, and this
-/// guard itself, which names what it looks for.
+/// Everything the build reads, except this guard itself, which names what it looks for.
 fn core_files() -> Vec<String> {
     let files = tracked(&[
         "src",
         "crates",
         "tests",
-        ":(exclude)src/synapse/blockchain",
-        ":(exclude)src/synapse/models/trust",
-        ":(exclude)src/error.rs",
+        "examples",
+        "Cargo.toml",
         ":(exclude)tests/bincode_is_gone.rs",
     ]);
     assert!(
@@ -84,7 +82,7 @@ fn no_core_source_mentions_bincode() {
         "the scan did not find serde_json in email_unified.rs, so it is not reading files"
     );
     let hits = files_containing(&files, "bincode");
-    assert!(hits.is_empty(), "the core still mentions bincode: {hits:?}");
+    assert!(hits.is_empty(), "the tree still mentions bincode: {hits:?}");
 }
 
 #[test]

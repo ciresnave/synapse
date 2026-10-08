@@ -119,23 +119,6 @@ impl Cache {
         self.get_cached(&key).await
     }
 
-    /// Cache trust calculation
-    pub async fn cache_trust_score(
-        &self,
-        participant_id: &str,
-        score: f64,
-        ttl_seconds: u64,
-    ) -> Result<()> {
-        let key = format!("trust_score:{participant_id}");
-        self.cache_participant(&key, &score, ttl_seconds).await
-    }
-
-    /// Get cached trust score
-    pub async fn get_cached_trust_score(&self, participant_id: &str) -> Result<Option<f64>> {
-        let key = format!("trust_score:{participant_id}");
-        self.get_cached(&key).await
-    }
-
     /// Increment rate limiting counter
     pub async fn increment_rate_limit(&self, key: &str, window_seconds: u64) -> Result<u64> {
         let mut conn = self
@@ -173,28 +156,5 @@ impl Cache {
             .context("Failed to get rate limit counter")?;
 
         Ok(count.unwrap_or(0) >= max_requests)
-    }
-
-    /// Store blockchain block hash for verification
-    pub async fn cache_block_hash(&self, block_number: u64, hash: &str) -> Result<()> {
-        let key = format!("block:{block_number}:hash");
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
-
-        // Store with no expiration - blocks are immutable
-        conn.set::<_, _, ()>(&key, hash)
-            .await
-            .context("Failed to cache block hash")?;
-
-        Ok(())
-    }
-
-    /// Get cached block hash
-    pub async fn get_block_hash(&self, block_number: u64) -> Result<Option<String>> {
-        let key = format!("block:{block_number}:hash");
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
-
-        conn.get(&key)
-            .await
-            .context("Failed to get cached block hash")
     }
 }
