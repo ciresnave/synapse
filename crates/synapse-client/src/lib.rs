@@ -203,6 +203,22 @@ impl Daemon {
         }
     }
 
+    /// The instance id of the daemon this connection proved (not a secret: it is in the announce
+    /// file, and a squatter cannot answer the health proof without it).
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// The session `role` holds with this daemon: the cached one, else an implicit claim (as
+    /// [`Daemon::call`] does). Never returns the token.
+    pub fn session_info(&self, role: &str) -> Result<Claimed, MailError> {
+        let session = self.session(role)?;
+        Ok(Claimed {
+            global_id: session.global_id,
+            epoch: session.epoch,
+        })
+    }
+
     /// Claim `role` afresh (a takeover if someone holds it) and cache the session.
     pub fn claim(&self, role: &str) -> Result<Claimed, MailError> {
         let _lock = RoleLock::acquire(&self.home, role)?;

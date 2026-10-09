@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Breaking (rc.24): `synapse-mcp` is now the generic adapter over `synapsed` (M6b)
+
+`synapse-mcp-server` (binary `synapse-mcp`) drops its UDP backend and its TOML config and talks to `synapsed`
+through `synapse-client`, as one role. **Removed:** the `--config` file and `SYNAPSE_MCP_CONFIG`, the static
+peers, the `poll` tool (replaced by `fetch`), `McpConfig`'s old fields, `SynapseMcpServer::start_with_sink`,
+and the UDP transport it carried. **Now:** `synapse-mcp --role <role> [--home <dir>]` (or `SYNAPSE_ROLE`;
+the home defaults as for the `synapse` CLI); tools `send(to, body, message_id?)`, `fetch(max?, lease_secs?)`,
+`ack(message_id)`, `list()`, `set_summary(summary)`, `whoami()`. The adapter claims its role once, implicitly,
+when the home has no session for it, and heartbeats every 30 s. A superseded or unknown session is reported as
+a tool error and is never answered by re-claiming; take the role back with `synapse claim`. Fetched bodies
+and summaries are escaped for control characters (newlines and tabs kept). New in `synapse-client`:
+`Daemon::instance_id` and `Daemon::session_info`. Measured by the PM on 2026-10-08, on one box and its 11
+MCP/settings files only: none names `synapse-mcp` as a server.
+Alert delivery is still only a seam (`AlertTransport` has no implementation; board 131).
+
 ### Added (rc.23): `synapse-client` crate (M6a)
 
 The blocking client for `synapsed` (find the daemon, prove it, claim a role, keep one session) moves out of

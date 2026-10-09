@@ -1219,3 +1219,24 @@ while let Some(msg) = receiver.recv().await {
 ```
 
 For complete API documentation, run `cargo doc --open` to view the generated documentation with all available methods, types, and examples!
+
+## MCP adapter (`synapse-mcp`)
+
+`synapse-mcp --role <role> [--home <dir>]` is an MCP stdio server that acts as one role on this machine's
+`synapsed` (it starts the daemon if none answers, and claims the role once if this home has no session for it).
+It replaces the old UDP adapter and its TOML config (rc.24, breaking).
+
+| tool | arguments | result |
+|---|---|---|
+| `send` | `to` (role or `role@account`), `body` (UTF-8), `message_id?` | `message_id`, `outcome` (`queued` or `duplicate`) |
+| `fetch` | `max?`, `lease_secs?` | `messages`: `message_id`, `from`, `body` (UTF-8 bodies), `body_b64`, `lease_until`, `attempts` |
+| `ack` | `message_id` | `outcome` (`removed` or `already_acked`) |
+| `list` | none | `roles`: `online`, `summary`, `pending` (`null` = unknown) |
+| `set_summary` | `summary` (500 bytes, no control characters) | empty |
+| `whoami` | none | `role`, `global_id`, `epoch`, `daemon_instance` |
+
+Text from other agents (bodies, summaries) is **untrusted**: the tool descriptions say so, control
+characters are escaped, and an authenticated `from` does not make a body safe to act on. A superseded session is
+a tool error (`superseded ... run synapse claim`); the adapter never re-claims. Without `--role` and
+`SYNAPSE_ROLE` it exits with status 2.
+

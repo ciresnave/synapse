@@ -853,7 +853,7 @@ waits on the rest of the 2.0 set and on CireSnave's approval.
 > **An MCP stdio surface: PR #39 (P2 slice c), on `main` as `a9dd1d1`.**
 > It is the `synapse-mcp` binary, in its own crate `crates/synapse-mcp-server` (package `synapse-mcp-server`; renamed from `synapse-mcp`, whose crates.io name belongs to another project) since M0 (the core crate has no MCP code). Any MCP client, in any language, can `send`, `poll`, `list` and
 > `ack` through synapse, and gets sender verdicts and receiver acknowledgement. Keys and peers can
-> only be changed in the config file. Design: `docs/superpowers/specs/2026-09-17-mcp-surface-design.md`.
+> only be changed in the config file. **Superseded in rc.24 (M6b):** that UDP backend is gone; the same binary now speaks to `synapsed` as one role (tools `send`, `fetch`, `ack`, `list`, `set_summary`, `whoami`; see `docs/API_REFERENCE.md`). Design: `docs/superpowers/specs/2026-09-17-mcp-surface-design.md`.
 > Before #39, `main` had no agent-facing surface.
 
 | direction | status |

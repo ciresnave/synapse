@@ -149,7 +149,7 @@ message_routing_system = "0.1.0"
 |---|---|---|
 | `synapsectl` | `synapse` | the `synapse` command: identity (`synapse id …`) and mail over `synapsed` (`claim`, `send`, `inbox`, `ack`, `list`) |
 | `synapsed` | `synapsed` | the per-user loopback daemon; `synapse` starts it on demand |
-| `synapse-mcp-server` | `synapse-mcp` | the MCP stdio adapter, for any MCP client |
+| `synapse-mcp-server` | `synapse-mcp` | the generic MCP stdio adapter over `synapsed`, for any MCP client (`synapse-mcp --role <role>`) |
 
 ```sh
 cargo install synapsectl synapsed synapse-mcp-server
