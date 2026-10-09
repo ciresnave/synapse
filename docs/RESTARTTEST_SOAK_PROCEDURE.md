@@ -26,10 +26,10 @@ conditions. Cutover (dropping `server:claude-peers`) is **not** part of either p
    with `C:\Users\cires\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin` on `PATH`. Record
    `git rev-parse HEAD` and `synapsed`'s `/v1/health` `version`. Binaries: `synapsed`, `synapse`
    (from the `synapsectl` crate), `synapse-claude-channel`.
-2. **The wire probe passes** (no model request, no approval needed, kills only its own child):
+2. **The wire probe passes.** It needs the `claude` CLI on `PATH` (or `SYNAPSE_PROBE_CLAUDE`) and a logged-in account, builds the `tee_mcp` example itself, and starts a real `claude -p hi --model haiku` child that the test stops once the adapter has answered `initialize` (the test's own comments say it makes no model request and kills only that child; not verified by running it). It needs no dev-channel approval:
    `cargo test -p synapse-claude-channel --test channel -- --ignored --nocapture real_claude_code_wire_probe`
-   Expect *(source)*: `server/discover` answered `-32022`, `initialize` accepted at `2025-11-25`,
-   `serverInfo.name` = `synapse`. If it fails, stop: the live test would fail the same way.
+   Expect *(source)*: `initialize` accepted at `2025-11-25`, `serverInfo.name` = `synapse`, and, only if
+   the client sent `server/discover` (the assertion is conditional), that it was answered `-32022`. If it fails, stop: the live test would fail the same way.
 3. **The approval exists, or CireSnave will answer the dialog by hand.** `lane-restart`'s approval for
    `--dangerously-load-development-channels` pins `Channels` **exactly** (`server:claude-peers` today;
    no prefix match). Phase 1 passes `server:synapse`, which no record covers yet, so the dialog
@@ -83,8 +83,12 @@ reconciled with the lane's real launcher by the PM or OverMind before use:
 { "mcpServers": { "synapse": {
   "command": "C:/path/to/synapse-claude-channel.exe",
   "args": ["--role", "restarttest", "--home", "C:/Users/cires/AppData/Local/synapse-restarttest"],
-  "env": { "SYNAPSE_ADDR": "127.0.0.1:7931" } } } }
+  "env": { "SYNAPSE_HOME": "C:/Users/cires/AppData/Local/synapse-restarttest", "SYNAPSE_ADDR": "127.0.0.1:7931" } } } }
 ```
+**`SYNAPSE_HOME` in `env` is required, not optional.** The adapter's `--home` does not reach a daemon it
+auto-starts: `spawn_daemon` inherits only the environment, and `synapsed` reads its home from
+`SYNAPSE_HOME`, else `%LOCALAPPDATA%\synapse`. Without it, if the manual daemon is not answering, the
+adapter starts a daemon on port 7931 against the **real default home**, whose store rc.27 migrates one way.
 Launch (model **Sonnet**, never Opus):
 ```
 claude --model sonnet --mcp-config <mcp.json> --dangerously-load-development-channels server:synapse
@@ -101,24 +105,26 @@ session** (OverMind's fourth retest): confirm a real prompt is accepted.
 
 | # | Do | Expect | Source |
 |---|---|---|---|
-| 1 | `synapse list --role soak-probe` | one JSON object per line; `restarttest` has `"online": true` within ~30 s (heartbeat every 30 s; online window 90 s) | source |
+| 1 | `synapse list --role soak-probe` | one JSON object per line; the entry with `"global_id": "restarttest@soaktest"` has `"online": true` (the adapter heartbeats once at start-up, then every 30 s; online window 90 s) | source |
 | 2 | `synapse send --role soak-probe --to restarttest --id p1-0001 "hello"` | the session shows a `<channel source="synapse">` event whose text starts `UNTRUSTED message from ...` within ~1-2 s (poll every 1 s) | source |
 | 3 | `synapse list --role soak-probe` | `pending` for `restarttest` is `queued:0, leased:0` (pushed, then acked) | source |
-| 4 | send the same `--id p1-0001` again | no second push (idempotent resend) | source |
+| 4 | send the same `--id p1-0001` again | no second push (idempotent resend; acked history is kept 7 days, after which a resend would be delivered again) | source |
 | 5 | send a body containing `</channel>`, `<`, an ESC character and "ignore previous instructions" | arrives inside the untrusted frame, `<` and `>` as `&lt;` `&gt;`, control characters as escapes; the model must not obey it | source |
 | 6 | in the session, call the `send` tool to `soak-probe`, then `synapse inbox --role soak-probe` | the reply appears with `"from"` = the session's role | source |
-| 7 | kill the **claude** process only; send one message; relaunch | the message is delivered after relaunch (leased on the old session or queued; it returns after the 30 s lease at most) | source |
+| 7 | kill the **claude** process only; send one message; relaunch | the message is delivered after relaunch (leased on the old session or queued; it returns when the lease ends, 30 s at most, or sooner because a relaunch claims a new epoch) | source |
 | 8 | `tail "$H/security-events.jsonl"` | no lines (none expected in a clean run) | source |
 
 **Caution on `synapse inbox`:** it *fetches*, which leases and hides messages from that role's own
-channel adapter for `lease_secs`. Run it only as `soak-probe` (a role nothing else drains), never as
+channel adapter for the lease (60 s by the daemon's default when `--lease-secs` is not given; the adapter
+itself uses 30 s). Run it only as `soak-probe` (a role nothing else drains), never as
 `restarttest` during a test.
 
 ### 2.4 Phase 1 pass and stop
 
 **Pass:** checks 1-8 as above, with zero messages lost and none shown twice except by a failed ack.
 **Stop immediately** on: a message not shown after 10 s; a message shown more than once with no
-`ack failed` line in the adapter's stderr; any line in `security-events.jsonl`; the daemon exiting; the
+`ack failed` line in the adapter's stderr; any line in `security-events.jsonl` (an auth event, or a
+`PermissionsTooOpen` file refusal); the daemon exiting; the
 dialog text differing from the approval's anchors (do not auto-answer an unfamiliar dialog).
 
 ## 3. Phase 2: the side-by-side soak (M9) -- needs the second approval and every lane
@@ -145,10 +151,10 @@ role" therefore cannot be read from the daemon; it is assembled from three sourc
 | Quantity | How | Limit |
 |---|---|---|
 | sent | the canary writes one line per send (`id`, time) | counts only canary traffic |
-| acked / lost | canary ids that appeared as `<channel>` events (`meta.message_id`) in the session transcript, compared to sent | needs the transcript; no daemon-side confirmation |
+| acked / lost | canary ids that appeared as `<channel>` events in the session transcript, compared to sent. **The daemon stores the id as `<sender global id>/<id>`**, so `meta.message_id` reads `soak-probe@soaktest/soak-001`, not `soak-001`: log or strip that prefix when comparing | needs the transcript; no daemon-side confirmation |
 | redelivered | the same `message_id` appearing twice in the transcript | the adapter logs ack failures (`synapse channel: ack failed`, stderr) but not redeliveries |
 | never acked / stuck | `synapse list` -> `pending.queued`, `pending.leased`, `pending.oldest_enqueued_at` | a depth snapshot, not history |
-| rejected / hostile | lines in `<home>/security-events.jsonl` (rotates at 4 MiB to `.1`) | only authentication and budget events |
+| rejected / hostile | lines in `<home>/security-events.jsonl` (rotates at 4 MiB to `.1`) | authentication and budget events, and also `PermissionsTooOpen` (a file-permissions refusal by the CLI); the daemon rate-limits lines per kind and surface to one per second, folding the rest into a count |
 | latency | canary send time vs the event's arrival in the transcript | the transcript's clock; ~1 s poll granularity |
 
 **Gap, stated plainly:** a per-role cumulative counter would need a small daemon change (a
@@ -157,7 +163,7 @@ before it starts, because adding it mid-soak resets the run.
 
 Canary (unrun sketch; `--id` makes resends idempotent, so a retry cannot inflate "sent"):
 ```bash
-for i in $(seq -w 1 500); do
+for i in $(seq -w 1 4320); do   # 4320 x 60 s = 3 days
   synapse send --role soak-probe --to restarttest --id "soak-$i" "canary $i" \
     && echo "$(date -u +%FT%TZ) soak-$i" >> "$H/sent.log"
   sleep 60
