@@ -1215,3 +1215,93 @@ async fn list_shows_mailbox_depth_per_role() {
     );
     d.stop().await;
 }
+
+async fn get_stats(d: &Running, token: Option<&str>) -> (u16, Value, String) {
+    let mut req = client().get(d.url("/v1/stats"));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let resp = req.send().await.unwrap();
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::Null),
+        text,
+    )
+}
+
+fn counters(stats: &Value, role: &str) -> [u64; 4] {
+    let entry = stats["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["global_id"] == role)
+        .unwrap_or_else(|| panic!("{role} not in {stats}"));
+    ["sent", "acked", "redelivered", "expired"].map(|k| entry[k].as_u64().expect(k))
+}
+
+/// `/v1/stats`: cumulative per-role counters for the soak. `sent` counts new enqueues to the role
+/// (a duplicate is not one), `acked` counts removals, `redelivered` counts every delivery after the
+/// first, `expired` those whose previous lease had run out (a takeover redelivers without expiry).
+/// Authenticated; the answer carries no message content; counters are per-process and say so.
+#[tokio::test]
+async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
+    let d = start().await;
+    assert_eq!(get_stats(&d, None).await.0, 401, "needs a token");
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (beta, _) = claim(&d, "beta", 2).await;
+
+    let (s, stats, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(s, 200, "{stats}");
+    assert_eq!(counters(&stats, "beta@acct"), [0, 0, 0, 0], "fresh daemon");
+    assert_eq!(stats["scope"], "process");
+    assert!(stats["since"].is_string(), "{stats}");
+
+    let m1 = send_to(&d, &alpha, "beta@acct", b"SECRET-ONE").await;
+    send_to(&d, &alpha, "beta@acct", b"SECRET-TWO").await;
+    send_to(&d, &alpha, "beta@acct", b"SECRET-THREE").await;
+    // A resend under the same client id is a duplicate, not a second message.
+    let (_, dup, _) = post(
+        &d,
+        "/v1/send",
+        Some(&alpha),
+        json!({"to": "beta@acct", "message_id": "fixed", "body_b64": B64.encode(b"x")}),
+    )
+    .await;
+    assert_eq!(dup["outcome"], "queued");
+    let (_, dup, _) = post(
+        &d,
+        "/v1/send",
+        Some(&alpha),
+        json!({"to": "beta@acct", "message_id": "fixed", "body_b64": B64.encode(b"x")}),
+    )
+    .await;
+    assert_eq!(dup["outcome"], "duplicate");
+
+    let (_, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({"lease_secs": 5})).await;
+    assert_eq!(got["messages"].as_array().unwrap().len(), 4);
+    post(&d, "/v1/ack", Some(&beta), json!({"message_id": m1})).await;
+    let (_, stats, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(counters(&stats, "beta@acct"), [4, 1, 0, 0]);
+
+    // Let the 5 s leases run out; the three left come back, each after an expiry.
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    let (_, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({"lease_secs": 60})).await;
+    assert_eq!(got["messages"].as_array().unwrap().len(), 3);
+    let (_, stats, _) = get_stats(&d, Some(&alpha)).await;
+    assert_eq!(counters(&stats, "beta@acct"), [4, 1, 3, 3]);
+
+    // A takeover voids beta's live leases: redelivered, but nothing expired.
+    let (beta2, _) = claim(&d, "beta", 3).await;
+    let (_, got, _) = post(&d, "/v1/fetch", Some(&beta2), json!({})).await;
+    assert_eq!(got["messages"].as_array().unwrap().len(), 3);
+    let (s, stats, text) = get_stats(&d, Some(&beta2)).await;
+    assert_eq!(s, 200);
+    assert_eq!(counters(&stats, "beta@acct"), [4, 1, 6, 3]);
+    assert_eq!(counters(&stats, "alpha@acct"), [0, 0, 0, 0]);
+    for leak in ["SECRET", "body", "message_id", &m1, &beta, &beta2] {
+        assert!(!text.contains(leak), "stats leaked {leak:?}: {text}");
+    }
+    d.stop().await;
+}

@@ -40,7 +40,7 @@ conditions. Cutover (dropping `server:claude-peers`) is **not** part of either p
    format 2 on first open, **one way**; rc.26 and earlier must not open it afterwards. Phase 1 uses a
    fresh home, so it is exempt. Phase 2 on a home an older daemon has used: copy the home directory
    first, and the rollback in section 6 restores the copy.
-5. **Know the limits.** There is no cumulative sent/acked/redelivered counter in the daemon (section 4).
+5. **Know the limits.** The daemon's `/v1/stats` counters (rc.29) are per-process: a `synapsed` restart zeroes them (section 4).
 
 ## 2. Phase 1: the `restarttest` live push
 
@@ -145,21 +145,34 @@ Owner: the PM with OverMind (launch flags are `lane-restart`'s). This lane's par
 
 ## 4. What is measured, and the honest gap
 
-`synapsed` keeps **no cumulative counters**. The plan's "sent, acked, redelivered and never-acked by
-role" therefore cannot be read from the daemon; it is assembled from three sources:
+Since rc.29 `synapsed` answers `GET /v1/stats` (bearer session token, like `/v1/list`) with cumulative
+per-role counters and no message content:
+
+```json
+{"scope":"process","since":"<RFC 3339>","roles":[{"global_id":"restarttest@soaktest","sent":0,"acked":0,"redelivered":0,"expired":0}]}
+```
+
+`sent` is new messages queued **for** the role (a duplicate send is not one); `acked` is removals by the role;
+`redelivered` is every delivery after a message's first; `expired` is the part of `redelivered` whose previous
+lease ran out (the rest are takeovers). **The counters are per-process, in memory: a daemon restart zeroes them
+and moves `since`.** Read `since` at the start and at every reading; a changed `since` is a restart (stop
+condition 5), and the counts before it are only in the readings you saved. Take a reading at least hourly and
+append it to a log. There is no CLI subcommand for it yet: a reading needs a session token for any claimed role
+(`POST /v1/claim`), sent as `Authorization: Bearer <token>` to the announced address with that `Host`.
+
+The rest still comes from other sources:
 
 | Quantity | How | Limit |
 |---|---|---|
-| sent | the canary writes one line per send (`id`, time) | counts only canary traffic |
+| sent / acked / redelivered / expired | `/v1/stats` for the receiving role, compared with the canary's `sent.log` | covers all traffic to the role, not only the canary's; zeroed by a restart |
 | acked / lost | canary ids that appeared as `<channel>` events in the session transcript, compared to sent. **The daemon stores the id as `<sender global id>/<id>`**, so `meta.message_id` reads `soak-probe@soaktest/soak-001`, not `soak-001`: log or strip that prefix when comparing | needs the transcript; no daemon-side confirmation |
-| redelivered | the same `message_id` appearing twice in the transcript | the adapter logs ack failures (`synapse channel: ack failed`, stderr) but not redeliveries |
+| shown twice | the same `message_id` appearing twice in the transcript | the adapter logs ack failures (`synapse channel: ack failed`, stderr) but not redeliveries |
 | never acked / stuck | `synapse list` -> `pending.queued`, `pending.leased`, `pending.oldest_enqueued_at` | a depth snapshot, not history |
 | rejected / hostile | lines in `<home>/security-events.jsonl` (rotates at 4 MiB to `.1`) | authentication and budget events, and also `PermissionsTooOpen` (a file-permissions refusal by the CLI); the daemon rate-limits lines per kind and surface to one per second, folding the rest into a count |
 | latency | canary send time vs the event's arrival in the transcript | the transcript's clock; ~1 s poll granularity |
 
-**Gap, stated plainly:** a per-role cumulative counter would need a small daemon change (a
-`/v1/stats` route). It is not built and not part of this PR; ask the PM whether the soak wants it
-before it starts, because adding it mid-soak resets the run.
+**Gap, stated plainly:** the counters are not persisted. A restart loses the history in the daemon (the saved
+readings and `sent.log` keep it), and nothing in them says a message was *shown*: that is still the transcript.
 
 Canary (unrun sketch; `--id` makes resends idempotent, so a retry cannot inflate "sent"):
 ```bash
@@ -170,7 +183,8 @@ for i in $(seq -w 1 4320); do   # 4320 x 60 s = 3 days
 done
 ```
 Compare at the end: `sent.log` ids minus ids found in the transcript = lost; ids found twice =
-redelivered; `pending` after quiescence must be `queued:0, leased:0`.
+shown twice; `/v1/stats` `sent` for the role must equal the canary's count and, after quiescence, equal
+`acked` with `pending` at `queued:0, leased:0`; `redelivered` explains any message shown twice.
 
 ## 5. Stop conditions for the soak (proposed; the PM sets the numbers)
 

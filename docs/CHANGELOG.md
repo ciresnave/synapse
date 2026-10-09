@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Added (rc.29): `GET /v1/stats`, cumulative per-role mail counters
+
+`synapsed` answers `GET /v1/stats` (session token, like `/v1/list`) with `sent`, `acked`, `redelivered` and
+`expired` per claimed role, and `scope: "process"` plus `since`. The counters live in memory: a daemon restart
+resets them. No message content, ids or bodies are in the answer. Additive: `mailbox::Delivery` gains
+`prior_lease_lapsed` (a public struct, so a literal constructing one needs the field). Nothing else changes on
+the wire or in the store. The soak procedure now reads these counters.
+
 ### Docs (rc.28): LAN-mode design note, and the `restarttest` live-push and soak procedure
 
 Docs only; no code, wire or store change. `docs/LAN_MODE.md` is a design note (nothing built) on running Synapse
