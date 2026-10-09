@@ -17,6 +17,24 @@
 //! `ProtocolVersion::known_up_to(&V_2025_11_25)`. A `discover` request then names an unsupported
 //! version and gets `-32022` with the supported list; `initialize` negotiates down to 2025-11-25.
 //!
+//! # Server name
+//!
+//! `initialize` reports `serverInfo.name = "synapse"` (board D2), not the crate name rmcp would
+//! default to. `tests/channel.rs` pins it.
+//!
+//! # Wire probe (repeatable)
+//!
+//! The real Claude Code client sends `server/discover` and `initialize` together, so the adapter must
+//! be probed with the real client, not a fake. `real_claude_code_wire_probe` (ignored; needs the
+//! `claude` CLI, or `SYNAPSE_PROBE_CLAUDE`) puts the `tee_mcp` example between Claude Code and the
+//! adapter, logs both directions, and checks the `-32022` refusal and the `initialize` result. It
+//! makes no model request and kills only the child it spawned. Run:
+//! `cargo test -p synapse-claude-channel --test channel -- --ignored --nocapture real_claude_code_wire_probe`.
+//! It does not exercise a live push, which needs a dev-channel approval.
+//!
+//! To re-take the mailbox-depth cost numbers, see the header of `tests/mailbox_depth_cost.rs` (#98):
+//! `cargo test --release --features mailbox-redb --test mailbox_depth_cost -- --ignored --nocapture`.
+//!
 //! # Trust
 //!
 //! The daemon delivers only authenticated mail, but a sender's identity does not make its text
@@ -32,7 +50,7 @@ use std::time::Duration;
 use rmcp::handler::server::ServerHandler;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CustomNotification, ListToolsResult,
+    CallToolRequestParams, CallToolResponse, CustomNotification, Implementation, ListToolsResult,
     PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, ServerNotification,
     Tool,
 };
@@ -176,6 +194,7 @@ impl ServerHandler for ChannelServer {
                 .enable_experimental_with(experimental)
                 .build(),
         )
+        .with_server_info(Implementation::new("synapse", env!("CARGO_PKG_VERSION")))
         .with_instructions(INSTRUCTIONS);
         info.protocol_version = MAX_PROTOCOL;
         info

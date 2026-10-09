@@ -210,6 +210,7 @@ async fn discover_is_rejected_and_initialize_negotiates_2025_11_25_with_the_chan
         .await;
     let result = &init["result"];
     assert_eq!(result["protocolVersion"], "2025-11-25", "{init}");
+    assert_eq!(result["serverInfo"]["name"], "synapse", "{init}");
     assert!(result["capabilities"]["tools"].is_object(), "{init}");
     assert!(
         result["capabilities"]["experimental"]["claude/channel"].is_object(),
@@ -365,4 +366,115 @@ async fn a_body_cannot_close_the_channel_tag() {
         "{content}"
     );
     assert!(content.contains("&lt;/channel&gt;"), "{content}");
+}
+
+/// The wire probe (plan M7 test 4), repeatable. Puts a byte-for-byte tee between the REAL Claude
+/// Code client and the adapter, then checks what the client sent and what the adapter answered.
+///
+/// Ignored by default: it needs the `claude` CLI on PATH (or `SYNAPSE_PROBE_CLAUDE`) and a logged-in
+/// account, and it starts a real Claude Code process. No model request is made: the test stops the
+/// client as soon as the adapter has answered `initialize`. It never kills by image name; it kills
+/// only the child it spawned, and the tee, adapter and daemon exit when their pipes close.
+///
+/// Run: `cargo test -p synapse-claude-channel --test channel -- --ignored --nocapture real_claude_code_wire_probe`
+#[test]
+#[ignore = "needs the real Claude Code CLI; run by hand, see the doc comment"]
+fn real_claude_code_wire_probe() {
+    let home = Home::new();
+    let tee = exe_dir()
+        .join("examples")
+        .join(format!("tee_mcp{}", std::env::consts::EXE_SUFFIX));
+    // `cargo test --test channel` does not build examples, so build the tee here.
+    let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    build.args([
+        "build",
+        "-p",
+        "synapse-claude-channel",
+        "--example",
+        "tee_mcp",
+    ]);
+    if exe_dir().file_name().is_some_and(|n| n == "release") {
+        build.arg("--release");
+    }
+    assert!(
+        build.status().expect("cargo runs").success(),
+        "building tee_mcp failed"
+    );
+    assert!(tee.exists(), "{} is not built", tee.display());
+    let log = home.dir.path().join("wire.log");
+    let config = home.dir.path().join("mcp.json");
+    std::fs::write(
+        &config,
+        json!({"mcpServers": {"synapse": {
+            "command": tee.to_str().unwrap(),
+            "args": [
+                log.to_str().unwrap(),
+                env!("CARGO_BIN_EXE_synapse-claude-channel"),
+                "--role", "probe",
+                "--home", home.dir.path().to_str().unwrap(),
+            ],
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut claude = Command::new(std::env::var("SYNAPSE_PROBE_CLAUDE").unwrap_or("claude".into()))
+        .args([
+            "-p",
+            "hi",
+            "--model",
+            "haiku",
+            "--strict-mcp-config",
+            "--mcp-config",
+        ])
+        .arg(&config)
+        .current_dir(home.dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("claude starts");
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut text = String::new();
+    while Instant::now() < deadline {
+        text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text
+            .lines()
+            .any(|l| l.starts_with("S>C") && l.contains("serverInfo"))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = claude.kill();
+    let _ = claude.wait();
+
+    println!("--- wire log (C>S = real Claude Code, S>C = adapter) ---\n{text}---");
+    let replies: Vec<Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("S>C "))
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let init = replies
+        .iter()
+        .find(|v| v["result"]["serverInfo"].is_object())
+        .expect("the adapter never answered initialize");
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
+    assert_eq!(init["result"]["serverInfo"]["name"], "synapse", "{init}");
+    assert!(
+        init["result"]["capabilities"]["tools"].is_object(),
+        "{init}"
+    );
+    assert!(
+        init["result"]["capabilities"]["experimental"]["claude/channel"].is_object(),
+        "{init}"
+    );
+    // If the client opens with server/discover, it must have been refused with -32022.
+    if text.contains("\"server/discover\"") {
+        assert!(
+            replies.iter().any(|v| v["error"]["code"] == -32022),
+            "server/discover was not refused with -32022"
+        );
+    }
 }
