@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Docs (rc.28): LAN-mode design note, and the `restarttest` live-push and soak procedure
+
+Docs only; no code, wire or store change. `docs/LAN_MODE.md` is a design note (nothing built) on running Synapse
+across two machines: why `synapsed` is loopback-only today, a LAN-listening hub (option A) against linked
+per-machine daemons (option B), a harness for non-Claude models, and an honest size. `docs/RESTARTTEST_SOAK_PROCEDURE.md`
+is the prepared, **not run** procedure for the M7 live push in the disposable `restarttest` lane and the M9
+side-by-side soak: commands, rollback, what is measured, and stop conditions. It records that `synapsed` keeps no
+cumulative sent/acked/redelivered counters, so the soak measures from a canary and the transcript. Neither
+document approves a live test or a cutover.
+
 ### Breaking (rc.27): mail store format 2, and `fetch` no longer decodes every held message
 
 `RedbStore` keeps a fixed-width `leases` row per leased message, so `fetch` skips the messages it must
