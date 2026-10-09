@@ -76,3 +76,17 @@ note.
 2. Is "cannot downgrade the database file" acceptable for a pre-release line? (No deployed 6.x database
    outside CireSnave's lanes that I know of.)
 3. Pass bar: relative (above) rather than an absolute millisecond figure.
+
+## PM rulings (2026-10-09 06:54Z)
+
+1. Design A (`HELD` table + one-time migration), **only after** the step-1 profile shows JSON decode of
+   `META` rows dominates; otherwise stop and ask.
+2. A one-way database format change is allowed on the rc line, as 6.0.0-rc.27 with a **Breaking**
+   CHANGELOG entry, provided the migration is:
+   - **one redb write transaction** (all-or-nothing, crash-safe);
+   - **idempotent**;
+   - **refuses a newer-than-known format** with a clear error;
+   - covered by a test that kills the process mid-migration (or simulates it) and reopens.
+3. Pass bar is relative (above). The PR also records the measured `fetch(max=1)` p50 at 5k leased,
+   before and after.
+4. This spec lands first as a docs-only PR; **rc.27 rides the implementation PR**, not this one.
