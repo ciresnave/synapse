@@ -112,6 +112,9 @@ pub struct Delivery {
     pub enqueued_at: DateTime<Utc>,
     pub lease_until: DateTime<Utc>,
     pub attempts: u32,
+    /// An earlier lease on this message had run out by its deadline (as opposed to being voided by
+    /// a takeover, or there being none). Lets a caller count expiries apart from takeovers.
+    pub prior_lease_lapsed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -555,6 +558,7 @@ impl<S: MailStore> Mailbox<S> {
             })
             .map_err(MailError::Store)?;
             for mut stored in picked {
+                let prior_lease_lapsed = stored.lease.is_some_and(|held| held.until <= now);
                 stored.lease = Some(Lease { epoch, until });
                 stored.attempts = stored.attempts.saturating_add(1);
                 out.push(Delivery {
@@ -562,6 +566,7 @@ impl<S: MailStore> Mailbox<S> {
                     enqueued_at: stored.enqueued_at,
                     lease_until: until,
                     attempts: stored.attempts,
+                    prior_lease_lapsed,
                 });
                 txn.put(role, stored).map_err(MailError::Store)?;
             }

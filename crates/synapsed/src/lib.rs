@@ -119,6 +119,9 @@ struct Shared {
     /// SHA-256(token) -> session.
     sessions: Mutex<HashMap<[u8; 32], Session>>,
     presence: Mutex<HashMap<String, Presence>>,
+    /// Cumulative per-role counters for `/v1/stats`. In memory: a restart zeroes them, and the
+    /// answer says so (`scope`, `since`).
+    stats: Mutex<HashMap<String, RoleCounters>>,
     /// This daemon's account name: it serves `<role>@<account>` only.
     account: String,
     account_key_id: String,
@@ -337,6 +340,7 @@ impl Daemon {
                 mailbox: Mutex::new(mailbox),
                 sessions: Mutex::new(HashMap::new()),
                 presence: Mutex::new(HashMap::new()),
+                stats: Mutex::new(HashMap::new()),
                 account: summary.account,
                 account_key_id: summary.key_id,
                 account_key: keystore.account_public_key(),
@@ -421,6 +425,7 @@ impl Daemon {
             .route("/v1/ack", post(ack))
             .route("/v1/heartbeat", post(heartbeat))
             .route("/v1/list", get(list))
+            .route("/v1/stats", get(stats))
             // Inside `host_guard`, so a 421 is neither counted nor delayed.
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 delay_failures(pause.clone(), req, next)
@@ -885,7 +890,7 @@ async fn send(
             .decode(&body.body_b64)
             .map_err(|_| malformed("body_b64"))?,
     };
-    let outcome = {
+    let (to, outcome) = {
         let mut mailbox = locked(&shared.mailbox)?;
         // Review M5: re-check the sender's epoch under the same lock as the enqueue.
         mailbox.check(&session.global_id, session.epoch)?;
@@ -912,8 +917,13 @@ async fn send(
             )
             .after(delay));
         }
-        mailbox.enqueue(envelope, Utc::now())?
+        let to = envelope.to.clone();
+        let outcome = mailbox.enqueue(envelope, Utc::now())?;
+        (to, outcome)
     };
+    if outcome == Enqueued::Queued {
+        count(&shared, &to, |c| c.sent += 1);
+    }
     Ok(axum::Json(json!({
         "message_id": message_id,
         "outcome": match outcome { Enqueued::Queued => "queued", Enqueued::Duplicate => "duplicate" },
@@ -952,6 +962,9 @@ async fn fetch(
         lease,
         Utc::now(),
     )?;
+    // Counted after the fetch committed, never from the request: a refused fetch moves nothing.
+    let redelivered = deliveries.iter().filter(|d| d.attempts > 1).count();
+    let expired = deliveries.iter().filter(|d| d.prior_lease_lapsed).count();
     let messages: Vec<Value> = deliveries
         .into_iter()
         .map(|d| {
@@ -965,6 +978,12 @@ async fn fetch(
             })
         })
         .collect();
+    if redelivered > 0 {
+        count(&shared, &session.global_id, |c| {
+            c.redelivered += redelivered as u64;
+            c.expired += expired as u64;
+        });
+    }
     Ok(axum::Json(json!({ "messages": messages })).into_response())
 }
 
@@ -1006,6 +1025,9 @@ async fn ack(
         }
         Err(e) => return Err(e.into()),
     };
+    if outcome == Acked::Removed {
+        count(&shared, &session.global_id, |c| c.acked += 1);
+    }
     Ok(axum::Json(json!({
         "outcome": match outcome { Acked::Removed => "removed", Acked::AlreadyAcked => "already_acked" },
     }))
@@ -1048,6 +1070,57 @@ async fn list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<R
     let presence = locked(&shared.presence)?;
     let out = list_entries(&roles, &presence, depths.as_ref(), now);
     Ok(axum::Json(json!({ "roles": out })).into_response())
+}
+
+/// What one role has been through since the daemon started. Message counts only, never content.
+#[derive(Clone, Copy, Default)]
+struct RoleCounters {
+    /// New messages queued for the role (a duplicate send is not one).
+    sent: u64,
+    /// Messages the role acked (an idempotent repeat is not one).
+    acked: u64,
+    /// Deliveries after a message's first: its lease ran out, or a takeover voided it.
+    redelivered: u64,
+    /// The subset of `redelivered` whose previous lease had run out; the rest are takeovers.
+    expired: u64,
+}
+
+fn count(shared: &Shared, role: &str, bump: impl FnOnce(&mut RoleCounters)) {
+    // A poisoned counter table loses a count, never the request it was riding on.
+    if let Ok(mut stats) = shared.stats.lock() {
+        bump(stats.entry(role.to_string()).or_default());
+    }
+}
+
+/// `GET /v1/stats`: the soak's cumulative counters, per role. Per-process: `since` is when this
+/// daemon started counting, and a restart begins again from zero.
+async fn stats(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authed(&shared, &headers)?;
+    let roles = locked(&shared.mailbox)?.roles_snapshot();
+    let counters = locked(&shared.stats)?;
+    let out: Vec<Value> = roles
+        .roles
+        .keys()
+        .map(|global_id| {
+            let c = counters.get(global_id).copied().unwrap_or_default();
+            json!({
+                "global_id": global_id,
+                "sent": c.sent,
+                "acked": c.acked,
+                "redelivered": c.redelivered,
+                "expired": c.expired,
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({
+        "scope": "process",
+        "since": shared.started_at.to_rfc3339(),
+        "roles": out,
+    }))
+    .into_response())
 }
 
 /// `list`'s entries. When the depths could not be read (a poisoned mailbox or a failed store),
