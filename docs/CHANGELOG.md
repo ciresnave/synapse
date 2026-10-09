@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Added (rc.25): `synapse-claude-channel`, the Claude Code channel adapter (M7)
+
+New crate and binary `synapse-claude-channel --role <role> [--home <dir>]`. It serves M6b's tools and, once a
+second, leases mail from `synapsed` and pushes each message to Claude Code as a `notifications/claude/channel`
+event whose text is escaped and framed as untrusted, then acks it. A failed write leaves the lease to run out,
+so the message is redelivered. It caps the MCP protocol at 2025-11-25 (`server/discover` is answered `-32022`,
+so Claude Code falls back to `initialize`) and declares the `tools` and `experimental: claude/channel`
+capabilities. `synapse-mcp-server` gains `SynapseMcpServer::pull` and `confirm`. Not a cutover from
+claude-peers; that is a separate decision.
+
 ### Breaking (rc.24): `synapse-mcp` is now the generic adapter over `synapsed` (M6b)
 
 `synapse-mcp-server` (binary `synapse-mcp`) drops its UDP backend and its TOML config and talks to `synapsed`

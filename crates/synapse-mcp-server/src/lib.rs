@@ -132,6 +132,47 @@ impl SynapseMcpServer {
     }
 }
 
+impl SynapseMcpServer {
+    /// Fetch and lease up to `max` messages, each shown as the `fetch` tool shows it (control
+    /// characters escaped, a non-UTF-8 body left out). For adapters that push instead of waiting
+    /// for the model to poll (M7).
+    pub async fn pull(&self, max: u32, lease_secs: i64) -> Result<Vec<Value>, String> {
+        let inner = self.inner.clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            inner.daemon.call(
+                &inner.role,
+                "/v1/fetch",
+                Some(&json!({"max": max, "lease_secs": lease_secs})),
+            )
+        })
+        .await
+        .map_err(|_| "the call task failed".to_string())?
+        .map_err(|e| describe(&e))?;
+        Ok(reply["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(message_view)
+            .collect())
+    }
+
+    /// Acknowledge a message returned by [`Self::pull`].
+    pub async fn confirm(&self, message_id: String) -> Result<(), String> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            inner.daemon.call(
+                &inner.role,
+                "/v1/ack",
+                Some(&json!({"message_id": message_id})),
+            )
+        })
+        .await
+        .map_err(|_| "the call task failed".to_string())?
+        .map_err(|e| describe(&e))?;
+        Ok(())
+    }
+}
+
 /// Arguments of the `send` tool.
 #[derive(Deserialize, JsonSchema)]
 pub struct SendArgs {
