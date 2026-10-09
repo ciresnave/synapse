@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Breaking (rc.27): mail store format 2, and `fetch` no longer decodes every held message
+
+`RedbStore` keeps a fixed-width `leases` row per leased message, so `fetch` skips the messages it must
+withhold without JSON-decoding their metadata. On a role of 10 000 messages with 5 000 leased, `fetch(max=1)`
+fell from p50 9.8 ms to 5.2 ms (release build, one Windows laptop, 1 KiB bodies; `tests/mailbox_fetch_cost.rs`).
+**This is not a fix of the cost's growth.** The slice's own bar was "within 2x of the small case", and it is not
+met: 5.2 ms is 2.4x the 1k case (2.1 ms), because `fetch` still walks every `META` and `leases` key in the role.
+`fetch(max=1)` p50, half the role leased: 1k 2.9 -> 2.1 ms; 5k 6.8 -> 3.5 ms; 10k 9.8 -> 5.2 ms. A `READY` table
+would remove the rest; it is tracked as a follow-up, to be done only if the M9 soak shows a need.
+
+**The database file changes and cannot be downgraded.** The first open by this version rebuilds `leases` from the
+existing rows and stamps format 2, all in one write transaction (a crash leaves the old file untouched and the next
+open starts again). A store stamped with a newer format is refused with an error. rc.26 and earlier do not read the
+stamp: opening a migrated file with them would leave `leases` stale, so do not. The wire protocol and the HTTP API
+are unchanged.
+
 ### Added (rc.25): `synapse-claude-channel`, the Claude Code channel adapter (M7)
 
 New crate and binary `synapse-claude-channel --role <role> [--home <dir>]`. It serves M6b's tools and, once a

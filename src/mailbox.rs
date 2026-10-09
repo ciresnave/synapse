@@ -637,6 +637,7 @@ pub struct RedbStore {
     db: redb::Database,
     body_writes: std::sync::atomic::AtomicU64,
     body_reads: std::sync::atomic::AtomicU64,
+    meta_decodes: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "mailbox-redb")]
@@ -662,6 +663,14 @@ mod redb_tables {
     pub const COUNTERS: TableDefinition<&str, u64> = TableDefinition::new("counters");
     /// `"state"` -> serde_json `RolesState`.
     pub const ROLES: TableDefinition<&str, &[u8]> = TableDefinition::new("roles");
+    /// `(role, seq)` -> `(epoch, until micros)` for each message that holds a lease: a fixed-width
+    /// copy of `Meta::lease`, so `fetch` can tell a held message from a free one without decoding
+    /// its JSON (the fetch-scan slice). `RedbTxn::put` and `remove` keep it equal to `META`.
+    pub const LEASES: TableDefinition<(&str, u64), (u64, i64)> = TableDefinition::new("leases");
+    /// The `COUNTERS` key that stamps the store's format.
+    pub const FORMAT_KEY: &str = "format";
+    /// The format this binary writes. Absent = 1 (rc.26 and earlier: no `LEASES`). 2 = `LEASES`.
+    pub const FORMAT: u64 = 2;
 }
 
 #[cfg(feature = "mailbox-redb")]
@@ -709,12 +718,17 @@ impl RedbStore {
             txn.open_table(COUNTERS)
                 .map_err(|e| store_err("table")(&e))?;
             txn.open_table(ROLES).map_err(|e| store_err("table")(&e))?;
+            txn.open_table(LEASES).map_err(|e| store_err("table")(&e))?;
         }
+        // The migration shares this transaction with the table creation, so a crash anywhere in it
+        // leaves the file exactly as the old binary wrote it, and the next open starts again.
+        migrate(&txn)?;
         txn.commit().map_err(|e| store_err("commit")(&e))?;
         Ok(RedbStore {
             db,
             body_writes: std::sync::atomic::AtomicU64::new(0),
             body_reads: std::sync::atomic::AtomicU64::new(0),
+            meta_decodes: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -728,6 +742,112 @@ impl RedbStore {
     #[must_use]
     pub fn body_reads(&self) -> u64 {
         self.body_reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many `META` rows `fetch`'s scan has JSON-decoded on this handle (a diagnostic: a held message
+    /// must be skipped from its `leases` row without being decoded).
+    #[must_use]
+    pub fn meta_decodes(&self) -> u64 {
+        self.meta_decodes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Bring the store to [`redb_tables::FORMAT`] inside `txn`, which the caller commits: a store with no
+/// stamp (rc.26 and earlier, or a new one) has its `LEASES` rebuilt from `META`; a stamp newer than
+/// this binary knows is refused. Idempotent: at the current format it reads one counter and changes
+/// nothing. Dropping `txn` without committing undoes all of it.
+#[cfg(feature = "mailbox-redb")]
+fn migrate(txn: &redb::WriteTransaction) -> Result<(), StoreError> {
+    use redb_tables::{COUNTERS, FORMAT, FORMAT_KEY, LEASES, META};
+    let stamped = txn
+        .open_table(COUNTERS)
+        .map_err(|e| store_err("counters")(&e))?
+        .get(FORMAT_KEY)
+        .map_err(|e| store_err("counters")(&e))?
+        .map(|g| g.value());
+    match stamped {
+        Some(v) if v > FORMAT => {
+            return Err(StoreError(format!(
+                "mail store is format {v}, newer than this binary understands (format {FORMAT}); \
+                 upgrade synapse, a downgrade is not supported"
+            )));
+        }
+        Some(_) => return Ok(()),
+        None => {}
+    }
+    let mut rows: Vec<((String, u64), (u64, i64))> = Vec::new();
+    {
+        let meta = txn.open_table(META).map_err(|e| store_err("meta")(&e))?;
+        for entry in meta.iter().map_err(|e| store_err("meta")(&e))? {
+            let (k, v) = entry.map_err(|e| store_err("meta")(&e))?;
+            let m: Meta =
+                serde_json::from_slice(v.value()).map_err(|e| store_err("meta decode")(&e))?;
+            if let Some(lease) = m.lease {
+                let (role, seq) = k.value();
+                rows.push(((role.to_string(), seq), (lease.epoch, micros(lease.until))));
+            }
+        }
+    }
+    let mut leases = txn
+        .open_table(LEASES)
+        .map_err(|e| store_err("leases")(&e))?;
+    leases
+        .retain(|_, _| false)
+        .map_err(|e| store_err("leases")(&e))?;
+    for ((role, seq), held) in &rows {
+        leases
+            .insert((role.as_str(), *seq), *held)
+            .map_err(|e| store_err("leases")(&e))?;
+    }
+    drop(leases);
+    let mut counters = txn
+        .open_table(COUNTERS)
+        .map_err(|e| store_err("counters")(&e))?;
+    counters
+        .insert(FORMAT_KEY, FORMAT)
+        .map_err(|e| store_err("counters")(&e))?;
+    #[cfg(test)]
+    if FAIL_AFTER_REBUILD.with(std::cell::Cell::get) {
+        return Err(StoreError("injected failure after the rebuild".into()));
+    }
+    Ok(())
+}
+
+// Test hook: make `migrate` fail on this thread once everything is written but before the commit.
+#[cfg(all(test, feature = "mailbox-redb"))]
+thread_local! {
+    static FAIL_AFTER_REBUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(feature = "mailbox-redb")]
+impl RedbStore {
+    /// How many `leases` rows the store holds (a diagnostic: it must equal the messages with a lease).
+    pub fn held_rows(&self) -> Result<usize, StoreError> {
+        use redb::ReadableDatabase;
+        let txn = self.db.begin_read().map_err(|e| store_err("begin")(&e))?;
+        let t = txn
+            .open_table(redb_tables::LEASES)
+            .map_err(|e| store_err("leases")(&e))?;
+        let mut n = 0usize;
+        for entry in t.iter().map_err(|e| store_err("leases")(&e))? {
+            entry.map_err(|e| store_err("leases")(&e))?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// The store's format stamp, if any.
+    pub fn format(&self) -> Result<Option<u64>, StoreError> {
+        use redb::ReadableDatabase;
+        let txn = self.db.begin_read().map_err(|e| store_err("begin")(&e))?;
+        let t = txn
+            .open_table(redb_tables::COUNTERS)
+            .map_err(|e| store_err("counters")(&e))?;
+        let got = t
+            .get(redb_tables::FORMAT_KEY)
+            .map_err(|e| store_err("counters")(&e))?
+            .map(|g| g.value());
+        Ok(got)
     }
 }
 
@@ -796,6 +916,125 @@ mod redb_create_tests {
     }
 }
 
+/// The migration is one write transaction: a process that dies after rebuilding `leases` but before
+/// the commit (simulated by dropping the transaction, which is what `mailbox_crash.rs` shows a real
+/// abort amounts to) leaves the file as rc.26 wrote it, and the next open migrates it in full.
+#[cfg(all(test, feature = "mailbox-redb"))]
+mod redb_migration_tests {
+    use super::*;
+    use redb::ReadableDatabase;
+
+    fn counts(path: &std::path::Path) -> (usize, Option<u64>) {
+        let db = redb::Database::open(path).unwrap();
+        let txn = db.begin_read().unwrap();
+        let held = txn
+            .open_table(redb_tables::LEASES)
+            .unwrap()
+            .iter()
+            .unwrap()
+            .count();
+        let format = txn
+            .open_table(redb_tables::COUNTERS)
+            .unwrap()
+            .get(redb_tables::FORMAT_KEY)
+            .unwrap()
+            .map(|g| g.value());
+        (held, format)
+    }
+
+    fn rc26_with_one_lease(path: &std::path::Path) {
+        let store = RedbStore::open(path).unwrap();
+        let at = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        store
+            .write(&mut |txn| {
+                txn.put(
+                    "lane@acct",
+                    Stored {
+                        envelope: Envelope {
+                            message_id: "m0".into(),
+                            to: "lane@acct".into(),
+                            from: "peer@acct".into(),
+                            body: b"x".to_vec(),
+                        },
+                        seq: 1,
+                        enqueued_at: at,
+                        lease: Some(Lease {
+                            epoch: 1,
+                            until: at,
+                        }),
+                        attempts: 1,
+                    },
+                )
+                .map_err(MailError::Store)
+            })
+            .unwrap();
+        drop(store);
+        let db = redb::Database::open(path).unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(redb_tables::LEASES)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        txn.open_table(redb_tables::COUNTERS)
+            .unwrap()
+            .remove(redb_tables::FORMAT_KEY)
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn a_migration_that_dies_before_commit_changes_nothing_and_reruns_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mailbox.redb");
+        rc26_with_one_lease(&path);
+        assert_eq!(counts(&path), (0, None), "setup: an rc.26-shaped file");
+
+        {
+            let db = redb::Database::open(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            migrate(&txn).unwrap();
+            // The process dies here: no commit.
+            drop(txn);
+        }
+        assert_eq!(
+            counts(&path),
+            (0, None),
+            "an uncommitted migration left a trace"
+        );
+
+        let store = RedbStore::open(&path).expect("reopen migrates");
+        assert_eq!(store.held_rows().unwrap(), 1);
+        assert_eq!(store.format().unwrap(), Some(redb_tables::FORMAT));
+        drop(store);
+
+        // Control: the harness can tell a committed migration from an aborted one.
+        assert_eq!(counts(&path), (1, Some(redb_tables::FORMAT)));
+    }
+
+    /// The same, through `RedbStore::open`: a migration that fails after writing everything must
+    /// leave the file untouched (open must not commit what it could not finish), and a later open
+    /// must succeed.
+    #[test]
+    fn a_failed_migration_in_open_commits_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mailbox.redb");
+        rc26_with_one_lease(&path);
+
+        FAIL_AFTER_REBUILD.with(|f| f.set(true));
+        let failed = RedbStore::open(&path);
+        FAIL_AFTER_REBUILD.with(|f| f.set(false));
+        assert!(
+            failed.is_err(),
+            "the injected failure must reach the caller"
+        );
+        drop(failed);
+        assert_eq!(counts(&path), (0, None), "a failed migration left a trace");
+
+        let store = RedbStore::open(&path).expect("the next open migrates");
+        assert_eq!(store.held_rows().unwrap(), 1);
+    }
+}
+
 #[cfg(feature = "mailbox-redb")]
 impl MailStore for RedbStore {
     fn write(
@@ -811,6 +1050,7 @@ impl MailStore for RedbStore {
                 txn: &txn,
                 body_writes: &self.body_writes,
                 body_reads: &self.body_reads,
+                meta_decodes: &self.meta_decodes,
             };
             f(&mut view)
         };
@@ -832,6 +1072,7 @@ struct RedbTxn<'a> {
     txn: &'a redb::WriteTransaction,
     body_writes: &'a std::sync::atomic::AtomicU64,
     body_reads: &'a std::sync::atomic::AtomicU64,
+    meta_decodes: &'a std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "mailbox-redb")]
@@ -973,6 +1214,27 @@ impl MailTxn for RedbTxn<'_> {
         now: DateTime<Utc>,
         visit: &mut dyn FnMut(&Stored) -> bool,
     ) -> Result<(), StoreError> {
+        // Which messages `fetch` must withhold, from the fixed-width LEASES rows alone: held by this
+        // epoch and not yet expired. Anything else is a candidate, and only candidates are decoded.
+        let withheld: std::collections::HashSet<u64> = {
+            let leases = self
+                .txn
+                .open_table(redb_tables::LEASES)
+                .map_err(|e| store_err("leases")(&e))?;
+            let range = leases
+                .range((role, 0u64)..=(role, u64::MAX))
+                .map_err(|e| store_err("leases")(&e))?;
+            let now = micros(now);
+            let mut held = std::collections::HashSet::new();
+            for entry in range {
+                let (k, v) = entry.map_err(|e| store_err("leases")(&e))?;
+                let (held_epoch, until) = v.value();
+                if held_epoch == epoch && until > now {
+                    held.insert(k.value().1);
+                }
+            }
+            held
+        };
         let t = self
             .txn
             .open_table(redb_tables::META)
@@ -982,8 +1244,16 @@ impl MailTxn for RedbTxn<'_> {
             .map_err(|e| store_err("meta")(&e))?;
         for entry in range {
             let (k, v) = entry.map_err(|e| store_err("meta")(&e))?;
+            if withheld.contains(&k.value().1) {
+                continue;
+            }
+            self.meta_decodes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let meta: Meta =
                 serde_json::from_slice(v.value()).map_err(|e| store_err("meta decode")(&e))?;
+            // The authority is still the decoded lease: a LEASES row can only be missing or
+            // stale if some other binary wrote this file, and this keeps that from handing out
+            // a held message.
             if !is_free(meta.lease.as_ref(), epoch, now) {
                 continue;
             }
@@ -1052,6 +1322,21 @@ impl MailTxn for RedbTxn<'_> {
             t.insert((role, seq), raw.as_slice())
                 .map_err(|e| store_err("meta")(&e))?;
         }
+        {
+            let mut t = self
+                .txn
+                .open_table(redb_tables::LEASES)
+                .map_err(|e| store_err("leases")(&e))?;
+            match &stored.lease {
+                Some(lease) => {
+                    t.insert((role, seq), (lease.epoch, micros(lease.until)))
+                        .map_err(|e| store_err("leases")(&e))?;
+                }
+                None => {
+                    t.remove((role, seq)).map_err(|e| store_err("leases")(&e))?;
+                }
+            }
+        }
         if existing.is_none() {
             {
                 let mut t = self
@@ -1087,6 +1372,13 @@ impl MailTxn for RedbTxn<'_> {
                 .open_table(redb_tables::META)
                 .map_err(|e| store_err("meta")(&e))?;
             t.remove((role, seq)).map_err(|e| store_err("meta")(&e))?;
+        }
+        {
+            let mut t = self
+                .txn
+                .open_table(redb_tables::LEASES)
+                .map_err(|e| store_err("leases")(&e))?;
+            t.remove((role, seq)).map_err(|e| store_err("leases")(&e))?;
         }
         {
             let mut t = self
