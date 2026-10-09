@@ -33,7 +33,7 @@ So today a second machine cannot reach the mailbox at all, by design.
 | Participant | Where | How it would join |
 |---|---|---|
 | PM session | laptop | the existing loopback path (CLI / `synapse-claude-channel`) |
-| Claude Code session | desktop 192.168.4.23 | `synapse-claude-channel` pointed at the laptop's daemon, or its own daemon plus a peer link (see §4) |
+| Claude Code session | desktop 192.168.4.23 | `synapse-claude-channel` against the laptop's daemon (needs option A, and a client change: today `synapse-client` finds a daemon only through the announce file in a local home), or its own daemon plus a peer link (option B, §4) |
 | Qwen over HTTP | either | through a **harness that speaks the Synapse client** (see §5), never raw |
 
 ## 3. Option A: the laptop daemon listens on the LAN (a "hub")
@@ -45,7 +45,8 @@ One daemon, bound to a LAN address, with per-client credentials.
    the default; the `Host` check becomes "the configured names", not just `127.0.0.1`).
 2. **Transport security.** Today the bearer travels over plain loopback HTTP. On a LAN it must not.
    TLS (rustls, which is already in the tree for QUIC) with a certificate the clients pin, or the
-   health-proof challenge extended to be the channel binding. Plain HTTP on a LAN is a non-starter.
+   health-proof challenge extended to be the channel binding (the proof is keyed by the instance id, which
+   today only the owner-only announce file holds, so a remote client would need it distributed). Plain HTTP on a LAN is a non-starter.
 3. **Per-client credentials.** Today there is one account key, so "per client" has to be defined. The
    smallest honest version: the account key issues each remote machine its own **role certificates**
    (agent certificates, f1, already exist) with a short validity and a coarse permission set; the
@@ -58,7 +59,10 @@ One daemon, bound to a LAN address, with per-client credentials.
    size and connection count before reading anything; (2) per-source-address budget *before* the
    per-claimed-identity budget that exists now (today's `claim` budget is keyed by the claimed id, which
    an attacker chooses, plus one global backstop); (3) **write the audit line before any work that could fail or be slow**, so a
-   request that dies midway still leaves a record; (4) only then verify. The current limiter delays
+   request that dies midway still leaves a record. This is a change, not today's behaviour: the emitter
+   writes at most one line per kind and surface per second (the rest are counted and ride on the next
+   line), and over-budget events are written only once the delay applies, so the audit-first order needs
+   the emitter changed or exempted for this surface; (4) only then verify. The current limiter delays
    failures and never locks; that stays, because a lockout is a denial-of-service lever once strangers
    can reach the port.
 5. `security-events.jsonl` gains the remote address (sanitized like the claimed id already is).
