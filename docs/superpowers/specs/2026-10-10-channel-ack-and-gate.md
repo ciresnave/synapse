@@ -44,6 +44,12 @@ the first accepted channel event. If the first request does not come before regi
 changes or is dropped (the ack in 1 is the correctness fix; the gate only avoids a wasted push). I stop
 and ask rather than guess a delay.
 
+> **2026-10-10 update (implementation PR, rc.32): the readiness gate (section 4) is DEFERRED, not shipped.**
+> Sections 1-3 shipped. The wire log (Claude Code 2.1.296 via `tee_mcp`, n=1, rc.29 adapter) read
+> `initialize`, result, `notifications/initialized`, `tools/list`, result, then a channel event that was
+> shown. It does not test an event racing registration, so the gate stays unproven; the c7 re-test (queued
+> while down, then relaunch) with the new adapter decides whether to build it.
+
 ## What this does not fix
 
 - A model that never calls `ack` leaves mail pending forever (bounded push count, 3). That is visible, not
