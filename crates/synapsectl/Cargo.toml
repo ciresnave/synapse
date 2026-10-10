@@ -2,7 +2,7 @@
 name = "synapsectl"
 version.workspace = true
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "The `synapse` command line: a plain adapter for any agent or person (M2: identity; M5b: mail over synapsed, through `synapse-client`)."
 license = "MIT OR Apache-2.0"
@@ -13,9 +13,9 @@ name = "synapse"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.30" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.30" }
-synapse-client = { path = "../synapse-client", version = "6.0.0-rc.30" }
+synapse = { path = "../..", version = "6.0.0-rc.31" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.31" }
+synapse-client = { path = "../synapse-client", version = "6.0.0-rc.31" }
 clap = { version = "4.5.41", features = ["derive", "env"] }
 chrono = "0.4"
 serde_json = "1.0"

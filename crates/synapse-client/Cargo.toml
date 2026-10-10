@@ -2,15 +2,15 @@
 name = "synapse-client"
 version.workspace = true
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "The blocking client for `synapsed` (find the daemon, prove it, claim a role, keep one session), shared by the CLI and the MCP adapters. No MCP, no CLI."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ciresnave/synapse"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.30" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.30" }
+synapse = { path = "../..", version = "6.0.0-rc.31" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.31" }
 chrono = "0.4"
 # Loopback HTTP only: no TLS stack and no system proxy (board 104: no new non-Rust deps).
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json"] }

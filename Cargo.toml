@@ -3,13 +3,13 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.30"
+version = "6.0.0-rc.31"
 
 [package]
 name = "synapse"
 version.workspace = true
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "Neural Communication Network with Federated Identity"
 license = "MIT OR Apache-2.0"
@@ -137,11 +137,12 @@ redis = { version = "0.32.4", features = ["tokio-comp"], optional = true }
 
 # Authentication framework.
 # 0.3.0 pulled reqwest 0.11 -> hyper 0.14 -> h2 0.3.27 (RUSTSEC-2026-0258, no fix on the 0.3 line)
-# and rustls-pemfile 1.0.4 (RUSTSEC-2025-0134, unmaintained). 0.5.0-rc26, the newest PUBLISHED
-# release, resolves h2 0.4.x and reqwest 0.12/0.13 only. The feature names below exist in it.
+# and rustls-pemfile 1.0.4 (RUSTSEC-2025-0134, unmaintained). 0.5.0-rc26 fixed that but was YANKED
+# on 2026-10-09 with every later 0.5 rc; 0.6.0-rc42, the newest PUBLISHED release on 2026-10-10,
+# resolves h2 0.4.x and reqwest 0.12/0.13 only and needs Rust 1.95. The feature names below exist in it.
 # (The old "config-management", "enterprise-features" and "token-to-profile" never existed in any
 # published version; cargo rejects unknown features at resolution time, so they must stay out.)
-auth-framework = { version = "0.5.0-rc26", optional = true, features = [
+auth-framework = { version = "0.6.0-rc42", optional = true, features = [
     "oauth-device-flows",
     "enhanced-device-flow",
 ] }

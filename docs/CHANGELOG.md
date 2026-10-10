@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Breaking (rc.31): dependency `auth-framework` 0.5.0-rc26 -> 0.6.0-rc42; minimum Rust 1.89 -> 1.95
+
+`auth-framework` 0.5.0-rc26 and every later 0.5 candidate were yanked on 2026-10-09, so `main` no longer
+resolved. `0.6.0-rc42` is the newest published release; the `auth` feature set is unchanged
+(`oauth-device-flows`, `enhanced-device-flow`). **Breaking:** that release declares `rust-version = "1.95"`,
+so every `synapse*` crate's `rust-version` is now 1.95 (was 1.89); a toolchain older than 1.95 is refused by
+cargo for every crate here. No code change was needed: the workspace tests pass (612 passed, 0 failed, 3 ignored,
+`--features auth`), as do clippy, fmt and the SPDX gate. No wire or store change.
+
 ### Docs (rc.30): soak procedure corrected, phase-1 live-push result
 
 The two-channel development-channels dialog reads `Channels: server:claude-peers, server:synapse` (comma and
