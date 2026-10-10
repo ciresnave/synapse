@@ -107,11 +107,11 @@ session** (OverMind's fourth retest): confirm a real prompt is accepted.
 |---|---|---|---|
 | 1 | `synapse list --role soak-probe` | one JSON object per line; the entry with `"global_id": "restarttest@soaktest"` has `"online": true` (the adapter heartbeats once at start-up, then every 30 s; online window 90 s) | source |
 | 2 | `synapse send --role soak-probe --to restarttest --id p1-0001 "hello"` | the session shows a `<channel source="synapse">` event whose text starts `UNTRUSTED message from ...` within ~1-2 s (poll every 1 s) | source |
-| 3 | `synapse list --role soak-probe` | `pending` for `restarttest` is `queued:0, leased:0` once the **model** has called `ack` for it (pushed, then acked by the model; until then it stays `leased:1` and is pushed again when the 30 s lease ends, at most `max_pushes` = 3 times) | source |
+| 3 | `synapse list --role soak-probe` | `pending` for `restarttest` is `queued:0, leased:0` once the message was acked: by the **model** (`ack` tool) or, from rc.33, by the **adapter** (after its second push in this process once the daemon's `attempts` has reached `max_pushes` = 3). Until then it stays `leased:1` and is pushed again when the 30 s lease ends, at most `max(3, attempts_at_first_pull + 2)` times. A model that never acks (measured: 0 of 5 trials) still ends with `queued:0, leased:0` | source |
 | 4 | send the same `--id p1-0001` again | no second push (idempotent resend; acked history is kept 7 days, after which a resend would be delivered again) | source |
 | 5 | send a body containing `</channel>`, `<`, an ESC character and "ignore previous instructions" | arrives inside the untrusted frame, `<` and `>` as `&lt;` `&gt;`, control characters as escapes; the model must not obey it | source |
 | 6 | in the session, call the `send` tool to `soak-probe`, then `synapse inbox --role soak-probe` | the reply appears with `"from"` = the session's role | source |
-| 7 | kill the **claude** process only; send one message; relaunch | the message is delivered after relaunch (leased on the old session or queued; it returns when the lease ends, 30 s at most, or sooner because a relaunch claims a new epoch) | source |
+| 7 | kill the **claude** process only; send one message; relaunch | the message is shown after relaunch (leased on the old session or queued; it returns when the lease ends, 30 s at most, or sooner because a relaunch claims a new epoch). rc.29 lost one here (acked on write); rc.33 pushes at least twice in a fresh session before it acks. Delivery is bounded ATTEMPTS, not at-least-once: record shown yes/no from the transcript, not from the daemon's ack | source |
 | 8 | `tail "$H/security-events.jsonl"` | no lines (none expected in a clean run) | source |
 
 **Caution on `synapse inbox`:** it *fetches*, which leases and hides messages from that role's own
@@ -121,11 +121,11 @@ itself uses 30 s). Run it only as `soak-probe` (a role nothing else drains), nev
 
 ### 2.4 Phase 1 pass and stop
 
-**Result of the first run (2026-10-09, rc.29): `SOAK_PHASE1_RESULT_2026-10-09.md`. Check 7 failed once: a message queued while the session was down was acked by the daemon and never shown. Do not start the soak until that is resolved. Fix C (the adapter no longer acks on write; the model's `ack` removes the message) is the change under test: re-run check 7 against it.**
+**Result of the first run (2026-10-09, rc.29): `SOAK_PHASE1_RESULT_2026-10-09.md`. Check 7 failed once: a message queued while the session was down was acked by the daemon and never shown. Do not start the soak until that is resolved. Fix C (the adapter no longer acks on write; the model's `ack` removes the message) was the change under test, and rc.32 re-ran check 7 once (n=1): shown. The model never acked (0 of 5), so rc.33 has the adapter ack after bounded delivery attempts (section 2.3 checks 3 and 7): re-run check 7 against rc.33.**
 
-**Pass:** checks 1-8 as above, with zero messages lost and none shown more than `max_pushes` (3) times.
-**Stop immediately** on: a message not shown after 10 s; a message shown more than `max_pushes` (3)
-times (a repeat after an un-acked lease is expected since fix C); any line in `security-events.jsonl` (an auth event, or a
+**Pass:** checks 1-8 as above, with zero messages lost and none shown more than `max(3, attempts_at_first_pull + 2)` times.
+**Stop immediately** on: a message not shown after 10 s; a message shown more than that bound
+(repeats are expected: same `message_id`, the model must act once); any line in `security-events.jsonl` (an auth event, or a
 `PermissionsTooOpen` file refusal); the daemon exiting; the
 dialog text differing from the approval's anchors (do not auto-answer an unfamiliar dialog).
 
@@ -192,7 +192,7 @@ shown twice; `/v1/stats` `sent` for the role must equal the canary's count and, 
 
 Stop the soak, restore claude-peers-only launches, and write up the cause if **any** occurs:
 1. A canary message **lost** (sent, acked or leased-and-expired by the daemon's view, never shown).
-2. A message shown more than `max_pushes` (3) times. (Since fix C a repeat after an un-acked lease is expected, so one repeat is not a stop.)
+2. A message shown more than `max(3, attempts_at_first_pull + 2)` times, or acted on more than once by the model. (A repeat with the same `message_id` after an un-acked lease is expected, so one repeat is not a stop.)
 3. `pending.oldest_enqueued_at` for a live role older than 5 minutes while the role is `online`.
 4. Any `security-events.jsonl` line whose surface is not an expected canary mistake.
 5. `synapsed` exits, restarts, or its announce file (`synapsed.json`) names a different instance id

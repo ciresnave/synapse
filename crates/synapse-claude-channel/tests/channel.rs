@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The M7 channel adapter against a real `synapsed`: the advertised capabilities and protocol cap
-//! on the wire, a pushed message left leased until the model acks it, redelivery, the push cap, and untrusted framing.
+//! on the wire, a pushed message left leased until the model or the adapter acks it, redelivery, the
+//! adapter's ack after bounded attempts, and untrusted framing.
 //!
 //! The daemon is a real `synapsed` process (the client refuses an in-process one). Tests bind
 //! loopback ports, so CireSnave may see a firewall prompt for the new test executable.
@@ -233,9 +234,10 @@ async fn discover_is_rejected_and_initialize_negotiates_2025_11_25_with_the_chan
         "{init}"
     );
     assert!(
-        instructions.contains("you do not ack arrives again"),
+        instructions.contains("with the same meta.message_id"),
         "{init}"
     );
+    assert!(instructions.contains("act on it ONCE"), "{init}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -407,70 +409,104 @@ fn flaky(fail: usize) -> Flaky {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_message_pushed_max_pushes_times_stays_pending_and_does_not_hide_newer_mail() {
+async fn an_unacked_message_is_acked_by_the_adapter_at_its_third_attempt_with_the_same_id_each_time()
+ {
     let home = Home::new();
     let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
     let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
-    // batch = 1: the capped message must not take the only slot of every pull.
     let config = ChannelConfig {
         lease_secs: 5,
-        batch: 1,
-        max_pushes: 2,
+        max_pushes: 3,
         ..quick()
     };
     let (notifier, ledger) = (flaky(0), PushLedger::default());
-    send(&alice, "bob", "never acked").await;
+    send(&alice, "bob", "the model never acks this").await;
 
-    for expected in [1, 1, 0] {
+    for _ in 0..3 {
+        assert_eq!(
+            push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
+            1
+        );
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+    }
+    {
+        let sent = notifier.sent.lock().unwrap();
+        assert_eq!(sent.len(), 3, "pushed {} times", sent.len());
+        let ids: Vec<&str> = sent
+            .iter()
+            .map(|p| p["meta"]["message_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.iter().all(|i| *i == ids[0]), "ids differ: {ids:?}");
+    }
+    // The adapter acked it after the third push: nothing comes back when the lease ends.
+    // The lease from the last push has run out, so a message still pending would be fetched now.
+    assert!(bob.pull(10, 5).await.unwrap().is_empty(), "still pending");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_whose_leases_earlier_sessions_spent_is_pushed_twice_before_the_adapter_acks_it()
+{
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    let config = ChannelConfig {
+        lease_secs: 5,
+        max_pushes: 3,
+        ..quick()
+    };
+    send(&alice, "bob", "outlived two sessions").await;
+
+    // Two earlier sessions leased it and went away: the daemon counts attempts 1 and 2.
+    for expected in [1, 2] {
+        let got = bob.pull(10, 5).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["attempts"], expected, "the daemon's attempts count");
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+    }
+
+    // A new process (empty ledger) reaches attempt 3 at its first pull, but one push proves
+    // nothing (the c7 case: the client may not be registered yet), so it pushes twice.
+    let (notifier, ledger) = (flaky(0), PushLedger::default());
+    assert_eq!(
+        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
+        1
+    );
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert_eq!(
+        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
+        1
+    );
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert_eq!(notifier.sent.lock().unwrap().len(), 2);
+    // The lease from the last push has run out, so a message still pending would be fetched now.
+    assert!(bob.pull(10, 5).await.unwrap().is_empty(), "still pending");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_write_does_not_count_toward_the_two_pushes_the_ack_needs() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    let config = ChannelConfig {
+        lease_secs: 5,
+        max_pushes: 2,
+        ..quick()
+    };
+    let (notifier, ledger) = (flaky(1), PushLedger::default());
+    send(&alice, "bob", "second try").await;
+
+    // Lease 1: the write fails. Lease 2: one write succeeded, so the message is NOT acked yet even
+    // though the daemon's attempts has reached 2. Lease 3: the second success acks it.
+    for expected in [0, 1, 1] {
         assert_eq!(
             push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
             expected
         );
         tokio::time::sleep(Duration::from_millis(5500)).await;
     }
-    assert_eq!(
-        notifier.sent.lock().unwrap().len(),
-        2,
-        "pushed past the cap"
-    );
-
-    // Still pending in the daemon (not dropped): fetchable once the lease is out.
-    send(&alice, "bob", "newer").await;
-    assert_eq!(
-        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
-        1
-    );
-    let sent = notifier.sent.lock().unwrap();
-    assert!(
-        sent[2]["content"].as_str().unwrap().contains("newer"),
-        "the capped message hid newer mail: {:?}",
-        sent[2]
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_write_does_not_count_toward_max_pushes() {
-    let home = Home::new();
-    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
-    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
-    let config = ChannelConfig {
-        lease_secs: 5,
-        max_pushes: 1,
-        ..quick()
-    };
-    let (notifier, ledger) = (flaky(1), PushLedger::default());
-    send(&alice, "bob", "second try").await;
-
-    assert_eq!(
-        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
-        0
-    );
-    tokio::time::sleep(Duration::from_millis(5500)).await;
-    // The write failed, so the cap of one is still unspent.
-    assert_eq!(
-        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
-        1
-    );
+    assert_eq!(notifier.sent.lock().unwrap().len(), 2);
+    // The lease from the last push has run out, so a message still pending would be fetched now.
+    assert!(bob.pull(10, 5).await.unwrap().is_empty(), "still pending");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
