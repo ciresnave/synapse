@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking (rc.33): the adapter acks a message itself after bounded delivery attempts
+
+**What this is: bounded delivery ATTEMPTS. Claude Code gives no confirmation that an event was shown,
+so this is NOT at-least-once.** Measured on the rc.32 adapter (Claude Code 2.1.296, claude-sonnet-5-5,
+n=5 unprimed plain messages, one wording, 2026-10-10): every message was shown and pushed 3 times, the
+model called `ack` 0 times, and an unacked message was redelivered to each new session with the adapter's
+in-memory push count reset. rc.33 acks after a SUCCESSFUL write when the daemon's per-message `attempts`
+is at least `max_pushes` (3) AND this process has pushed that `message_id` at least twice; the `ack` tool
+stays as an early removal. Pushes per message across sessions are at most
+`max(max_pushes, attempts_at_first_pull + 2)`, not 3. **Loss window:** a message is lost only if every
+push in that bound was dropped (~`lease_secs`, 30 s, apart), or if its daemon `attempts` was already spent
+by sessions that never wrote it (`attempts` counts leases, not writes; a successful write always
+precedes the removal). The c7 case (a push before the client registers the channel, rc.29 lost one, n=1)
+is the loss this covers. The same message now arrives up to that many times with the same
+`meta.message_id`; the server instructions say to act on it ONCE and ignore repeats. **Breaking:**
+`ChannelConfig::max_pushes` now means the daemon-attempt count at which the adapter acks (a message is no
+longer left pending past it), the new public `should_ack` is the rule, and the instruction text changed.
+Also removed: the batch widening for capped messages and `PushLedger`'s capped count (a message is no
+longer left pending past the cap, so nothing lingers to hide newer mail). Known limit: if the daemon
+persistently refuses the adapter's ack (it is logged), the message stays pending and is pushed again every
+lease, so the stated bound holds only while the ack succeeds; a message whose writes always fail is never
+acked and is re-leased. The ack tool and the adapter's ack may both fire; the daemon's ack is idempotent
+(`already_acked`). No daemon, wire or store change. Alert delivery is still only a seam
+(`AlertTransport` has no implementation, board 131).
+
 ### Breaking (rc.32): the channel adapter acks on the model's word, not on the write (fix C)
+
+*Superseded by rc.33 above: models did not ack (0 of 5), and "at-least-once" below is not what ships.*
 
 `synapse-claude-channel` no longer acks a message when the channel notification is written: a write says
 the bytes left the adapter, not that Claude Code showed the event (soak check 7: a message was acked and

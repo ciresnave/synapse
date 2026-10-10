@@ -39,6 +39,11 @@ once; `touch` after restore.
 
 ## Task 4: bounded re-push (spec tests 4-5)
 
+> **Superseded in rc.33** (spec "rc.33 amendment"): the process-local cap, the batch widening
+> (`ledger.capped()`) and "stays pending past the cap" were removed. The adapter now acks a message
+> itself after a successful write once the daemon's `attempts` >= `max_pushes` AND this process has
+> pushed it twice. What follows is the rc.32 design, kept as history.
+
 - `ChannelConfig.max_pushes: u32` (default 3). Adding a public field is a breaking change to a struct built
   with literals in tests/main: note it, update every literal (`grep -rn "ChannelConfig {"` over `git ls-files`).
 - A `PushLedger` (`Mutex<HashMap<String, u32>>`, in memory) passed to `push_once` and owned by the loop.
