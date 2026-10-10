@@ -35,7 +35,7 @@ conditions. Cutover (dropping `server:claude-peers`) is **not** part of either p
    no prefix match). Phase 1 passes `server:synapse`, which no record covers yet, so the dialog
    ("WARNING: Loading development channels") will need a human, or a new record in
    `ciresnave/ciresnave/.overmind/lane-restart/approvals/` (the OverMind lane's, D2). Phase 2 needs
-   the second record, `server:claude-peers,server:synapse`.
+   the second record, `server:claude-peers, server:synapse`.
 4. **Back up before any first open of an existing home.** rc.27 migrates `mailbox.redb` to store
    format 2 on first open, **one way**; rc.26 and earlier must not open it afterwards. Phase 1 uses a
    fresh home, so it is exempt. Phase 2 on a home an older daemon has used: copy the home directory
@@ -121,6 +121,8 @@ itself uses 30 s). Run it only as `soak-probe` (a role nothing else drains), nev
 
 ### 2.4 Phase 1 pass and stop
 
+**Result of the first run (2026-10-09, rc.29): `SOAK_PHASE1_RESULT_2026-10-09.md`. Check 7 failed once: a message queued while the session was down was acked by the daemon and never shown. Do not start the soak until that is resolved.**
+
 **Pass:** checks 1-8 as above, with zero messages lost and none shown twice except by a failed ack.
 **Stop immediately** on: a message not shown after 10 s; a message shown more than once with no
 `ack failed` line in the adapter's stderr; any line in `security-events.jsonl` (an auth event, or a
@@ -131,7 +133,7 @@ dialog text differing from the approval's anchors (do not auto-answer an unfamil
 
 Owner: the PM with OverMind (launch flags are `lane-restart`'s). This lane's part is below.
 
-1. Approval record `Channels: server:claude-peers,server:synapse` merged (D2). Without it every lane's
+1. Approval record `Channels: server:claude-peers, server:synapse` merged (D2). Without it every lane's
    relaunch stops at a dialog nobody answers.
 2. Real home: take the backup (precondition 4), then start `synapsed` on the default address once, by a
    PID you record. Never `taskkill /IM synapsed.exe` (it kills other lanes' daemons).

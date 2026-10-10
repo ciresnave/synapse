@@ -167,7 +167,7 @@ that share those names.
 - **D2. Channel server name and approval.** Recommended: server name **`synapse`**. That needs two
   new approval records:
   - `Channels: server:synapse`, for after cutover;
-  - `Channels: server:claude-peers,server:synapse`, for the side-by-side weeks.
+  - `Channels: server:claude-peers, server:synapse`, for the side-by-side weeks.
   - This follows the exact-match rule in lane-restart `handlers.rs`, which deliberately refuses a
     prefix match.
   - *Blocks M7 and M9.* M1 also needs a one-off approval for the disposable `restarttest` lane.

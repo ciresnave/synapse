@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
+### Docs (rc.30): soak procedure corrected, phase-1 live-push result
+
+The two-channel development-channels dialog reads `Channels: server:claude-peers, server:synapse` (comma and
+space); the procedure and two plans wrote it without the space, and now match. Adds
+`docs/SOAK_PHASE1_RESULT_2026-10-09.md`, the measured phase-1 result. No code changes.
+
 ### Added (rc.29): `GET /v1/stats`, cumulative per-role mail counters
 
 `synapsed` answers `GET /v1/stats` (session token, like `/v1/list`) with `sent`, `acked`, `redelivered` and
