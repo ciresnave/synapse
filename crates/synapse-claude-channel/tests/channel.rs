@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The M7 channel adapter against a real `synapsed`: the advertised capabilities and protocol cap
-//! on the wire, a pushed message acked once, redelivery after a failed write, and untrusted framing.
+//! on the wire, a pushed message left leased until the model acks it, redelivery, the push cap, and untrusted framing.
 //!
 //! The daemon is a real `synapsed` process (the client refuses an in-process one). Tests bind
 //! loopback ports, so CireSnave may see a firewall prompt for the new test executable.
@@ -18,9 +18,11 @@ use rmcp::service::NotificationContext;
 use rmcp::{ClientHandler, RoleClient};
 use serde_json::{Value, json};
 use synapse::keystore::Keystore;
-use synapse_claude_channel::{CHANNEL_METHOD, ChannelConfig, ChannelServer, Notifier, push_once};
+use synapse_claude_channel::{
+    CHANNEL_METHOD, ChannelConfig, ChannelServer, Notifier, PushLedger, push_once,
+};
 use synapse_client::Daemon;
-use synapse_mcp_server::{McpConfig, SendArgs, SynapseMcpServer};
+use synapse_mcp_server::{AckArgs, McpConfig, SendArgs, SynapseMcpServer};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn exe_dir() -> &'static Path {
@@ -104,6 +106,7 @@ fn quick() -> ChannelConfig {
         poll_every: Duration::from_millis(100),
         lease_secs: 30,
         batch: 10,
+        max_pushes: 3,
     }
 }
 
@@ -223,10 +226,20 @@ async fn discover_is_rejected_and_initialize_negotiates_2025_11_25_with_the_chan
             .contains("UNTRUSTED"),
         "{init}"
     );
+    // Fix C: the server tells the model to ack, so a push the model never acks comes back.
+    let instructions = result["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("call the ack tool with its meta.message_id"),
+        "{init}"
+    );
+    assert!(
+        instructions.contains("you do not ack arrives again"),
+        "{init}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sent_message_is_pushed_as_a_notification_and_acked_once() {
+async fn a_pushed_message_stays_leased_until_the_model_acks_it() {
     let home = Home::new();
     let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
     let server = ChannelServer::start(
@@ -259,11 +272,63 @@ async fn a_sent_message_is_pushed_as_a_notification_and_acked_once() {
         Some(true)
     );
 
-    // Acked: not delivered again, and nothing is left to fetch.
-    tokio::time::sleep(Duration::from_millis(6000)).await;
-    assert_eq!(got.0.lock().unwrap().len(), 1, "delivered twice");
+    // The write alone must not remove the message: the model's `ack` does (fix C).
+    let id = pushed[0]["meta"]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    bob.ack(Parameters(AckArgs { message_id: id }))
+        .await
+        .expect("ack tool");
+
+    // Acked by the model: not delivered again, and nothing is left to fetch.
+    tokio::time::sleep(Duration::from_millis(6000)).await;
+    assert_eq!(got.0.lock().unwrap().len(), 1, "delivered after the ack");
     assert!(bob.pull(10, 5).await.unwrap().is_empty(), "not acked");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unacked_push_is_left_leased_and_comes_back_with_the_same_id_after_the_lease() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    let config = ChannelConfig {
+        lease_secs: 5,
+        ..quick()
+    };
+    send(&alice, "bob", "show me").await;
+
+    let notifier = Flaky {
+        fail: 0,
+        seen: AtomicUsize::new(0),
+        sent: Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        push_once(&bob, &notifier, &config, &PushLedger::default())
+            .await
+            .unwrap(),
+        1
+    );
+    let first_id = notifier.sent.lock().unwrap()[0]["meta"]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Pushed but not acked: still held by the lease (not gone, not fetchable yet).
+    assert!(bob.pull(10, 5).await.unwrap().is_empty(), "lease ignored");
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert_eq!(
+        push_once(&bob, &notifier, &config, &PushLedger::default())
+            .await
+            .unwrap(),
+        1
+    );
+    let again = notifier.sent.lock().unwrap()[1]["meta"]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(first_id, again, "redelivery changed the message_id");
 }
 
 /// Fails the first `fail` writes, then counts the successes.
@@ -284,7 +349,7 @@ impl Notifier for Flaky {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_write_is_redelivered_after_the_lease_and_acked_once() {
+async fn a_failed_write_is_redelivered_after_the_lease_and_again_if_unacked() {
     let home = Home::new();
     let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
     let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
@@ -299,18 +364,113 @@ async fn a_failed_write_is_redelivered_after_the_lease_and_acked_once() {
         seen: AtomicUsize::new(0),
         sent: Mutex::new(Vec::new()),
     };
-    assert_eq!(push_once(&bob, &flaky, &config).await.unwrap(), 0);
+    assert_eq!(
+        push_once(&bob, &flaky, &config, &PushLedger::default())
+            .await
+            .unwrap(),
+        0
+    );
     // Still leased: nothing to push yet.
-    assert_eq!(push_once(&bob, &flaky, &config).await.unwrap(), 0);
+    assert_eq!(
+        push_once(&bob, &flaky, &config, &PushLedger::default())
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(flaky.seen.load(Ordering::SeqCst), 1);
 
     tokio::time::sleep(Duration::from_millis(5500)).await;
-    assert_eq!(push_once(&bob, &flaky, &config).await.unwrap(), 1);
+    assert_eq!(
+        push_once(&bob, &flaky, &config, &PushLedger::default())
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(flaky.sent.lock().unwrap().len(), 1);
-    // Acked: gone for good.
+    // Pushed but not acked by the model: it comes back after the lease (fix C), with its id.
     tokio::time::sleep(Duration::from_millis(5500)).await;
-    assert_eq!(push_once(&bob, &flaky, &config).await.unwrap(), 0);
-    assert_eq!(flaky.sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        push_once(&bob, &flaky, &config, &PushLedger::default())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(flaky.sent.lock().unwrap().len(), 2);
+}
+
+fn flaky(fail: usize) -> Flaky {
+    Flaky {
+        fail,
+        seen: AtomicUsize::new(0),
+        sent: Mutex::new(Vec::new()),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_pushed_max_pushes_times_stays_pending_and_does_not_hide_newer_mail() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    // batch = 1: the capped message must not take the only slot of every pull.
+    let config = ChannelConfig {
+        lease_secs: 5,
+        batch: 1,
+        max_pushes: 2,
+        ..quick()
+    };
+    let (notifier, ledger) = (flaky(0), PushLedger::default());
+    send(&alice, "bob", "never acked").await;
+
+    for expected in [1, 1, 0] {
+        assert_eq!(
+            push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
+            expected
+        );
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+    }
+    assert_eq!(
+        notifier.sent.lock().unwrap().len(),
+        2,
+        "pushed past the cap"
+    );
+
+    // Still pending in the daemon (not dropped): fetchable once the lease is out.
+    send(&alice, "bob", "newer").await;
+    assert_eq!(
+        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
+        1
+    );
+    let sent = notifier.sent.lock().unwrap();
+    assert!(
+        sent[2]["content"].as_str().unwrap().contains("newer"),
+        "the capped message hid newer mail: {:?}",
+        sent[2]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_write_does_not_count_toward_max_pushes() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    let config = ChannelConfig {
+        lease_secs: 5,
+        max_pushes: 1,
+        ..quick()
+    };
+    let (notifier, ledger) = (flaky(1), PushLedger::default());
+    send(&alice, "bob", "second try").await;
+
+    assert_eq!(
+        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
+        0
+    );
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    // The write failed, so the cap of one is still unspent.
+    assert_eq!(
+        push_once(&bob, &notifier, &config, &ledger).await.unwrap(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -329,7 +489,12 @@ async fn an_injection_attempt_arrives_inside_the_untrusted_framing_escaped() {
         seen: AtomicUsize::new(0),
         sent: Mutex::new(Vec::new()),
     };
-    assert_eq!(push_once(&bob, &flaky, &quick()).await.unwrap(), 1);
+    assert_eq!(
+        push_once(&bob, &flaky, &quick(), &PushLedger::default())
+            .await
+            .unwrap(),
+        1
+    );
     let sent = flaky.sent.lock().unwrap();
     let content = sent[0]["content"].as_str().unwrap();
     assert!(
@@ -358,7 +523,12 @@ async fn a_body_cannot_close_the_channel_tag() {
         seen: AtomicUsize::new(0),
         sent: Mutex::new(Vec::new()),
     };
-    assert_eq!(push_once(&bob, &flaky, &quick()).await.unwrap(), 1);
+    assert_eq!(
+        push_once(&bob, &flaky, &quick(), &PushLedger::default())
+            .await
+            .unwrap(),
+        1
+    );
     let sent = flaky.sent.lock().unwrap();
     let content = sent[0]["content"].as_str().unwrap();
     assert!(

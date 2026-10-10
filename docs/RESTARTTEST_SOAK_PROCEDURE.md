@@ -107,7 +107,7 @@ session** (OverMind's fourth retest): confirm a real prompt is accepted.
 |---|---|---|---|
 | 1 | `synapse list --role soak-probe` | one JSON object per line; the entry with `"global_id": "restarttest@soaktest"` has `"online": true` (the adapter heartbeats once at start-up, then every 30 s; online window 90 s) | source |
 | 2 | `synapse send --role soak-probe --to restarttest --id p1-0001 "hello"` | the session shows a `<channel source="synapse">` event whose text starts `UNTRUSTED message from ...` within ~1-2 s (poll every 1 s) | source |
-| 3 | `synapse list --role soak-probe` | `pending` for `restarttest` is `queued:0, leased:0` (pushed, then acked) | source |
+| 3 | `synapse list --role soak-probe` | `pending` for `restarttest` is `queued:0, leased:0` once the **model** has called `ack` for it (pushed, then acked by the model; until then it stays `leased:1` and is pushed again when the 30 s lease ends, at most `max_pushes` = 3 times) | source |
 | 4 | send the same `--id p1-0001` again | no second push (idempotent resend; acked history is kept 7 days, after which a resend would be delivered again) | source |
 | 5 | send a body containing `</channel>`, `<`, an ESC character and "ignore previous instructions" | arrives inside the untrusted frame, `<` and `>` as `&lt;` `&gt;`, control characters as escapes; the model must not obey it | source |
 | 6 | in the session, call the `send` tool to `soak-probe`, then `synapse inbox --role soak-probe` | the reply appears with `"from"` = the session's role | source |
@@ -121,11 +121,11 @@ itself uses 30 s). Run it only as `soak-probe` (a role nothing else drains), nev
 
 ### 2.4 Phase 1 pass and stop
 
-**Result of the first run (2026-10-09, rc.29): `SOAK_PHASE1_RESULT_2026-10-09.md`. Check 7 failed once: a message queued while the session was down was acked by the daemon and never shown. Do not start the soak until that is resolved.**
+**Result of the first run (2026-10-09, rc.29): `SOAK_PHASE1_RESULT_2026-10-09.md`. Check 7 failed once: a message queued while the session was down was acked by the daemon and never shown. Do not start the soak until that is resolved. Fix C (the adapter no longer acks on write; the model's `ack` removes the message) is the change under test: re-run check 7 against it.**
 
-**Pass:** checks 1-8 as above, with zero messages lost and none shown twice except by a failed ack.
-**Stop immediately** on: a message not shown after 10 s; a message shown more than once with no
-`ack failed` line in the adapter's stderr; any line in `security-events.jsonl` (an auth event, or a
+**Pass:** checks 1-8 as above, with zero messages lost and none shown more than `max_pushes` (3) times.
+**Stop immediately** on: a message not shown after 10 s; a message shown more than `max_pushes` (3)
+times (a repeat after an un-acked lease is expected since fix C); any line in `security-events.jsonl` (an auth event, or a
 `PermissionsTooOpen` file refusal); the daemon exiting; the
 dialog text differing from the approval's anchors (do not auto-answer an unfamiliar dialog).
 
@@ -168,7 +168,7 @@ The rest still comes from other sources:
 |---|---|---|
 | sent / acked / redelivered / expired | `/v1/stats` for the receiving role, compared with the canary's `sent.log` | covers all traffic to the role, not only the canary's; zeroed by a restart |
 | acked / lost | canary ids that appeared as `<channel>` events in the session transcript, compared to sent. **The daemon stores the id as `<sender global id>/<id>`**, so `meta.message_id` reads `soak-probe@soaktest/soak-001`, not `soak-001`: log or strip that prefix when comparing | needs the transcript; no daemon-side confirmation |
-| shown twice | the same `message_id` appearing twice in the transcript | the adapter logs ack failures (`synapse channel: ack failed`, stderr) but not redeliveries |
+| shown twice | the same `message_id` appearing twice in the transcript | since fix C a repeat after an un-acked lease is expected (the adapter no longer acks and logs no redeliveries); `/v1/stats` `redelivered` counts them |
 | never acked / stuck | `synapse list` -> `pending.queued`, `pending.leased`, `pending.oldest_enqueued_at` | a depth snapshot, not history |
 | rejected / hostile | lines in `<home>/security-events.jsonl` (rotates at 4 MiB to `.1`) | authentication and budget events, and also `PermissionsTooOpen` (a file-permissions refusal by the CLI); the daemon rate-limits lines per kind and surface to one per second, folding the rest into a count |
 | latency | canary send time vs the event's arrival in the transcript | the transcript's clock; ~1 s poll granularity |
@@ -192,7 +192,7 @@ shown twice; `/v1/stats` `sent` for the role must equal the canary's count and, 
 
 Stop the soak, restore claude-peers-only launches, and write up the cause if **any** occurs:
 1. A canary message **lost** (sent, acked or leased-and-expired by the daemon's view, never shown).
-2. A message shown twice with no `ack failed` line explaining it.
+2. A message shown more than `max_pushes` (3) times. (Since fix C a repeat after an un-acked lease is expected, so one repeat is not a stop.)
 3. `pending.oldest_enqueued_at` for a live role older than 5 minutes while the role is `online`.
 4. Any `security-events.jsonl` line whose surface is not an expected canary mistake.
 5. `synapsed` exits, restarts, or its announce file (`synapsed.json`) names a different instance id

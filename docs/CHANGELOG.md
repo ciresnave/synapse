@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking (rc.32): the channel adapter acks on the model's word, not on the write (fix C)
+
+`synapse-claude-channel` no longer acks a message when the channel notification is written: a write says
+the bytes left the adapter, not that Claude Code showed the event (soak check 7: a message was acked and
+never shown, cause not established, `docs/SOAK_PHASE1_RESULT_2026-10-09.md`). A pushed message stays leased until the model calls the `ack`
+tool with the event's `meta.message_id`; otherwise it is pushed again when the lease ends (at-least-once).
+The server instructions now tell the model to ack. **Breaking:** `ChannelConfig` gains `max_pushes`
+(default 3; a message pushed that many times stays pending and is no longer pushed, not dropped), and
+`push_once` takes a `&PushLedger`. Not done here: the readiness gate of the fix-C spec is DEFERRED. The real-client wire log
+(Claude Code 2.1.296 through `tee_mcp`, n=1, rc.29 adapter, 2026-10-10) read: `initialize`, its result,
+`notifications/initialized`, `tools/list`, its result, then a channel event that the session showed. That
+order does not test the racing case (an event arriving before the client registers the channel), so the gate
+is unproven and not shipped; the ack makes a dropped early push recoverable. The c7 re-test (queued while
+down, then relaunch) with this adapter decides it. Batching acks is also not done. Alert delivery is still only a seam (`AlertTransport` has no implementation, board 131).
+
 This file was not maintained between 1.1.0 and the 6.0.0 release candidates. The breaking changes of
 the earlier candidates are recorded in their pull requests (`ciresnave/synapse`), not here.
 
