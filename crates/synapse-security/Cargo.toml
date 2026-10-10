@@ -2,7 +2,7 @@
 name = "synapse-security"
 version.workspace = true
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "Sinks for Synapse security events: owner-only file, stderr, alert seam, fanout (hardening P4)."
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ name = "synapse_security"
 path = "src/lib.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.30" }
+synapse = { path = "../..", version = "6.0.0-rc.31" }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 
