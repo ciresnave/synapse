@@ -1,9 +1,15 @@
 # `restarttest` live push and the M9 soak: the procedure, ready to run on a yes
 
-**Status: PREPARED, NOT RUN.** Nothing below has been executed. Every "expected" line is read from the
-source at `origin/main` 6.0.0-rc.27 (rc.28 carries this document) and is marked *(source)*; where I
-have not read an output's exact text, the line says so rather than guessing. **Do not start any step
-in section 2 or later until CireSnave has approved (board 160).**
+**Status (origin/main 6.0.0-rc.34): phase 1 RUN in part; the soak (phase 2 and the canary in section 4) is
+NOT STARTED, and starting it is CireSnave's call (board 160).** Measured so far, all n=1 and all in the
+disposable `restarttest` session: the live push is shown (rc.29, `SOAK_PHASE1_RESULT_2026-10-09.md`);
+check 7 FAILED on rc.29 (a message queued while the session was down was acked on write and never shown);
+rc.32 showed it (n=1); rc.33 PASSED it (n=1: a message queued while down was pushed 3 times and shown
+2 of 3, because the first push went out before `tools/list` and produced no transcript row; a message
+sent live was pushed and shown 3 of 3; same `message_id` on every repeat; both left pending without a
+model ack). Not measured: a model acting ONCE on repeats when it has a real request, a missing
+`message_id`, a refused adapter ack (#119 to #121), and the moment a message leaves pending. Rows below
+marked *(source)* were read from the source, not observed.
 
 Plan: `docs/superpowers/plans/2026-09-29-claude-peers-replacement.md` (M1, M9, D2) and
 `docs/superpowers/plans/2026-10-08-m6-m7-adapters.md` section 5.
@@ -121,7 +127,7 @@ itself uses 30 s). Run it only as `soak-probe` (a role nothing else drains), nev
 
 ### 2.4 Phase 1 pass and stop
 
-**Result of the first run (2026-10-09, rc.29): `SOAK_PHASE1_RESULT_2026-10-09.md`. Check 7 failed once: a message queued while the session was down was acked by the daemon and never shown. Do not start the soak until that is resolved. Fix C (the adapter no longer acks on write; the model's `ack` removes the message) was the change under test, and rc.32 re-ran check 7 once (n=1): shown. The model never acked (0 of 5), so rc.33 has the adapter ack after bounded delivery attempts (section 2.3 checks 3 and 7): re-run check 7 against rc.33.**
+**Result of the first run (2026-10-09, rc.29): `SOAK_PHASE1_RESULT_2026-10-09.md`. Check 7 failed once: a message queued while the session was down was acked by the daemon and never shown. Do not start the soak until that is resolved. Fix C (the adapter no longer acks on write; the model's `ack` removes the message) was the change under test, and rc.32 re-ran check 7 once (n=1): shown. The model never acked (0 of 5), so rc.33 has the adapter ack after bounded delivery attempts (section 2.3 checks 3 and 7); check 7 re-run against rc.33 (n=1): PASS, see the status line at the top.**
 
 **Pass:** checks 1-8 as above, with zero messages lost and none shown more than `max(3, attempts_at_first_pull + 2)` times.
 **Stop immediately** on: a message not shown after 10 s; a message shown more than that bound
@@ -186,13 +192,14 @@ done
 ```
 Compare at the end: `sent.log` ids minus ids found in the transcript = lost; ids found twice =
 shown twice; `/v1/stats` `sent` for the role must equal the canary's count and, after quiescence, equal
-`acked` with `pending` at `queued:0, leased:0`; `redelivered` explains any message shown twice.
+`acked` with `pending` at `queued:0, leased:0` (this shows the daemon is drained, not that anything was shown: the
+adapter acks after bounded attempts; lost is the transcript comparison above); `redelivered` explains any message shown twice.
 
 ## 5. Stop conditions for the soak (proposed; the PM sets the numbers)
 
 Stop the soak, restore claude-peers-only launches, and write up the cause if **any** occurs:
-1. A canary message **lost** (sent, acked or leased-and-expired by the daemon's view, never shown).
-2. A message shown more than `max(3, attempts_at_first_pull + 2)` times, or acted on more than once by the model. (A repeat with the same `message_id` after an un-acked lease is expected, so one repeat is not a stop.)
+1. A canary message **lost**: its id was sent and **never appears as a `<channel>` event in the session transcript**. Only the transcript decides this. Since rc.33 the adapter acks a message after bounded delivery attempts, so a daemon-side `acked`, `pending` at `queued:0, leased:0`, or `acked == sent` in `/v1/stats` proves nothing about display: a message whose every push was dropped looks exactly like a shown one there. Compare `sent.log` ids with the transcript (strip the `<sender global id>/` prefix).
+2. A message shown more than `max(3, attempts_at_first_pull + 2)` times, or acted on more than once by the model. **Up to 3 shows of one `message_id` is expected** (bounded delivery attempts, section 2.3 check 3; c7 on rc.33 saw 3 of 3 and 2 of 3), so a repeat is not a stop. `attempts_at_first_pull` is the daemon's per-message lease count when this adapter first pulled it, so a message earlier sessions already leased can be pushed up to 2 more times.
 3. `pending.oldest_enqueued_at` for a live role older than 5 minutes while the role is `online`.
 4. Any `security-events.jsonl` line whose surface is not an expected canary mistake.
 5. `synapsed` exits, restarts, or its announce file (`synapsed.json`) names a different instance id

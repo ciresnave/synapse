@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.34): soak procedure status and stop conditions brought up to rc.33
+
+`docs/RESTARTTEST_SOAK_PROCEDURE.md`: the status line no longer says "PREPARED, NOT RUN" (phase 1 was run, c7 measured
+on rc.29 and rc.33, n=1 each; the soak itself is not started). Stop condition 1 now defines "lost" by the session
+transcript alone, because since rc.33 a daemon-side ack or an empty `pending` does not mean shown. Stop condition 2
+states the `max(3, attempts_at_first_pull + 2)` bound and that up to 3 shows of one `message_id` is expected. No code
+changes. Alert delivery is still only a seam (`AlertTransport` has no implementation, board 131).
+
 ### Breaking (rc.33): the adapter acks a message itself after bounded delivery attempts
 
 **What this is: bounded delivery ATTEMPTS. Claude Code gives no confirmation that an event was shown,
