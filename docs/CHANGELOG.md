@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.38): the Docker image builds
+
+The `Build Docker Image` job failed on `COPY Cargo.toml Cargo.lock` (`Cargo.lock` is gitignored) and its Dockerfile was
+stale (rust:1.70, a dummy `src/main.rs` on a workspace, binaries and a `config` directory that no longer exist).
+`Dockerfile` now builds `synapsed`, `synapse` (crate `synapsectl`) and `synapse-claude-channel` from the workspace on
+`rust:1.95-slim-bookworm` and ships them on `debian:bookworm-slim` as a non-root user with `SYNAPSE_HOME` on a volume;
+`.dockerignore` keeps `target` and `.git` out of the context. The workflow now builds the image on pull requests too
+(login and push only off pull requests). The image is `synapsenetwork/synapse` (tags `main`, `sha-<short>`, and the
+version on a `v*` tag). Note: `synapsed` binds loopback only, so a container is reachable only from inside. Not verified:
+that the DockerHub account may push to the `synapsenetwork` namespace. Alert delivery is still only a seam
+(`AlertTransport` has no implementation, board 131).
+
 ### Changed (rc.37): the push loop moves to `synapse-mcp-server` behind a `Renderer`; Claude Code is one renderer
 
 Design note `docs/superpowers/specs/2026-10-12-agent-facing-mcp-adapter.md` sections 2 and 5.3 (PR 3). New

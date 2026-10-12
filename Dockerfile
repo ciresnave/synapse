@@ -1,65 +1,49 @@
-FROM rust:1.70-slim-bullseye as builder
+# syntax=docker/dockerfile:1
+#
+# The Synapse daemon and its clients, built from this workspace.
+#
+# Binaries: `synapsed` (the daemon), `synapse` (the CLI, from the `synapsectl` crate) and
+# `synapse-claude-channel` (the Claude Code adapter). There is no Cargo.lock in the checkout
+# (.gitignore), so dependencies resolve to the newest releases at build time.
+#
+# NOTE: `synapsed` listens on loopback only (it refuses any other address), so a container running it
+# is reachable only from inside that container. The image is for running `synapse` or the adapter
+# against a daemon in the same container, not for publishing a port.
 
-# Install build dependencies
+FROM rust:1.95-slim-bookworm AS builder
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
-    libpq-dev \
-    protobuf-compiler \
+    cmake \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/synapse
-
-# Copy Cargo files first for better layer caching
-COPY Cargo.toml Cargo.lock ./
-
-# Create a dummy main.rs to build dependencies
-RUN mkdir -p src && \
-    echo "fn main() { println!(\"Dummy build\"); }" > src/main.rs && \
-    cargo build --release && \
-    rm -f target/release/deps/synapse*
-
-# Copy the actual source code
 COPY . .
+RUN cargo build --release -p synapsed -p synapsectl -p synapse-claude-channel
 
-# Build the actual binary
-RUN cargo build --release
-
-# Final stage - creates a smaller image
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
-    libpq5 \
-    libssl1.1 \
+    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+COPY --from=builder /usr/src/synapse/target/release/synapsed /usr/local/bin/synapsed
+COPY --from=builder /usr/src/synapse/target/release/synapse /usr/local/bin/synapse
+COPY --from=builder /usr/src/synapse/target/release/synapse-claude-channel /usr/local/bin/synapse-claude-channel
 
-# Copy the binary from the builder stage
-COPY --from=builder /usr/src/synapse/target/release/synapse-router /app/synapse-router
-COPY --from=builder /usr/src/synapse/target/release/synapse-client /app/synapse-client
-COPY --from=builder /usr/src/synapse/config /app/config
-
-# Create a non-root user for security
-RUN useradd -m synapse && \
-    chown -R synapse:synapse /app
-
+RUN useradd --create-home --uid 10001 synapse && \
+    mkdir -p /home/synapse/.local/share/synapse && \
+    chown -R synapse:synapse /home/synapse
 USER synapse
+WORKDIR /home/synapse
 
-# Set environment variables
-ENV RUST_LOG="info"
-ENV DATABASE_URL=""
-ENV PORT="8080"
-ENV CONFIG_PATH="/app/config/production.toml"
+# The store, keys and announce file live here; mount a volume to keep them.
+ENV SYNAPSE_HOME=/home/synapse/.local/share/synapse
+VOLUME ["/home/synapse/.local/share/synapse"]
 
-# Expose ports
-EXPOSE 8080
-EXPOSE 8081/udp
-EXPOSE 8082
-
-# Run the router binary by default
-CMD ["./synapse-router"]
+CMD ["synapsed"]
