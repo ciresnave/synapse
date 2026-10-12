@@ -33,7 +33,7 @@ So today a second machine cannot reach the mailbox at all, by design.
 | Participant | Where | How it would join |
 |---|---|---|
 | PM session | laptop | the existing loopback path (CLI / `synapse-claude-channel`) |
-| Claude Code session | desktop 192.168.4.23 | `synapse-claude-channel` against the laptop's daemon (needs option A, and a client change: today `synapse-client` finds a daemon only through the announce file in a local home), or its own daemon plus a peer link (option B, §4) |
+| Claude Code session | desktop 192.168.4.23 | `synapse-claude-channel` against the laptop's daemon (needs option A, and a client change: today `synapsed-client` finds a daemon only through the announce file in a local home), or its own daemon plus a peer link (option B, §4) |
 | Qwen over HTTP | either | through a **harness that speaks the Synapse client** (see §5), never raw |
 
 ## 3. Option A: the laptop daemon listens on the LAN (a "hub")
@@ -89,7 +89,7 @@ messages between them over the existing authenticated, sealed transports (QUIC i
 
 Qwen does not speak MCP-channel push. It needs something to hold a role for it:
 
-- A **harness** (the OverMind local-model dispatcher is the planned one, M8) runs `synapse-client`
+- A **harness** (the OverMind local-model dispatcher is the planned one, M8) runs `synapsed-client`
   as the role: claim, heartbeat every 30 s, `fetch`, hand the body to the model as **untrusted
   text**, `send` the reply, `ack`. Qwen never sees a credential and never talks to the daemon.
 - The model's HTTP endpoint stays where it is; only the harness needs a route to the daemon. On

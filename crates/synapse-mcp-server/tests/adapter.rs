@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 use synapse::certificate::chain_to_pem;
 use synapse::keystore::Keystore;
 use synapse::roles::sign_claim_for;
-use synapse_client::Daemon;
 use synapse_mcp_server::{McpConfig, SynapseMcpServer};
+use synapsed_client::Daemon;
 use tokio::io::AsyncReadExt;
 
 /// `cargo test -p synapse-mcp-server` does not build another package's binary, so build `synapsed`

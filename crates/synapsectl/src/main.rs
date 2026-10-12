@@ -18,7 +18,7 @@ use synapse::certificate::Permission;
 use synapse::keystore::{Keystore, KeystoreError, default_home, valid_name};
 use synapse::security_events::SecurityEventKind;
 
-use synapse_client::{Daemon, MailError, encode_body, events, inbox_line, printable};
+use synapsed_client::{Daemon, MailError, encode_body, events, inbox_line, printable};
 
 #[derive(Parser)]
 #[command(name = "synapse", about = "Synapse command line")]

@@ -21,8 +21,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{Value, json};
 use synapse::keystore::Keystore;
 use synapse_claude_channel::CHANNEL_METHOD;
-use synapse_client::Daemon;
 use synapse_mcp_server::{McpConfig, SendArgs, SynapseMcpServer};
+use synapsed_client::Daemon;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 

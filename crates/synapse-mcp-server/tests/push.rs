@@ -18,9 +18,9 @@ use rmcp::service::NotificationContext;
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use synapse::keystore::Keystore;
-use synapse_client::Daemon;
 use synapse_mcp_server::push::{AckPolicy, PushConfig, PushServer, Renderer};
 use synapse_mcp_server::{McpConfig, MessageView, SendArgs, SynapseMcpServer};
+use synapsed_client::Daemon;
 
 const METHOD: &str = "notifications/example/inbox";
 
