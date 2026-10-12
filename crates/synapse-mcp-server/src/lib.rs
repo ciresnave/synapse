@@ -137,6 +137,16 @@ impl SynapseMcpServer {
     /// characters escaped, a non-UTF-8 body left out). For adapters that push instead of waiting
     /// for the model to poll (M7).
     pub async fn pull(&self, max: u32, lease_secs: i64) -> Result<Vec<Value>, String> {
+        Ok(self
+            .pull_views(max, lease_secs)
+            .await?
+            .iter()
+            .map(MessageView::to_tool_json)
+            .collect())
+    }
+
+    /// [`Self::pull`], as the parsed views every surface renders from.
+    pub async fn pull_views(&self, max: u32, lease_secs: i64) -> Result<Vec<MessageView>, String> {
         let inner = self.inner.clone();
         let reply = tokio::task::spawn_blocking(move || {
             inner.daemon.call(
@@ -152,7 +162,7 @@ impl SynapseMcpServer {
             .as_array()
             .into_iter()
             .flatten()
-            .map(message_view)
+            .map(MessageView::from_wire)
             .collect())
     }
 
@@ -235,6 +245,57 @@ fn safe_text(text: &str) -> String {
         .collect()
 }
 
+/// One fetched message, parsed ONCE from the JSON `synapsed` serves. Every surface that shows a
+/// message (the `fetch` tool, a channel push) renders from this, so no two of them can disagree
+/// about which message it is, who sent it or what it says; each only adds its own escaping.
+#[derive(Clone, Debug)]
+pub struct MessageView {
+    message_id: Option<String>,
+    from: Option<String>,
+    attempts: Option<u64>,
+    /// The daemon's fields as sent, plus `body` when the body is UTF-8 (control characters
+    /// escaped, tabs and line breaks kept).
+    shown: Value,
+}
+
+impl MessageView {
+    /// Parse one message of a `/v1/fetch` reply. Total: a field the daemon did not send is `None`.
+    pub fn from_wire(wire: &Value) -> MessageView {
+        MessageView {
+            message_id: wire["message_id"].as_str().map(str::to_string),
+            from: wire["from"].as_str().map(str::to_string),
+            attempts: wire["attempts"].as_u64(),
+            shown: message_view(wire),
+        }
+    }
+
+    /// The daemon's id, `<sender global id>/<client id>`; what the `ack` tool takes.
+    pub fn message_id(&self) -> Option<&str> {
+        self.message_id.as_deref()
+    }
+
+    /// The sender's global id, as the daemon verified it.
+    pub fn from(&self) -> Option<&str> {
+        self.from.as_deref()
+    }
+
+    /// The daemon's delivery-attempt count for this message (it counts leases).
+    pub fn attempts(&self) -> Option<u64> {
+        self.attempts
+    }
+
+    /// The body as UTF-8 text with control characters escaped, or `None` when the body is not
+    /// UTF-8 (the bytes stay in `body_b64` of [`Self::to_tool_json`]).
+    pub fn body_text(&self) -> Option<&str> {
+        self.shown["body"].as_str()
+    }
+
+    /// The message as the `fetch` tool returns it.
+    pub fn to_tool_json(&self) -> Value {
+        self.shown.clone()
+    }
+}
+
 /// A fetched message: the daemon's fields, plus `body` when the body is UTF-8. A body that is not
 /// UTF-8 is left out (its `body_b64` stays), so the model never reads half-decoded bytes.
 fn message_view(message: &Value) -> Value {
@@ -308,7 +369,7 @@ impl SynapseMcpServer {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(message_view)
+                .map(|m| MessageView::from_wire(m).to_tool_json())
                 .collect();
             Ok(json!({ "messages": messages }))
         })

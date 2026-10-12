@@ -61,7 +61,7 @@ use rmcp::model::{
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ErrorData, RoleServer};
 use serde_json::{Value, json};
-use synapse_mcp_server::{McpConfig, SynapseMcpServer};
+use synapse_mcp_server::{McpConfig, MessageView, SynapseMcpServer};
 
 /// The newest protocol revision this server speaks (see the crate docs).
 pub const MAX_PROTOCOL: ProtocolVersion = ProtocolVersion::V_2025_11_25;
@@ -136,10 +136,10 @@ fn escape(text: &str, multiline: bool) -> String {
 
 /// The `params` of a channel notification for one fetched message. `meta` keys are identifiers
 /// (Claude Code turns them into tag attributes); values are escaped.
-pub fn channel_params(message: &Value) -> Value {
-    let from = escape(message["from"].as_str().unwrap_or("unknown"), false);
-    let id = escape(message["message_id"].as_str().unwrap_or(""), false);
-    let body = match message["body"].as_str() {
+pub fn channel_params(message: &MessageView) -> Value {
+    let from = escape(message.from().unwrap_or("unknown"), false);
+    let id = escape(message.message_id().unwrap_or(""), false);
+    let body = match message.body_text() {
         Some(body) => escape(body, true),
         None => "[the body is not UTF-8 text and was not shown]".to_string(),
     };
@@ -228,7 +228,7 @@ pub async fn push_once<N: Notifier>(
     config: &ChannelConfig,
     ledger: &PushLedger,
 ) -> Result<usize, String> {
-    let messages = source.pull(config.batch, config.lease_secs).await?;
+    let messages = source.pull_views(config.batch, config.lease_secs).await?;
     let now = Instant::now();
     let keep = Duration::from_secs(
         u64::try_from(config.lease_secs)
@@ -238,24 +238,20 @@ pub async fn push_once<N: Notifier>(
     .max(config.poll_every.saturating_mul(2));
     // Mark everything this pull returned as seen first, so a gap in successful pulls (daemon down)
     // cannot make `forget_unseen` drop the count of a message that is still pending.
-    for id in messages.iter().filter_map(|m| m["message_id"].as_str()) {
+    for id in messages.iter().filter_map(MessageView::message_id) {
         ledger.saw(id, now);
     }
     ledger.forget_unseen(now, keep);
     let mut pushed = 0;
     for message in &messages {
-        let Some(id) = message["message_id"].as_str() else {
+        let Some(id) = message.message_id() else {
             continue;
         };
         // Only a write that happened counts.
         if notifier.notify(channel_params(message)).await.is_ok() {
             ledger.pushed(id, now);
             pushed += 1;
-            if should_ack(
-                message["attempts"].as_u64(),
-                ledger.pushes(id),
-                config.max_pushes,
-            ) {
+            if should_ack(message.attempts(), ledger.pushes(id), config.max_pushes) {
                 // A refused ack leaves the message pending: it is pushed again after the lease and
                 // the ack retried. A transient refusal costs one more push; a persistent one repeats
                 // every lease, so it is logged (the text is fixed and key-free, like the loop's).
