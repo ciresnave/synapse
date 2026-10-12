@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.37): the push loop moves to `synapse-mcp-server` behind a `Renderer`; Claude Code is one renderer
+
+Design note `docs/superpowers/specs/2026-10-12-agent-facing-mcp-adapter.md` sections 2 and 5.3 (PR 3). New
+`synapse_mcp_server::push`: `Renderer` (capability key, method, protocol cap, instructions, `render`, `ack_policy`),
+`AckPolicy`, `PushConfig`, `PushServer<R>`, `PushLedger`, `Notifier`, `should_ack`, `push_once_with`. `synapse-claude-channel`
+keeps its names (`ChannelServer`, `ChannelConfig`, `push_once`, `PushLedger`, `Notifier`, `CHANNEL_METHOD`) as a
+`ClaudeChannel` renderer and aliases, so `tests/channel.rs` passes UNCHANGED. **No behaviour change**; the only visible
+difference is the push loop's warning prefix, `synapse push:` instead of `synapse channel:`. New test
+`crates/synapse-mcp-server/tests/push.rs` drives a made-up renderer (its own capability key, method, protocol cap and text)
+through a real daemon. Not covered: a second real client product. Alert delivery is still only a seam
+(`AlertTransport` has no implementation, board 131).
+
 ### Changed (rc.36): one parsed `MessageView` behind the `fetch` tool and the channel push; a raw-wire client test
 
 Design note `docs/superpowers/specs/2026-10-12-agent-facing-mcp-adapter.md` section 5.2 (PR 2). `synapse-mcp-server` gains
