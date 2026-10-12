@@ -14,7 +14,8 @@ Design note `docs/superpowers/specs/2026-10-12-agent-facing-mcp-adapter.md` sect
 `AckPolicy`, `PushConfig`, `PushServer<R>`, `PushLedger`, `Notifier`, `should_ack`, `push_once_with`. `synapse-claude-channel`
 keeps its names (`ChannelServer`, `ChannelConfig`, `push_once`, `PushLedger`, `Notifier`, `CHANNEL_METHOD`) as a
 `ClaudeChannel` renderer and aliases, so `tests/channel.rs` passes UNCHANGED. **No behaviour change**; the only visible
-difference is the push loop's warning prefix, `synapse push:` instead of `synapse channel:`. New test
+difference is the push loop's warning prefix, `synapse push:` instead of `synapse channel:`, and its tracing target
+(`synapse_mcp_server::push`, so a `RUST_LOG=synapse_claude_channel=warn` filter no longer matches those warnings). New test
 `crates/synapse-mcp-server/tests/push.rs` drives a made-up renderer (its own capability key, method, protocol cap and text)
 through a real daemon. Not covered: a second real client product. Alert delivery is still only a seam
 (`AlertTransport` has no implementation, board 131).

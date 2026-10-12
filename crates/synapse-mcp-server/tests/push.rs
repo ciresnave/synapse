@@ -179,6 +179,10 @@ async fn a_renderer_that_is_not_claude_code_decides_the_capability_the_method_an
         "{info:?}"
     );
     assert!(info.capabilities.tools.is_some(), "{info:?}");
+    assert_eq!(
+        info.server_info.as_ref().map(|s| s.name.as_str()),
+        Some("synapse")
+    );
     assert!(
         info.instructions
             .as_deref()
@@ -218,4 +222,62 @@ async fn a_renderer_that_is_not_claude_code_decides_the_capability_the_method_an
         params["id"].as_str().is_some_and(|i| i.contains('/')),
         "the daemon's id, not one the renderer made up: {params}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_generic_loop_pushes_again_after_the_lease_and_acks_at_the_bound() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    let server = PushServer::<Example>::start(
+        home.config("bob"),
+        PushConfig {
+            poll_every: Duration::from_millis(100),
+            lease_secs: 5,
+            ..PushConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (client_io, server_io) = tokio::io::duplex(1 << 16);
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let got = Catcher::default();
+    let _client = got.clone().serve(client_io).await.expect("handshake");
+
+    alice
+        .send(Parameters(SendArgs {
+            to: "bob".into(),
+            body: "again and again".into(),
+            message_id: None,
+        }))
+        .await
+        .expect("send");
+
+    // Never acked by the model: written once per lease, three times (max_pushes), then removed.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while got.0.lock().unwrap().len() < 3 {
+        assert!(Instant::now() < deadline, "fewer than 3 pushes arrived");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let ids: Vec<String> = got
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, p)| p["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 3, "{ids:?}");
+    assert!(
+        ids.iter().all(|i| *i == ids[0]),
+        "one message, one id: {ids:?}"
+    );
+    // The adapter acked it at the bound: nothing is left to fetch even after the lease.
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert!(bob.pull(10, 5).await.unwrap().is_empty(), "left pending");
+    assert_eq!(got.0.lock().unwrap().len(), 3, "pushed past the bound");
 }
