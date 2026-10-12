@@ -10,6 +10,8 @@
 //! `synapse claim`. Secret hygiene: no key path or bytes reach a tool result, error or log line, so
 //! store and I/O errors are replaced by fixed text. `McpConfig` has no `Debug`.
 
+pub mod push;
+
 use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::Arc;
