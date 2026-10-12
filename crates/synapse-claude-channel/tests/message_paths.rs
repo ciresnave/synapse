@@ -130,8 +130,8 @@ fn a_daemon_field_this_view_does_not_name_still_reaches_the_tool() {
 }
 
 #[test]
-fn a_message_without_an_id_is_not_pushed_as_one() {
-    // `push_once` skips it today; the view says so rather than inventing an id.
+fn the_view_reports_a_missing_id_as_none_rather_than_inventing_one() {
+    // `push_once` skips an id-less message on that `None`.
     let view = MessageView::from_wire(&json!({"from": "a@acct", "body_b64": B64.encode(b"x")}));
     assert_eq!(view.message_id(), None);
 }

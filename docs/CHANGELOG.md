@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Design note `docs/superpowers/specs/2026-10-12-agent-facing-mcp-adapter.md` section 5.2 (PR 2). `synapse-mcp-server` gains
 `MessageView` (`from_wire`, `message_id`, `from`, `attempts`, `body_text`, `to_tool_json`) and `SynapseMcpServer::pull_views`;
-the `fetch` tool and `synapse-claude-channel`'s push both render from it, so neither indexes the daemon's JSON by string key.
+the `fetch` tool and `synapse-claude-channel`'s push both render from it, so the push reads the daemon's JSON only through the view's accessors.
 **No behaviour change:** `tests/channel.rs` and `tests/adapter.rs` pass unchanged. **Breaking, unpublished surface:**
 `synapse_claude_channel::channel_params` now takes `&MessageView`. New tests: a corpus test that both surfaces agree on id,
 sender and body (the push differs only by `<`/`>` entities), and `tests/foreign_client.rs`, a hand-written newline-delimited

@@ -296,10 +296,15 @@ async fn a_hand_written_client_negotiates_receives_the_push_and_acks_it() {
         )
         .await,
     );
-    assert!(acked.is_object(), "{acked}");
-    let fetched = tool_json(
-        &bob.request("tools/call", json!({"name": "fetch", "arguments": {}}))
-            .await,
+    // The daemon says it removed the message (a fetch would prove nothing: the push's own lease
+    // hides it for 30 s either way), and a second ack finds it already gone.
+    assert_eq!(acked["outcome"], "removed", "{acked}");
+    let again = tool_json(
+        &bob.request(
+            "tools/call",
+            json!({"name": "ack", "arguments": {"message_id": message_id}}),
+        )
+        .await,
     );
-    assert_eq!(fetched["messages"], json!([]), "{fetched}");
+    assert_eq!(again["outcome"], "already_acked", "{again}");
 }
