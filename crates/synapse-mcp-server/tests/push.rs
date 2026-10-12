@@ -52,6 +52,28 @@ impl Renderer for Example {
     }
 }
 
+/// A renderer that says nothing about acking: it gets the trait's default policy.
+#[derive(Default)]
+struct Quiet;
+
+impl Renderer for Quiet {
+    fn capability_key(&self) -> &str {
+        "quiet/inbox"
+    }
+    fn method(&self) -> &str {
+        "notifications/quiet/inbox"
+    }
+    fn protocol_cap(&self) -> ProtocolVersion {
+        ProtocolVersion::V_2025_06_18
+    }
+    fn instructions(&self) -> &str {
+        "Quiet client."
+    }
+    fn render(&self, message: &MessageView) -> Value {
+        json!({"id": message.message_id(), "text": message.body_text()})
+    }
+}
+
 fn exe_dir() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_synapse-mcp"))
         .parent()
@@ -280,4 +302,59 @@ async fn the_generic_loop_pushes_again_after_the_lease_and_acks_at_the_bound() {
     tokio::time::sleep(Duration::from_millis(5500)).await;
     assert!(bob.pull(10, 5).await.unwrap().is_empty(), "left pending");
     assert_eq!(got.0.lock().unwrap().len(), 3, "pushed past the bound");
+}
+
+#[test]
+fn the_default_ack_policy_is_receiver_only() {
+    assert_eq!(Quiet.ack_policy(), AckPolicy::ReceiverOnly);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receiver_only_renderer_stops_pushing_at_the_bound_and_never_removes_the_message() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    let server = PushServer::<Quiet>::start(
+        home.config("bob"),
+        PushConfig {
+            poll_every: Duration::from_millis(100),
+            lease_secs: 5,
+            ..PushConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (client_io, server_io) = tokio::io::duplex(1 << 16);
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let got = Catcher::default();
+    let _client = got.clone().serve(client_io).await.expect("handshake");
+
+    alice
+        .send(Parameters(SendArgs {
+            to: "bob".into(),
+            body: "nobody will ack this".into(),
+            message_id: None,
+        }))
+        .await
+        .expect("send");
+
+    // max_pushes (3) writes by this process, one per lease; then it stops pushing.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while got.0.lock().unwrap().len() < 3 {
+        assert!(Instant::now() < deadline, "fewer than 3 pushes arrived");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Two more lease periods: no fourth push.
+    tokio::time::sleep(Duration::from_millis(11_000)).await;
+    assert_eq!(got.0.lock().unwrap().len(), 3, "pushed past the bound");
+
+    // The adapter did not ack: the message is still pending, and (because the loop no longer
+    // leases it) the receiver's own fetch gets it at once, as a fresh lease.
+    let left = bob.pull(10, 5).await.unwrap();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0]["body"], "nobody will ack this");
 }

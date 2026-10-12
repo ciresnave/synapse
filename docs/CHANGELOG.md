@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking (rc.39): the generic push default is receiver-only; `/v1/fetch` takes `exclude`
+
+Design: `docs/superpowers/specs/2026-10-12-receiver-only-ack.md`; parent note section 5.4 (PR 4). **Daemon change:**
+`POST /v1/fetch` accepts an optional `exclude: [message_id]` (at most 100 ids, each at most 256 bytes, else 400
+`malformed`); an excluded message is not leased, its `attempts` does not move and it does not count toward `max`. No
+store format change. Core: `Mailbox::fetch_excluding` (`fetch` is unchanged). **Adapter, breaking at runtime:** a `ReceiverOnly` adapter against a daemon older than rc.39 gets 400 on the first look after it parks something; the adapter then clears its parked list and pushes up to the bound again, so push keeps working. Every `Renderer` impl is source-compatible (`ack_policy` gained a default and `AckPolicy` is non-exhaustive), but a renderer that relied on the old required method now gets `ReceiverOnly` only if it deletes its own.
+`Renderer::ack_policy` now has a default, `AckPolicy::ReceiverOnly` (new variant): after `max_pushes` writes of a
+message by this process the adapter stops pushing it and passes over it with `exclude`, and never acks it, so a client
+that never reads a push loses nothing (FAM trap 4a). `ClaudeChannel` keeps `BoundedAttempts`, so Claude Code behaves
+as in rc.38 (its push behaviour is unchanged since rc.33) and sends no `exclude`. Known limits: the parked list is in memory, so a new adapter process pushes
+a pending message up to the bound again; past 100 parked the oldest is pushed again, so with more than 100 pending messages a `ReceiverOnly` adapter keeps churning through them; a receiver's `ack` does not remove an id from the list (harmless: it excludes nothing). Not in this PR: advertising the
+push method in `whoami`. Alert delivery is still only a seam (`AlertTransport` has no implementation, board 131).
+
 ### Fixed (rc.38): the Docker image builds
 
 The `Build Docker Image` job failed on `COPY Cargo.toml Cargo.lock` (`Cargo.lock` is gitignored) and its Dockerfile was

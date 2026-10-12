@@ -471,3 +471,45 @@ pub fn an_expired_or_superseded_lease_counts_as_queued<S: MailStore>(make: impl 
         "a takeover voids the old epoch's lease"
     );
 }
+
+pub fn fetch_excluding_skips_the_named_messages_and_leaves_them_unleased<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    for id in ["a", "b", "c"] {
+        mb.enqueue(env(id, LANE, b"x"), t0()).unwrap();
+    }
+    let skip = vec!["b".to_string()];
+    let got = mb
+        .fetch_excluding(LANE, epoch, 10, None, t0(), &skip)
+        .unwrap();
+    assert_eq!(ids_of(&got), ["a", "c"]);
+
+    // "b" was never leased: an ordinary fetch at the same instant returns it as a first attempt.
+    let rest = mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    assert_eq!(ids_of(&rest), ["b"]);
+    assert_eq!(rest[0].attempts, 1);
+}
+
+pub fn fetch_excluding_counts_delivered_messages_not_skipped_ones<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    for id in ["a", "b", "c"] {
+        mb.enqueue(env(id, LANE, b"x"), t0()).unwrap();
+    }
+    let skip = vec!["a".to_string()];
+    let got = mb
+        .fetch_excluding(LANE, epoch, 1, None, t0(), &skip)
+        .unwrap();
+    assert_eq!(ids_of(&got), ["b"]);
+    // An empty exclusion is exactly `fetch`.
+    let next = mb
+        .fetch_excluding(LANE, epoch, 10, None, t0(), &[])
+        .unwrap();
+    assert_eq!(ids_of(&next), ["a", "c"]);
+}

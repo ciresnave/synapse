@@ -17,7 +17,7 @@
 //! tick delays the next rather than pushing a message twice.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,14 @@ use crate::{McpConfig, MessageView, SynapseMcpServer};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AckPolicy {
+    /// The adapter never removes a message; only the receiver's `ack` does. After
+    /// [`PushConfig::max_pushes`] (at least 2) successful writes of one message by this process the adapter stops
+    /// pushing it and asks the daemon to pass over it (`exclude`), so the message stays pending,
+    /// is still returned by the `fetch` tool at once (it is no longer re-leased every tick), and
+    /// nothing is lost by the adapter's hand. A new adapter process has an empty list and pushes it
+    /// up to the bound again. Right for a client with no measured behaviour: a client that never
+    /// reads a push (FAM's measured case) loses nothing.
+    ReceiverOnly,
     /// After a SUCCESSFUL write the adapter acks the message itself once [`should_ack`] holds: the
     /// daemon's `attempts` has reached [`PushConfig::max_pushes`] AND this process has written it
     /// at least twice. Bounded attempts, not a confirmation that anything was shown.
@@ -60,8 +68,12 @@ pub trait Renderer: Send + Sync + 'static {
     /// One message in, the notification's `params` out. It receives the same [`MessageView`] the
     /// `fetch` tool shows, so the two surfaces cannot disagree about which message it is.
     fn render(&self, message: &MessageView) -> Value;
-    /// What the adapter does after a successful write.
-    fn ack_policy(&self) -> AckPolicy;
+    /// What the adapter does after a successful write. The default removes nothing on the
+    /// receiver's behalf; a renderer opts into [`AckPolicy::BoundedAttempts`] only for a client whose
+    /// behaviour has been measured to need it.
+    fn ack_policy(&self) -> AckPolicy {
+        AckPolicy::ReceiverOnly
+    }
 }
 
 /// Timing of the push loop.
@@ -117,7 +129,14 @@ impl Notifier for PeerNotifier {
 #[derive(Default)]
 pub struct PushLedger {
     seen: Mutex<HashMap<String, Entry>>,
+    /// Ids this process has pushed up to the bound and stopped pushing ([`AckPolicy::ReceiverOnly`]),
+    /// oldest first, at most [`MAX_PARKED`].
+    parked: Mutex<VecDeque<String>>,
 }
+
+/// The most ids the ledger passes over, which is what the daemon accepts in one fetch. Past it the
+/// oldest is dropped and is pushed up to the bound again.
+pub const MAX_PARKED: usize = 100;
 
 struct Entry {
     pushes: u32,
@@ -127,6 +146,35 @@ struct Entry {
 impl PushLedger {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
         self.seen.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Ids this process has stopped pushing, to be passed over by the next pull.
+    pub fn parked(&self) -> Vec<String> {
+        self.parked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Stop passing over every parked id (they are pushed up to the bound again).
+    pub fn unpark_all(&self) {
+        self.parked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
+    fn park(&self, id: &str) {
+        let mut parked = self.parked.lock().unwrap_or_else(|p| p.into_inner());
+        if parked.iter().any(|p| p == id) {
+            return;
+        }
+        if parked.len() >= MAX_PARKED {
+            parked.pop_front();
+        }
+        parked.push_back(id.to_string());
     }
 
     /// Times `id` has been pushed.
@@ -187,7 +235,22 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
     config: &PushConfig,
     ledger: &PushLedger,
 ) -> Result<usize, String> {
-    let messages = source.pull_views(config.batch, config.lease_secs).await?;
+    let parked = ledger.parked();
+    let messages = match source
+        .pull_views_excluding(config.batch, config.lease_secs, &parked)
+        .await
+    {
+        Ok(messages) => messages,
+        Err(e) => {
+            // A refused look with `exclude` on it may be a daemon that predates the field (it
+            // answers 400 and would refuse every look). Forget the parked list so the next look
+            // carries none: messages are then pushed up to the bound again, and push keeps working.
+            if !parked.is_empty() {
+                ledger.unpark_all();
+            }
+            return Err(e);
+        }
+    };
     let now = Instant::now();
     let keep = Duration::from_secs(
         u64::try_from(config.lease_secs)
@@ -213,6 +276,14 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
             let ack = match renderer.ack_policy() {
                 AckPolicy::BoundedAttempts => {
                     should_ack(message.attempts(), ledger.pushes(id), config.max_pushes)
+                }
+                AckPolicy::ReceiverOnly => {
+                    // Two writes at least, as for `BoundedAttempts`: the first can precede the
+                    // client's registration (the c7 case).
+                    if ledger.pushes(id) >= config.max_pushes.max(2) {
+                        ledger.park(id);
+                    }
+                    false
                 }
             };
             if ack {
@@ -377,6 +448,24 @@ mod tests {
         // A daemon that sends no count: this process's pushes stand in for it.
         assert!(!should_ack(None, 2, 3));
         assert!(should_ack(None, 3, 3));
+    }
+
+    #[test]
+    fn the_parked_list_has_no_duplicates_is_capped_and_can_be_cleared() {
+        let ledger = PushLedger::default();
+        ledger.park("a");
+        ledger.park("a");
+        assert_eq!(ledger.parked(), ["a"]);
+        for i in 0..(MAX_PARKED + 5) {
+            ledger.park(&format!("m{i}"));
+        }
+        let parked = ledger.parked();
+        assert_eq!(parked.len(), MAX_PARKED);
+        // The oldest were dropped, the newest kept.
+        assert!(!parked.contains(&"a".to_string()));
+        assert_eq!(parked.last().unwrap(), &format!("m{}", MAX_PARKED + 4));
+        ledger.unpark_all();
+        assert!(ledger.parked().is_empty());
     }
 
     #[test]

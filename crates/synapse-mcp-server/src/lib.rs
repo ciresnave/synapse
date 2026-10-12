@@ -149,13 +149,25 @@ impl SynapseMcpServer {
 
     /// [`Self::pull`], as the parsed views every surface renders from.
     pub async fn pull_views(&self, max: u32, lease_secs: i64) -> Result<Vec<MessageView>, String> {
+        self.pull_views_excluding(max, lease_secs, &[]).await
+    }
+
+    /// [`Self::pull_views`], passing over the message ids in `exclude` (at most 100; the daemon
+    /// refuses more): they are not leased and do not count toward `max`. The `exclude` field is sent
+    /// only when it is non-empty, so a daemon that predates it is never asked for it.
+    pub async fn pull_views_excluding(
+        &self,
+        max: u32,
+        lease_secs: i64,
+        exclude: &[String],
+    ) -> Result<Vec<MessageView>, String> {
+        let mut request = json!({"max": max, "lease_secs": lease_secs});
+        if !exclude.is_empty() {
+            request["exclude"] = json!(exclude);
+        }
         let inner = self.inner.clone();
         let reply = tokio::task::spawn_blocking(move || {
-            inner.daemon.call(
-                &inner.role,
-                "/v1/fetch",
-                Some(&json!({"max": max, "lease_secs": lease_secs})),
-            )
+            inner.daemon.call(&inner.role, "/v1/fetch", Some(&request))
         })
         .await
         .map_err(|_| "the call task failed".to_string())?
