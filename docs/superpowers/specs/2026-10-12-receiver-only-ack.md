@@ -30,7 +30,9 @@ occupying a batch slot that newer mail needs.
    and it is the price of keeping no new state in the daemon.
 4. **`exclude` is sent only when non-empty**, so an adapter on `BoundedAttempts` (the Claude renderer) never sends it
    and works against a daemon that predates it. An adapter on `ReceiverOnly` against an old daemon gets 400 on the
-   first fetch after parking (the old body type denies unknown fields) and logs it; nothing is lost.
+   first look after parking (the old body type denies unknown fields). It then clears its parked list, so the next
+   look carries no `exclude` and push keeps working (messages are pushed up to the bound again). The same clearing
+   happens on any other refused look (daemon down); the cost is bounded repeats, never a loss.
 
 ## What is NOT changed
 
@@ -49,6 +51,9 @@ occupying a batch slot that newer mail needs.
 ## Known limits
 
 - A parked message is pushed again by each new adapter process (up to the bound each).
+- `max_pushes` below 2 acts as 2, as for `BoundedAttempts`: the first write can precede the client's registration.
+- redb loads the body of each excluded row before the filter sees it (at most 100 per look), so the `scan_free`
+  property "a skipped row's body is never loaded" does not hold for excluded ids.
 - More than 100 parked messages: the oldest are pushed again.
 - A client that does read the push and never acks leaves the message pending until something acks it. That is the
   intended contract of `ReceiverOnly`; use `BoundedAttempts` only with a measurement.

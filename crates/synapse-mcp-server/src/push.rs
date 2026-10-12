@@ -41,7 +41,7 @@ use crate::{McpConfig, MessageView, SynapseMcpServer};
 #[non_exhaustive]
 pub enum AckPolicy {
     /// The adapter never removes a message; only the receiver's `ack` does. After
-    /// [`PushConfig::max_pushes`] successful writes of one message by this process the adapter stops
+    /// [`PushConfig::max_pushes`] (at least 2) successful writes of one message by this process the adapter stops
     /// pushing it and asks the daemon to pass over it (`exclude`), so the message stays pending,
     /// is still returned by the `fetch` tool at once (it is no longer re-leased every tick), and
     /// nothing is lost by the adapter's hand. A new adapter process has an empty list and pushes it
@@ -158,6 +158,14 @@ impl PushLedger {
             .collect()
     }
 
+    /// Stop passing over every parked id (they are pushed up to the bound again).
+    pub fn unpark_all(&self) {
+        self.parked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
     fn park(&self, id: &str) {
         let mut parked = self.parked.lock().unwrap_or_else(|p| p.into_inner());
         if parked.iter().any(|p| p == id) {
@@ -228,9 +236,21 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
     ledger: &PushLedger,
 ) -> Result<usize, String> {
     let parked = ledger.parked();
-    let messages = source
+    let messages = match source
         .pull_views_excluding(config.batch, config.lease_secs, &parked)
-        .await?;
+        .await
+    {
+        Ok(messages) => messages,
+        Err(e) => {
+            // A refused look with `exclude` on it may be a daemon that predates the field (it
+            // answers 400 and would refuse every look). Forget the parked list so the next look
+            // carries none: messages are then pushed up to the bound again, and push keeps working.
+            if !parked.is_empty() {
+                ledger.unpark_all();
+            }
+            return Err(e);
+        }
+    };
     let now = Instant::now();
     let keep = Duration::from_secs(
         u64::try_from(config.lease_secs)
@@ -258,7 +278,9 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
                     should_ack(message.attempts(), ledger.pushes(id), config.max_pushes)
                 }
                 AckPolicy::ReceiverOnly => {
-                    if ledger.pushes(id) >= config.max_pushes.max(1) {
+                    // Two writes at least, as for `BoundedAttempts`: the first can precede the
+                    // client's registration (the c7 case).
+                    if ledger.pushes(id) >= config.max_pushes.max(2) {
                         ledger.park(id);
                     }
                     false
@@ -426,6 +448,24 @@ mod tests {
         // A daemon that sends no count: this process's pushes stand in for it.
         assert!(!should_ack(None, 2, 3));
         assert!(should_ack(None, 3, 3));
+    }
+
+    #[test]
+    fn the_parked_list_has_no_duplicates_is_capped_and_can_be_cleared() {
+        let ledger = PushLedger::default();
+        ledger.park("a");
+        ledger.park("a");
+        assert_eq!(ledger.parked(), ["a"]);
+        for i in 0..(MAX_PARKED + 5) {
+            ledger.park(&format!("m{i}"));
+        }
+        let parked = ledger.parked();
+        assert_eq!(parked.len(), MAX_PARKED);
+        // The oldest were dropped, the newest kept.
+        assert!(!parked.contains(&"a".to_string()));
+        assert_eq!(parked.last().unwrap(), &format!("m{}", MAX_PARKED + 4));
+        ledger.unpark_all();
+        assert!(ledger.parked().is_empty());
     }
 
     #[test]

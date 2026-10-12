@@ -135,3 +135,10 @@ fn the_view_reports_a_missing_id_as_none_rather_than_inventing_one() {
     let view = MessageView::from_wire(&json!({"from": "a@acct", "body_b64": B64.encode(b"x")}));
     assert_eq!(view.message_id(), None);
 }
+
+#[test]
+fn claude_code_keeps_the_bounded_attempts_policy() {
+    // rc.33 is a measured trade for this client; the generic default must not reach it.
+    use synapse_claude_channel::{AckPolicy, ClaudeChannel, Renderer};
+    assert_eq!(ClaudeChannel.ack_policy(), AckPolicy::BoundedAttempts);
+}
