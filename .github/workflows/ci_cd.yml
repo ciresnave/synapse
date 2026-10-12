@@ -456,7 +456,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: synapsenetwork/synapse
+          images: thinkersjournal/synapse
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
