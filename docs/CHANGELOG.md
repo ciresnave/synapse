@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.42): manifests point at `ThinkersJournal/synapse`
+
+The repository moved from `ciresnave/synapse` to `ThinkersJournal/synapse` (transferred 2026-10-12 by the PM). The `repository` and `homepage` lines in the workspace manifest and the six crate manifests (8 lines, 7 files) now name the new location; the old URL only redirects. No code change. Nothing is published.
+
 ### Changed (rc.41): the Docker image is `thinkersjournal/synapse`
 
 CireSnave, 2026-10-12, verbatim (via the PM): "Lets ensure Synapse is under ThinkersJournal.  I just created the ThinkersJournal organization on Docker Hub so we should be able to publish docker images as ThinkersJournal/Synapse and such." Board 186 is answered.

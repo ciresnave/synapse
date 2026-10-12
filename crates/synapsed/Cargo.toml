@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "The Synapse daemon: one per user, on loopback, serving a durable role mailbox to any agent."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ciresnave/synapse"
+repository = "https://github.com/ThinkersJournal/synapse"
 
 [lib]
 name = "synapsed"
@@ -17,8 +17,8 @@ name = "synapsed"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.41" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.41" }
+synapse = { path = "../..", version = "6.0.0-rc.42" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.42" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
