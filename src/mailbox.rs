@@ -535,6 +535,22 @@ impl<S: MailStore> Mailbox<S> {
         lease: Option<Duration>,
         now: DateTime<Utc>,
     ) -> Result<Vec<Delivery>, MailError> {
+        self.fetch_excluding(role, epoch, max, lease, now, &[])
+    }
+
+    /// [`Self::fetch`], passing over the messages named in `exclude`: they are not leased, their
+    /// attempt count does not move, and they do not count toward `max`. For a consumer that has
+    /// already delivered a message as often as it intends to and wants the rest, without removing
+    /// it (removal is the receiver's `ack`).
+    pub fn fetch_excluding(
+        &mut self,
+        role: &str,
+        epoch: u64,
+        max: usize,
+        lease: Option<Duration>,
+        now: DateTime<Utc>,
+        exclude: &[String],
+    ) -> Result<Vec<Delivery>, MailError> {
         self.live()?;
         self.roles
             .check(role, epoch)
@@ -553,6 +569,9 @@ impl<S: MailStore> Mailbox<S> {
             // Collect up to `max` free messages in order, stopping the scan early, then lease them.
             let mut picked: Vec<Stored> = Vec::new();
             txn.scan_free(role, epoch, now, &mut |stored| {
+                if exclude.contains(&stored.envelope.message_id) {
+                    return true;
+                }
                 picked.push(stored.clone());
                 picked.len() < max
             })

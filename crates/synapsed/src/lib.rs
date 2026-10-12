@@ -99,6 +99,10 @@ const MAX_FETCH: usize = 100;
 /// The longest client-chosen message id; the stored id is `<sender>/<client id>` (review I1).
 const MAX_CLIENT_ID: usize = 100;
 const MAX_SUMMARY: usize = 500;
+/// The most ids a fetch may exclude, and the longest one (a global id is at most 129 bytes and a
+/// client id at most [`MAX_CLIENT_ID`]).
+const MAX_EXCLUDE: usize = 100;
+const MAX_EXCLUDE_ID: usize = 256;
 /// How many superseded sessions per role still answer `superseded` instead of `unauthorized`.
 const KEEP_SUPERSEDED: u64 = 8;
 
@@ -938,6 +942,10 @@ struct FetchBody {
     max: Option<usize>,
     #[serde(default)]
     lease_secs: Option<i64>,
+    /// Message ids to pass over: not leased, not counted. At most [`MAX_EXCLUDE`], each at most
+    /// [`MAX_EXCLUDE_ID`] bytes.
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 async fn fetch(
@@ -955,12 +963,16 @@ async fn fetch(
             Some(chrono::Duration::try_seconds(secs).ok_or_else(|| malformed("lease_secs"))?)
         }
     };
-    let deliveries = locked(&shared.mailbox)?.fetch(
+    if body.exclude.len() > MAX_EXCLUDE || body.exclude.iter().any(|id| id.len() > MAX_EXCLUDE_ID) {
+        return Err(malformed("exclude"));
+    }
+    let deliveries = locked(&shared.mailbox)?.fetch_excluding(
         &session.global_id,
         session.epoch,
         max,
         lease,
         Utc::now(),
+        &body.exclude,
     )?;
     // Counted after the fetch committed, never from the request: a refused fetch moves nothing.
     let redelivered = deliveries.iter().filter(|d| d.attempts > 1).count();

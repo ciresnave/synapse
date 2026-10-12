@@ -28,6 +28,8 @@ cases!(
     claims_are_written_through_the_store,
     depths_count_queued_and_leased_per_role,
     an_expired_or_superseded_lease_counts_as_queued,
+    fetch_excluding_skips_the_named_messages_and_leaves_them_unleased,
+    fetch_excluding_counts_delivered_messages_not_skipped_ones,
 );
 
 /// MemoryStore's transaction contract: a closure that changes state and then fails leaves the

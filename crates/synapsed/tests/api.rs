@@ -1305,3 +1305,50 @@ async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
     }
     d.stop().await;
 }
+
+#[tokio::test]
+async fn fetch_can_exclude_messages_it_would_otherwise_lease() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (beta, _) = claim(&d, "beta", 2).await;
+    let mut ids = Vec::new();
+    for text in ["one", "two"] {
+        let (s, sent, _) = post(
+            &d,
+            "/v1/send",
+            Some(&alpha),
+            json!({"to": "beta@acct", "body_b64": B64.encode(text)}),
+        )
+        .await;
+        assert_eq!(s, 200, "{sent}");
+        ids.push(sent["message_id"].as_str().unwrap().to_string());
+    }
+
+    let (s, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({"exclude": [ids[0]]})).await;
+    assert_eq!(s, 200, "{got}");
+    let leased: Vec<&str> = got["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["message_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(leased, [ids[1].as_str()]);
+
+    // The excluded one was not leased: the next plain fetch hands it out as attempt 1.
+    let (s, rest, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
+    assert_eq!(s, 200, "{rest}");
+    assert_eq!(rest["messages"][0]["message_id"], ids[0].as_str());
+    assert_eq!(rest["messages"][0]["attempts"], 1);
+
+    // Bounded and typed: too many, a non-string, an over-long id are 400 `malformed`.
+    let too_many: Vec<String> = (0..101).map(|i| format!("x{i}")).collect();
+    for bad in [
+        json!({"exclude": too_many}),
+        json!({"exclude": [1]}),
+        json!({"exclude": ["x".repeat(257)]}),
+    ] {
+        let (s, body, _) = post(&d, "/v1/fetch", Some(&beta), bad).await;
+        assert_eq!(s, 400, "{body}");
+    }
+    d.stop().await;
+}

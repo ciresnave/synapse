@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking (rc.39): the generic push default is receiver-only; `/v1/fetch` takes `exclude`
+
+Design: `docs/superpowers/specs/2026-10-12-receiver-only-ack.md`; parent note section 5.4 (PR 4). **Daemon change:**
+`POST /v1/fetch` accepts an optional `exclude: [message_id]` (at most 100 ids, each at most 256 bytes, else 400
+`malformed`); an excluded message is not leased, its `attempts` does not move and it does not count toward `max`. No
+store format change. Core: `Mailbox::fetch_excluding` (`fetch` is unchanged). **Adapter, breaking for renderers:**
+`Renderer::ack_policy` now has a default, `AckPolicy::ReceiverOnly` (new variant): after `max_pushes` writes of a
+message by this process the adapter stops pushing it and passes over it with `exclude`, and never acks it, so a client
+that never reads a push loses nothing (FAM trap 4a). `ClaudeChannel` keeps `BoundedAttempts`, so Claude Code behaves
+exactly as in rc.33 and sends no `exclude`. Known limits: the parked list is in memory, so a new adapter process pushes
+a pending message up to the bound again; past 100 parked the oldest is pushed again. Not in this PR: advertising the
+push method in `whoami`. Alert delivery is still only a seam (`AlertTransport` has no implementation, board 131).
+
 ### Fixed (rc.38): the Docker image builds
 
 The `Build Docker Image` job failed on `COPY Cargo.toml Cargo.lock` (`Cargo.lock` is gitignored) and its Dockerfile was
