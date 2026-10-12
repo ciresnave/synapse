@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.41"
+version = "6.0.0-rc.42"
 
 [package]
 name = "synapse"
@@ -13,8 +13,8 @@ rust-version = "1.95"
 authors = ["Eric Evans <ciresnave@gmail.com>"]
 description = "Neural Communication Network with Federated Identity"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ciresnave/synapse"
-homepage = "https://github.com/ciresnave/synapse"
+repository = "https://github.com/ThinkersJournal/synapse"
+homepage = "https://github.com/ThinkersJournal/synapse"
 documentation = "https://docs.rs/synapse"
 readme = "README.md"
 keywords = ["neural", "communication", "ai", "federated", "identity"]
