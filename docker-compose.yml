@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   synapse:
-    image: synapsenetwork/synapse:latest
+    image: thinkersjournal/synapse:latest
     container_name: synapse
     restart: always
     ports:

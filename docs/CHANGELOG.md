@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.41): the Docker image is `thinkersjournal/synapse`
+
+CireSnave, 2026-10-12, verbatim (via the PM): "Lets ensure Synapse is under ThinkersJournal.  I just created the ThinkersJournal organization on Docker Hub so we should be able to publish docker images as ThinkersJournal/Synapse and such." Board 186 is answered.
+The workflow's `images:` and `docker-compose.yml` now name `thinkersjournal/synapse` (Docker Hub names are lowercase) instead of the
+nonexistent `synapsenetwork` namespace, which is what made the push fail with 401. Read before the change: the public API
+`hub.docker.com/v2/orgs/thinkersjournal` answers 200 (org created 2026-10-12T21:20:50Z) and
+`/v2/repositories/thinkersjournal/` lists 0 repositories. Not verified: that `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` may push to that
+org (the first push off `main` will say). Nothing is pushed or published by this change. `docker-compose.yml` is still stale in
+other ways (postgres, port 8080, a `config` mount; `synapsed` binds loopback only). Alert delivery is still only a seam
+(`AlertTransport` has no implementation, board 131).
+
 ### Breaking (rc.40): the crate `synapse-client` is now `synapsed-client`
 
 CireSnave (board 183): "synapsed-client". The crates.io name `synapse-client` belongs to another user (owner
