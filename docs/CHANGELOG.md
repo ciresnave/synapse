@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.35): design note for the agent-facing MCP adapter in the first public release
+
+`docs/superpowers/specs/2026-10-12-agent-facing-mcp-adapter.md` (PM task, CireSnave 2026-10-12: the adapter ships
+in the first public release). Maps FAM's `DESIGN-SYNAPSE-HANDOVER.md` traps onto the Rust adapter at rc.34, places
+a `Renderer` seam, and sizes the work at 5 PRs. **Finding:** the crates.io name `synapse-client` belongs to another
+user, so the adapters cannot be published until it is renamed. Also: the rc.33 adapter ack is FAM's trap 4a for a
+client with no handler. No code changes. Alert delivery is still only a seam (`AlertTransport` has no
+implementation, board 131).
+
 ### Docs (rc.34): soak procedure status and stop conditions brought up to rc.33
 
 `docs/RESTARTTEST_SOAK_PROCEDURE.md`: the status line no longer says "PREPARED, NOT RUN" (phase 1 was run, c7 measured
