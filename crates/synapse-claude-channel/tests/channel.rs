@@ -22,8 +22,8 @@ use synapse::keystore::Keystore;
 use synapse_claude_channel::{
     CHANNEL_METHOD, ChannelConfig, ChannelServer, Notifier, PushLedger, push_once,
 };
-use synapse_client::Daemon;
 use synapse_mcp_server::{AckArgs, McpConfig, SendArgs, SynapseMcpServer};
+use synapsed_client::Daemon;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 fn exe_dir() -> &'static Path {

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking (rc.40): the crate `synapse-client` is now `synapsed-client`
+
+CireSnave (board 183): "synapsed-client". The crates.io name `synapse-client` belongs to another user (owner
+`krypticmouse`, "Rust client SDK for Synapse memory runtime"), and both adapters depend on this crate, so it could not be
+published. Read on 2026-10-12T19:20Z: `synapsed-client` is on crates.io at 0.0.0, owner `ciresnave`, "Name reserved for
+the Synapse project", a placeholder the PM published at 18:34Z under CireSnave's standing order to claim every chosen
+name once verified free (control `serde` 200); this PR neither reserves nor publishes anything. The directory is
+`crates/synapsed-client`; the library path is `synapsed_client`. Rename only: no code change, and no other dependent
+outside this workspace exists (the crate was never published). Historical entries and dated plans/specs keep the old name.
+Alert delivery is still only a seam (`AlertTransport` has no implementation, board 131).
+
 ### Breaking (rc.39): the generic push default is receiver-only; `/v1/fetch` takes `exclude`
 
 Design: `docs/superpowers/specs/2026-10-12-receiver-only-ack.md`; parent note section 5.4 (PR 4). **Daemon change:**

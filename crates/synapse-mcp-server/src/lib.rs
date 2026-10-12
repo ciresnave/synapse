@@ -4,7 +4,7 @@
 //!
 //! Plan: `docs/superpowers/plans/2026-10-08-m6-m7-adapters.md` section 4.
 //!
-//! The adapter holds no key: `synapse-client` proves the daemon, finds the role's cached session
+//! The adapter holds no key: `synapsed-client` proves the daemon, finds the role's cached session
 //! (or claims once, implicitly) and talks to it. A superseded or unknown session is reported to the
 //! model as a tool error and never answered by re-claiming; taking a role back is a human
 //! `synapse claim`. Secret hygiene: no key path or bytes reach a tool result, error or log line, so
@@ -24,7 +24,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use synapse::keystore::valid_name;
-use synapse_client::{Daemon, MailError, encode_body};
+use synapsed_client::{Daemon, MailError, encode_body};
 
 /// The daemon counts a role online for 90 s after it was last heard from (`ONLINE_WINDOW` in
 /// `synapsed`), so a heartbeat every 30 s keeps it online through two missed beats.
@@ -313,7 +313,7 @@ impl MessageView {
 /// A fetched message: the daemon's fields, plus `body` when the body is UTF-8. A body that is not
 /// UTF-8 is left out (its `body_b64` stays), so the model never reads half-decoded bytes.
 fn message_view(message: &Value) -> Value {
-    let mut out = synapse_client::inbox_line(message);
+    let mut out = synapsed_client::inbox_line(message);
     if let Some(body) = out.get("body").and_then(Value::as_str) {
         out["body"] = Value::String(safe_text(body));
     }

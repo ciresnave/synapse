@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The names the CLI and the MCP adapters build on stay exported from `synapse_client`.
+//! The names the CLI and the MCP adapters build on stay exported from `synapsed_client`.
 
 use serde_json::json;
-use synapse_client::{Daemon, MailError, encode_body, events, inbox_line, printable};
+use synapsed_client::{Daemon, MailError, encode_body, events, inbox_line, printable};
 
 #[test]
 fn the_shared_client_surface_is_exported() {
