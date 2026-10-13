@@ -2306,7 +2306,7 @@ dependencies = [
  "hkdf 0.13.0",
  "hybrid-array",
  "rand_core 0.10.1",
- "sha2 0.11.1",
+ "sha2 0.11.0",
  "subtle",
  "x25519-dalek",
  "zeroize",
@@ -3763,7 +3763,7 @@ dependencies = [
  "md-5 0.11.0",
  "memchr",
  "rand 0.10.3",
- "sha2 0.11.1",
+ "sha2 0.11.0",
  "stringprep",
 ]
 
@@ -4775,9 +4775,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
@@ -5167,7 +5167,7 @@ dependencies = [
  "percent-encoding",
  "serde",
  "sha1 0.11.0",
- "sha2 0.11.1",
+ "sha2 0.11.0",
  "sqlx-core 0.9.0",
  "thiserror 2.0.21",
  "tracing",
@@ -5240,7 +5240,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.0",
  "smallvec",
  "sqlx-core 0.9.0",
  "stringprep",
@@ -5470,7 +5470,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "socket2",
  "sqlx 0.8.6",
  "stun_codec",
