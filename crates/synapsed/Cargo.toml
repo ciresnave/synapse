@@ -17,13 +17,13 @@ name = "synapsed"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.45" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.45" }
+synapse = { path = "../..", version = "6.0.0-rc.46" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.46" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 ring = "0.17"
 uuid = { version = "1.6", features = ["v4"] }

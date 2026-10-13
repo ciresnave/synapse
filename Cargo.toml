@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.45"
+version = "6.0.0-rc.46"
 
 [package]
 name = "synapse"
@@ -76,10 +76,10 @@ ring = { version = "0.17", optional = true, features = ["std"] }
 # Sealing (P2 slice d): HPKE base mode, X25519 + HKDF-SHA256 + ChaCha20-Poly1305.
 hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"], optional = true }
 aes-gcm = { version = "0.10", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 ed25519-dalek = { version = "2.2.0", optional = true, features = ["pkcs8", "pem"] }
 blake3 = { version = "1.5", optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 
 # Configuration - optional
 toml = { version = "0.9.2", optional = true }
@@ -101,7 +101,7 @@ futures-util = { version = "0.3", optional = true }
 
 # NAT traversal dependencies for real implementation
 bytecodec = { version = "0.4", optional = true }
-stun_codec = { version = "0.3", optional = true }
+stun_codec = { version = "0.4", optional = true }
 bytes = { version = "1.5", optional = true }
 igd = { version = "0.12", optional = true }       # UPnP port mapping
 
@@ -152,7 +152,7 @@ regex = { version = "1.10", optional = true }
 # From 10.x jsonwebtoken ships no crypto by default and PANICS at first use without a
 # backend (tests/jwt_backend.rs). rust_crypto: pure Rust (CIRESNAVE-EXPECTATIONS 5.1b).
 jsonwebtoken = { version = "11.1.0", optional = true, default-features = false, features = ["use_pem", "rust_crypto"] }
-pem = { version = "3.0", optional = true }
+pem = { version = "4.0", optional = true }
 bcrypt = { version = "0.15", optional = true }
 hmac = { version = "0.12", optional = true }
 hex = { version = "0.4", optional = true }
@@ -174,7 +174,7 @@ web-sys = { version = "0.3", features = [
     "BroadcastChannel",
 ], optional = true }
 js-sys = { version = "0.3", optional = true }
-getrandom = { version = "0.3.3", optional = true }
+getrandom = { version = "0.4.3", optional = true }
 gloo-utils = { version = "0.2.0", optional = true }
 gloo-storage = { version = "0.3.0", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
