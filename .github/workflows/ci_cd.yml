@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
 
       # The gate's own controls run FIRST. A checker nobody has watched fail is
       # a checker nobody has evidence works, and a gate whose parser silently
@@ -71,7 +71,7 @@ jobs:
     name: "enhanced-auth still known-broken, for the recorded reason (RED = GOOD NEWS if this ever fails otherwise)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1
@@ -114,7 +114,7 @@ jobs:
           --health-retries 5
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
     
     - name: Cache Cargo dependencies
       uses: actions/cache@v3
@@ -213,7 +213,7 @@ jobs:
           --health-retries 5
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
 
     - name: Install dependencies
       run: |
@@ -299,7 +299,7 @@ jobs:
           --health-retries 5
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Cache Cargo dependencies
       uses: actions/cache@v4
@@ -411,7 +411,7 @@ jobs:
     runs-on: ubuntu-latest
     if: false
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
 
     - name: Install wasm-pack
       uses: jetli/wasm-pack-action@v0.4.0
@@ -427,7 +427,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
       
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
@@ -442,7 +442,7 @@ jobs:
     # Runs on pull requests too, so a broken Dockerfile fails the PR; nothing is pushed from one.
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
