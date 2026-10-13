@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.43): `Cargo.lock` is committed and CI builds with `--locked`
+
+CodeRipper SUP-001 (4 medium, one per binary crate: `synapsed`, `synapsectl`, `synapse-mcp-server`, `synapse-claude-channel`):
+the workspace ships applications but `Cargo.lock` was untracked. The ignore came from the initial commit's generic
+"Dependencies" template block (33f3448, 2025-07-10); no commit message or doc records a reason for it, and no later
+change relied on it except comments saying "there is no Cargo.lock". The lock is now tracked, generated with
+`cargo generate-lockfile` on 2026-10-13 (`cargo update --dry-run` then locks 0 packages; the 22 entries shown "behind latest"
+are held back by this workspace's own version requirements). `ci_cd.yml` passes `--locked` to the build, test, clippy,
+coverage and `cargo install cargo-audit` steps, and the `Dockerfile` builds `--locked`, so a build can no longer drift from the
+commit. Nothing resolves new releases by itself any more: there is no dependabot config, so refreshing is a `cargo update`
+in a PR. Library consumers are unaffected (cargo ignores a dependency's lockfile). No code changed; running daemons are
+unaffected.
+
 ### Changed (rc.42): manifests point at `ThinkersJournal/synapse`
 
 The repository moved from `ciresnave/synapse` to `ThinkersJournal/synapse` (transferred 2026-10-12 by the PM). The `repository` and `homepage` lines in the workspace manifest and the six crate manifests (8 lines, 7 files) now name the new location; the old URL only redirects. No code change. Nothing is published.

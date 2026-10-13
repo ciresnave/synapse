@@ -3,8 +3,8 @@
 # The Synapse daemon and its clients, built from this workspace.
 #
 # Binaries: `synapsed` (the daemon), `synapse` (the CLI, from the `synapsectl` crate) and
-# `synapse-claude-channel` (the Claude Code adapter). There is no Cargo.lock in the checkout
-# (.gitignore), so dependencies resolve to the newest releases at build time.
+# `synapse-claude-channel` (the Claude Code adapter). The build is `--locked`: dependencies are the
+# committed Cargo.lock's, so an image is reproducible from its commit.
 #
 # NOTE: `synapsed` listens on loopback only (it refuses any other address), so a container running it
 # is reachable only from inside that container. The image is for running `synapse` or the adapter
@@ -22,7 +22,7 @@ RUN apt-get update && \
 
 WORKDIR /usr/src/synapse
 COPY . .
-RUN cargo build --release -p synapsed -p synapsectl -p synapse-claude-channel
+RUN cargo build --locked --release -p synapsed -p synapsectl -p synapse-claude-channel
 
 FROM debian:bookworm-slim
 
