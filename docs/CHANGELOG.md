@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.46): five dependencies on their newest majors
+
+Dependabot PRs #137-#141, taken together on one branch (CireSnave's standing rule: newest dependencies at all times):
+`base64` 0.22 -> 0.23, `sha2` 0.10 -> 0.11, `getrandom` 0.3 -> 0.4, `stun_codec` 0.3 -> 0.4, `pem` 3 -> 4. One call site needed a
+change: sha2 0.11's digest output no longer implements `LowerHex`, so `generate_search_hash` in `services/registry.rs` formats
+with the existing `sender_auth::to_hex` (same lowercase two-digit hex, so cache keys are unchanged). Everything else compiled as
+is. `base64` 0.22, `getrandom` 0.2/0.3 stay in the lock as other crates' transitive dependencies. `getrandom` is only wired
+into the `wasm` feature and no source file calls it, and the `wasm` job does not build a real package (there is no `wasm/`
+directory), so that bump is compile-checked only. Verified at this head: `cargo clippy --workspace --all-targets -- -D warnings`
+(default and `--features auth`) clean, `cargo check` with `nat_traversal crypto minimal core`, `cargo test --workspace`: one
+failure, `tcp_carries_a_large_verified_message`, an existing flake (two `free_port()` calls can return the same port; passes 3 of 3
+re-runs alone).
+
 ### Changed (rc.45): GitHub Actions on their newest majors
 
 Dependabot PRs #132-#136, taken together (CireSnave's standing rule: newest dependencies at all times). `actions/checkout`

@@ -453,7 +453,8 @@ impl ParticipantRegistry {
             hasher.update(trust.to_be_bytes());
         }
 
-        format!("{:x}", hasher.finalize())
+        // sha2 0.11's output no longer implements `LowerHex`.
+        crate::sender_auth::to_hex(&hasher.finalize())
     }
 }
 
