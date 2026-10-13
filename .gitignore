@@ -20,9 +20,6 @@
 ehthumbs.db
 Thumbs.db
 
-# Dependencies
-Cargo.lock
-
 # Temporary files
 *.tmp
 *.temp

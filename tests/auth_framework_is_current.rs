@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! auth-framework 0.3.0 pulled reqwest 0.11 -> hyper 0.14 -> h2 0.3.27 (RUSTSEC-2026-0258, no fix on
 //! the 0.3 line) and rustls-pemfile 1.0.4 (RUSTSEC-2025-0134). The manifest must ask for 0.5 or later.
-//! Cargo.lock is not tracked, so the manifest is what this can pin; the Security Audit job reads the
+//! The manifest is what this pins; the committed Cargo.lock and the Security Audit job read the
 //! resolved graph.
 
 /// The minor version of the `auth-framework` requirement in `manifest`, e.g. 5 for "0.5.0-rc26".

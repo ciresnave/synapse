@@ -162,7 +162,7 @@ jobs:
     # a full build before it is reported.
 
     - name: Build
-      run: cargo build --workspace --verbose
+      run: cargo build --locked --workspace --verbose
 
     - name: Run tests
       if: always()
@@ -170,7 +170,7 @@ jobs:
       # every target that sorts after it (including all doc-tests) never runs here.
       # --workspace: a root package with members tests only itself by default, which would
       # silently drop crates/synapse-mcp-server's tests.
-      run: cargo test --workspace --verbose --no-fail-fast
+      run: cargo test --locked --workspace --verbose --no-fail-fast
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
@@ -185,7 +185,7 @@ jobs:
       # default `native` feature set this reaches every target except those that
       # are known not to compile: the `enhanced-auth` example and the two
       # `test = false` integration tests (see Cargo.toml).
-      run: cargo clippy --workspace --all-targets -- -D warnings
+      run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   # CIRESNAVE-EXPECTATIONS 5.1d, verbatim: "Make sure Synapse isn't building things
   # claude-specific because it is a communication system for *any LLM*." The core crate
@@ -249,6 +249,8 @@ jobs:
         sed -i 's/^members = \["crates\/\*"\]\(\r\?\)$/members = []\1/' Cargo.toml
         test "$(grep -cE '^members = \[\]'$'\r''?$' Cargo.toml)" -eq 1
 
+    # Not --locked: the step above deletes crates/ and empties `members`, so the resolved graph
+    # legitimately differs from the committed Cargo.lock (it loses the adapters' entries).
     - name: The core builds and passes with no adapter present
       run: cargo test -p synapse --verbose --no-fail-fast
       env:
@@ -328,7 +330,7 @@ jobs:
       uses: taiki-e/install-action@cargo-llvm-cov
 
     - name: Run the tests under instrumentation
-      run: cargo llvm-cov --workspace --no-fail-fast --no-report
+      run: cargo llvm-cov --locked --workspace --no-fail-fast --no-report
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
@@ -428,7 +430,7 @@ jobs:
       - uses: actions/checkout@v3
       
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install --locked cargo-audit
       
       - name: Run security audit
         run: cargo audit
