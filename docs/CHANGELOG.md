@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.45): GitHub Actions on their newest majors
+
+Dependabot PRs #132-#136, taken together (CireSnave's standing rule: newest dependencies at all times). `actions/checkout`
+v3/v4 -> v7 (8 steps), `actions/upload-artifact` v4 -> v7, `docker/login-action` v2 -> v4, `docker/metadata-action`
+v4 -> v6, `docker/setup-buildx-action` v2 -> v4. Workflow files only; no source change. Still behind: `actions-rs/toolchain@v1`,
+`actions/cache@v3`/`@v4`, `docker/build-push-action@v3`, `codecov/codecov-action@v5`, `appleboy/ssh-action@master` (dependabot opens
+those as it reaches them). `docker/metadata-action` and `setup-buildx-action` run in the PR image build; `login-action` runs only on a push to `main`, which
+still fails with 401 `insufficient scopes` (Docker Hub token), so its new major is untested until that is fixed.
+
 ### Changed (rc.43): `Cargo.lock` is committed and CI builds with `--locked`
 
 CodeRipper SUP-001 (4 medium, one per binary crate: `synapsed`, `synapsectl`, `synapse-mcp-server`, `synapse-claude-channel`):
