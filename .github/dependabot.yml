@@ -1,0 +1,21 @@
+# Keeps the committed Cargo.lock (and the workflow action pins) current.
+# CireSnave's standing rule is the newest releases of every dependency at all times.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for all minor and patch updates; majors arrive one PR each.
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]

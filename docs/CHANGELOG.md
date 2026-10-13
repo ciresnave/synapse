@@ -17,7 +17,7 @@ change relied on it except comments saying "there is no Cargo.lock". The lock is
 are held back by this workspace's own version requirements). `ci_cd.yml` passes `--locked` to the build, test, clippy,
 coverage and `cargo install cargo-audit` steps (not to the model-agnostic job's `cargo test -p synapse`, which deletes `crates/`
 first, so its graph legitimately differs from the lock), and the `Dockerfile` builds `--locked`, so a build can no longer drift from the
-commit. Nothing resolves new releases by itself any more: there is no dependabot config, so refreshing is a `cargo update`
+commit. Nothing resolves new releases by itself any more: `.github/dependabot.yml` (new here) opens a weekly grouped minor+patch PR for `cargo` and for `github-actions`, a PR each for majors; those PRs do not bump the workspace version, the PM allocates it at gate. Before it, refreshing was a `cargo update`
 in a PR. Library consumers are unaffected (cargo ignores a dependency's lockfile). No code changed; running daemons are
 unaffected.
 
