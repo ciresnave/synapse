@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.47): `free_port()` in `tests/transport_repairs.rs` can no longer hand out the same port twice
+
+`Pair` asserts `alice_port != bob_port`, and `free_port()` bound port 0 and released it, so the kernel could give the same
+port to the next bind. That failed the required `Build and Test` job intermittently at `transport_repairs.rs:224`
+(`tcp_carries_a_large_verified_message`, `quic_oversize_refusal_does_not_increment_send_failures`,
+`quic_times_out_a_stream_that_stalls_mid_message`: three different tests in three runs, each `left == right`). The helper now
+remembers the ports it has returned and rebinds until it gets a new one. Test-only; no library change. The new test
+`free_port_is_distinct_within_a_process` is a guard, not a reproduction: it did not fail against the old helper on this
+Windows machine in 4 runs (8 threads x 250 calls), so only CI over time shows the flake gone.
+
 ### Changed (rc.46): five dependencies on their newest majors
 
 Dependabot PRs #137-#141, taken together on one branch (CireSnave's standing rule: newest dependencies at all times):
