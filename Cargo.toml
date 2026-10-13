@@ -101,7 +101,7 @@ futures-util = { version = "0.3", optional = true }
 
 # NAT traversal dependencies for real implementation
 bytecodec = { version = "0.4", optional = true }
-stun_codec = { version = "0.3", optional = true }
+stun_codec = { version = "0.4", optional = true }
 bytes = { version = "1.5", optional = true }
 igd = { version = "0.12", optional = true }       # UPnP port mapping
 
