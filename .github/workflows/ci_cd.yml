@@ -249,8 +249,10 @@ jobs:
         sed -i 's/^members = \["crates\/\*"\]\(\r\?\)$/members = []\1/' Cargo.toml
         test "$(grep -cE '^members = \[\]'$'\r''?$' Cargo.toml)" -eq 1
 
+    # Not --locked: the step above deletes crates/ and empties `members`, so the resolved graph
+    # legitimately differs from the committed Cargo.lock (it loses the adapters' entries).
     - name: The core builds and passes with no adapter present
-      run: cargo test --locked -p synapse --verbose --no-fail-fast
+      run: cargo test -p synapse --verbose --no-fail-fast
       env:
         DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 

@@ -15,7 +15,8 @@ the workspace ships applications but `Cargo.lock` was untracked. The ignore came
 change relied on it except comments saying "there is no Cargo.lock". The lock is now tracked, generated with
 `cargo generate-lockfile` on 2026-10-13 (`cargo update --dry-run` then locks 0 packages; the 22 entries shown "behind latest"
 are held back by this workspace's own version requirements). `ci_cd.yml` passes `--locked` to the build, test, clippy,
-coverage and `cargo install cargo-audit` steps, and the `Dockerfile` builds `--locked`, so a build can no longer drift from the
+coverage and `cargo install cargo-audit` steps (not to the model-agnostic job's `cargo test -p synapse`, which deletes `crates/`
+first, so its graph legitimately differs from the lock), and the `Dockerfile` builds `--locked`, so a build can no longer drift from the
 commit. Nothing resolves new releases by itself any more: there is no dependabot config, so refreshing is a `cargo update`
 in a PR. Library consumers are unaffected (cargo ignores a dependency's lockfile). No code changed; running daemons are
 unaffected.
