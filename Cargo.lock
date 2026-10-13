@@ -5454,7 +5454,7 @@ dependencies = [
  "mail-parser",
  "native-tls",
  "parking_lot",
- "pem 3.0.6",
+ "pem 4.0.0",
  "pretty_assertions",
  "proc-macro2",
  "quinn",
