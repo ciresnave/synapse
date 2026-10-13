@@ -5425,7 +5425,7 @@ dependencies = [
  "auth-framework",
  "auto-discovery",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bcrypt 0.15.1",
  "blake3",
  "bytecodec",
@@ -5501,7 +5501,7 @@ dependencies = [
 name = "synapse-claude-channel"
 version = "6.0.0-rc.45"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "rmcp",
  "serde_json",
  "synapse",
@@ -5516,7 +5516,7 @@ dependencies = [
 name = "synapse-mcp-server"
 version = "6.0.0-rc.45"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "reqwest 0.13.5",
  "rmcp",
@@ -5560,7 +5560,7 @@ name = "synapsed"
 version = "6.0.0-rc.45"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "reqwest 0.13.5",
  "ring",
@@ -5577,7 +5577,7 @@ dependencies = [
 name = "synapsed-client"
 version = "6.0.0-rc.45"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "libc",
  "reqwest 0.13.5",
