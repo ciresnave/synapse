@@ -384,14 +384,41 @@ async fn round_trip(
     panic!("no message arrived over {kind:?} within 3 s");
 }
 
-/// A free loopback port. Bound and released, so another process could take it before the node
-/// binds it; `node` then fails with a clear message rather than a false pass.
+/// A free loopback port, never one this process has already handed out. Bound and released, so another
+/// process could take it before the node binds it; `node` then fails with a clear message rather than
+/// a false pass. The kernel may give a just-released ephemeral port to the very next bind, which made
+/// two `free_port()` calls for one `Pair` (or for two tests running in parallel) occasionally equal.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral")
-        .local_addr()
-        .expect("local_addr")
-        .port()
+    static HANDED_OUT: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral")
+            .local_addr()
+            .expect("local_addr")
+            .port();
+        let mut handed_out = HANDED_OUT.lock().unwrap_or_else(|e| e.into_inner());
+        if !handed_out.contains(&port) {
+            handed_out.push(port);
+            return port;
+        }
+    }
+}
+
+/// `free_port` never hands the same port out twice in one process: `Pair` asserts its two ports differ,
+/// and the kernel is free to give a just-released ephemeral port to the very next bind.
+#[test]
+fn free_port_is_distinct_within_a_process() {
+    // Eight threads, as the test harness runs tests: one thread can drop a listener and another bind
+    // the same port again before the first caller has used it.
+    let handles: Vec<_> = (0..8)
+        .map(|_| std::thread::spawn(|| (0..250).map(|_| free_port()).collect::<Vec<_>>()))
+        .collect();
+    let mut seen = HashSet::new();
+    for h in handles {
+        for port in h.join().expect("thread") {
+            assert!(seen.insert(port), "free_port returned {port} twice");
+        }
+    }
 }
 
 fn tcp() -> Box<dyn TransportFactory> {
