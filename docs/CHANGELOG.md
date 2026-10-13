@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.45): GitHub Actions on their newest majors
+
+Dependabot PRs #132-#136, taken together (CireSnave's standing rule: newest dependencies at all times). `actions/checkout`
+v3/v4 -> v7 (8 steps), `actions/upload-artifact` v4 -> v7, `docker/login-action` v2 -> v4, `docker/metadata-action`
+v4 -> v6, `docker/setup-buildx-action` v2 -> v4. Workflow files only; no source change. Still behind: `actions-rs/toolchain@v1`,
+`actions/cache@v3`/`@v4`, `docker/build-push-action@v3`, `codecov/codecov-action@v5`, `appleboy/ssh-action@master` (dependabot opens
+those as it reaches them). `docker/metadata-action` and `setup-buildx-action` run in the PR image build; `login-action` runs only on a push to `main`, which
+still fails with 401 `insufficient scopes` (Docker Hub token), so its new major is untested until that is fixed.
+The three docker actions are pinned to full commit SHAs (CodeQL's unpinned-tag finding), each the commit its tag pointed at on 2026-10-13: `setup-buildx-action` f87e5991 (v4), `login-action` dbcb8138 (v4), `metadata-action` dc802804 (v6); `docker/build-push-action@v3` is still a tag.
+
 ### Changed (rc.43): `Cargo.lock` is committed and CI builds with `--locked`
 
 CodeRipper SUP-001 (4 medium, one per binary crate: `synapsed`, `synapsectl`, `synapse-mcp-server`, `synapse-claude-channel`):
