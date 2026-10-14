@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.53): every GitHub Action in `ci_cd.yml` pinned to a commit
+
+The PM's pin patch (portfolio `pin-patches-20261014`; the patch's own count is 17 moved and 4 kept, and its diff changes 21 lines). `actions/checkout` v7.0.1,
+`actions/cache` v6.1.0 (was v3 and v4), `actions-rs/toolchain` v1.0.6, `actions/upload-artifact` v7.0.2, `codecov/codecov-action`
+v7.1.1, `docker/build-push-action` v7.4.0 (was v3), `jetli/wasm-pack-action` v0.4.0, `taiki-e/install-action` (the
+`cargo-llvm-cov` tag) and `appleboy/ssh-action` (was `@master`) are SHAs with the tag in a comment. Checked against the forge:
+every SHA exists in its repo and, for the tagged ones, is the commit that tag resolves to. The patch pinned `ssh-action` to the
+head of `master`; at the PM's ruling it is pinned to its release v1.2.5 (`0ff4204d`, the commit that tag resolves to), because
+it is a deploy action that holds secrets. Several moves are
+version jumps, not only pins; CI is the proof for the jobs that run on a PR. The staging and production deploy jobs, and the
+disabled WASM job, do not run on a PR and were not exercised.
+
 ### Added (rc.52): `whoami` advertises the push method
 
 `whoami` now carries `push`: `{"capability_key": "claude/channel", "method": "notifications/claude/channel"}` on the Claude Code
