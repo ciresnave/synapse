@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The gate's own controls run FIRST. A checker nobody has watched fail is
       # a checker nobody has evidence works, and a gate whose parser silently
@@ -71,10 +71,10 @@ jobs:
     name: "enhanced-auth still known-broken, for the recorded reason (RED = GOOD NEWS if this ever fails otherwise)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+        uses: actions-rs/toolchain@b2417cde72dcf67f306c0ae8e0828a81bf0b189f # v1.0.6
         with:
           toolchain: stable
           profile: minimal
@@ -114,10 +114,10 @@ jobs:
           --health-retries 5
     
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     
     - name: Cache Cargo dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cargo/registry
@@ -133,7 +133,7 @@ jobs:
         sudo apt-get install -y libssl-dev pkg-config libpq-dev protobuf-compiler
     
     - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1
+      uses: actions-rs/toolchain@b2417cde72dcf67f306c0ae8e0828a81bf0b189f # v1.0.6
       with:
         toolchain: stable
         profile: minimal
@@ -213,7 +213,7 @@ jobs:
           --health-retries 5
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install dependencies
       run: |
@@ -221,7 +221,7 @@ jobs:
         sudo apt-get install -y libssl-dev pkg-config libpq-dev protobuf-compiler
 
     - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1
+      uses: actions-rs/toolchain@b2417cde72dcf67f306c0ae8e0828a81bf0b189f # v1.0.6
       with:
         toolchain: stable
         profile: minimal
@@ -299,10 +299,10 @@ jobs:
           --health-retries 5
 
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Cache Cargo dependencies
-      uses: actions/cache@v4
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         # A key of its own: instrumented artifacts must not mix with `build`'s.
         path: |
@@ -319,7 +319,7 @@ jobs:
         sudo apt-get install -y libssl-dev pkg-config libpq-dev protobuf-compiler
 
     - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1
+      uses: actions-rs/toolchain@b2417cde72dcf67f306c0ae8e0828a81bf0b189f # v1.0.6
       with:
         toolchain: stable
         profile: minimal
@@ -327,7 +327,7 @@ jobs:
         components: llvm-tools-preview
 
     - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@cargo-llvm-cov
+      uses: taiki-e/install-action@32e16a23c68a001a1621efca19f131f965d4d122 # cargo-llvm-cov
 
     - name: Run the tests under instrumentation
       run: cargo llvm-cov --locked --workspace --no-fail-fast --no-report
@@ -376,7 +376,7 @@ jobs:
 
     - name: Keep lcov as an artifact
       if: always()
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: lcov
         path: lcov.info
@@ -384,7 +384,7 @@ jobs:
 
     - name: Upload to Codecov
       if: always()
-      uses: codecov/codecov-action@v5
+      uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: lcov.info
@@ -411,10 +411,10 @@ jobs:
     runs-on: ubuntu-latest
     if: false
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Install wasm-pack
-      uses: jetli/wasm-pack-action@v0.4.0
+      uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
       with:
         version: 'latest'
 
@@ -427,7 +427,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
@@ -442,7 +442,7 @@ jobs:
     # Runs on pull requests too, so a broken Dockerfile fails the PR; nothing is pushed from one.
     
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -465,7 +465,7 @@ jobs:
             type=sha,format=short
       
       - name: Build and push Docker image
-        uses: docker/build-push-action@v3
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
@@ -480,7 +480,7 @@ jobs:
     
     steps:
       - name: Deploy to staging environment
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USERNAME }}
@@ -498,7 +498,7 @@ jobs:
     
     steps:
       - name: Deploy to production environment
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.PRODUCTION_HOST }}
           username: ${{ secrets.PRODUCTION_USERNAME }}
