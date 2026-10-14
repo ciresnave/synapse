@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.60"
+version = "6.0.0-rc.61"
 
 [package]
 name = "synapse"
@@ -126,8 +126,9 @@ rustls-native-certs = { version = "0.8", optional = true }
 native-tls = { version = "0.2", optional = true }
 
 # Database connections - optional
-sqlx = { version = "0.8.6", features = [
-    "runtime-tokio-rustls",
+sqlx = { version = "0.9.0", features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
     "postgres",
     "uuid",
     "chrono",
@@ -195,7 +196,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 tokio-test = "0.4"
 pretty_assertions = "1.0"
 tempfile = "3.0"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
 
 # WASM-specific dev dependencies
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

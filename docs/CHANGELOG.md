@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.61): `sqlx` 0.8.6 -> 0.9.0 (ROADMAP item 15, second of four)
+
+The legacy `database` feature's dependency, taken under "newest versions at all times". sqlx 0.9 split the old
+`runtime-tokio-rustls` feature into `runtime-tokio` + `tls-rustls-ring` (same ring backend as before), and made `sqlx::query`
+refuse any non-`'static` SQL string unless it is wrapped in `sqlx::AssertSqlSafe`. Four call sites needed that, each stated at the
+site: `Database::query_participants` and `query_raw_string` (caller-supplied SQL by design; values still go through `bind`), the
+capability search (only `$n` placeholders are formatted in) and the migration runner (embedded SQL). No behaviour change.
+**Proved:** `cargo check --features database --all-targets` and `cargo test --features database` pass on Windows (lib 169, all
+integration suites). **Limit:** no test in this repo executes a `database` code path against a live PostgreSQL, so the
+runtime behaviour of these queries is compile-checked only, as it was before the bump. The remaining two (`redis`,
+`auth-framework`) are separate PRs.
+
 ### Security (rc.60): `rustls` 0.23.45 -> 0.23.46 in Cargo.lock
 
 Lock-only; no source change. `cargo audit` on rc.59 reported four vulnerabilities in rustls 0.23.45 published 2026-10-14

@@ -13,9 +13,9 @@ name = "synapse"
 path = "src/main.rs"
 
 [dependencies]
-synapse = { path = "../..", version = "6.0.0-rc.60" }
-synapse-security = { path = "../synapse-security", version = "6.0.0-rc.60" }
-synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.60" }
+synapse = { path = "../..", version = "6.0.0-rc.61" }
+synapse-security = { path = "../synapse-security", version = "6.0.0-rc.61" }
+synapsed-client = { path = "../synapsed-client", version = "6.0.0-rc.61" }
 clap = { version = "4.5.41", features = ["derive", "env"] }
 chrono = "0.4"
 serde_json = "1.0"
