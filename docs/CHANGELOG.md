@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.62): `redis` 0.32.4 -> 1.7.1 (ROADMAP item 15, third of four)
+
+The legacy `cache` feature's dependency, a major version taken under "newest versions at all times". Source needed **no
+change**: `src/synapse/storage/cache.rs` (`Client::open`, `AsyncCommands::{set_ex, get, del, ...}`) compiles unchanged on 1.7.1
+and the `tokio-comp` feature still exists. **Proved:** `cargo check --features cache --all-targets`, `cargo test --features
+cache`, clippy `-D warnings`, fmt, SPDX gate, `--locked` pass on Windows. **Limit:** no test in this repo talks to a Redis
+server, so the runtime behaviour of the cache calls (reply-type conversions changed across redis-rs 1.0) is compile-checked
+only, as it was before the bump. The last of the four (`auth-framework`) is a separate PR.
+
 ### Changed (rc.61): `sqlx` 0.8.6 -> 0.9.0 (ROADMAP item 15, second of four)
 
 The legacy `database` feature's dependency, taken under "newest versions at all times". sqlx 0.9 split the old

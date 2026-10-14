@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.61"
+version = "6.0.0-rc.62"
 
 [package]
 name = "synapse"
@@ -134,7 +134,7 @@ sqlx = { version = "0.9.0", features = [
     "chrono",
     "json",
 ], optional = true }
-redis = { version = "0.32.4", features = ["tokio-comp"], optional = true }
+redis = { version = "1.7.1", features = ["tokio-comp"], optional = true }
 
 # Authentication framework.
 # 0.3.0 pulled reqwest 0.11 -> hyper 0.14 -> h2 0.3.27 (RUSTSEC-2026-0258, no fix on the 0.3 line)
