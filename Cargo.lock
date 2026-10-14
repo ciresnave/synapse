@@ -4081,9 +4081,9 @@ dependencies = [
 
 [[package]]
 name = "redb"
-version = "4.3.0"
+version = "4.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb338a6c67830a61bed824b78c2bb034ab1ff401a20616bd7957524f4fdc2f22"
+checksum = "39178e0a867f9e3eaa6292a4ab1dd3613f2519c5b564341e1e7b29b270736cc4"
 dependencies = [
  "libc",
 ]
@@ -5424,7 +5424,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.58"
+version = "6.0.0-rc.59"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -5509,7 +5509,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.58"
+version = "6.0.0-rc.59"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -5524,7 +5524,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.58"
+version = "6.0.0-rc.59"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -5543,7 +5543,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.58"
+version = "6.0.0-rc.59"
 dependencies = [
  "chrono",
  "serde_json",
@@ -5553,7 +5553,7 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.58"
+version = "6.0.0-rc.59"
 dependencies = [
  "chrono",
  "clap",
@@ -5567,7 +5567,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.58"
+version = "6.0.0-rc.59"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5585,7 +5585,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.58"
+version = "6.0.0-rc.59"
 dependencies = [
  "base64 0.23.1",
  "chrono",

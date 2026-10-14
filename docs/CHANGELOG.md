@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.59): `redb` 4.3.0 -> 4.4.0 (ROADMAP item 15, first of four)
+
+The mailbox store's dependency, taken under "newest versions at all times". redb's 4.4.0 changelog lists no file-format change
+(cursor API, `NonZero` keys, fixes for page-cache growth, `compact()` and `check_integrity()`); that was **proved, not trusted**.
+**Forward:** rc.57 binaries (redb 4.3.0) wrote a `mailbox.redb` (573,440 bytes: 6 messages, one acked, one leased on a 900 s
+lease, four queued, one with a 60 KB body; the daemon was killed, so open also had to recover). The rc.59 build (4.4.0) opened a
+copy: pending counts identical (`leased 1, queued 4`, same `oldest_enqueued_at`), all five unacked messages delivered, the 60 KB
+body intact. **Control:** the same step with the rc.57 binary on another copy gave byte-identical output, including `attempts 2`
+on the leased message (a new daemon instance releases the previous claim's leases; that is existing behaviour, not redb).
+**Header:** magic and the first 20 header bytes unchanged, file size unchanged; only commit-slot bytes differ. **Rollback:** the
+rc.57 binary opened the file the 4.4.0 daemon had modified and kept delivering, attempts counted on, and accepted a new send,
+so a downgrade needs no migration. Synapse's own `FORMAT` stamp stays 2 (no code change). **Tests on 4.4.0:** `mailbox` 21,
+`mailbox_redb` 26, `mailbox_crash` 6, `mailbox_held` 5, `synapsed` 3+36, `synapsed-client`, `synapse-mcp-server` 5+9+4, all pass.
+Windows only; not run on Linux locally (CI is). No source file changes: the redb requirement and the lock, plus this version bump. The next three of item 15 (`sqlx`,
+`redis`, `auth-framework`) are separate PRs.
+
 ### Added (rc.58): ROADMAP.md next slice, items 15-19 (what Synapse consumes and owes)
 
 Docs only. Measured against `origin/main` of PersistAnt, UniSQL and auth-framework and against crates.io on 2026-10-14: four
