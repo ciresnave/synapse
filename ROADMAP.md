@@ -47,6 +47,19 @@ can fail the first public user.
 
 **Unverified until its first CI run:** `the_daemon_start_file_is_owner_only` (rc.54, `cfg(unix)`) asserts the `0600` mode of `synapsed-start.err`; it compiles to nothing on the Windows box it was written on, so it was not seen red or green locally and `Build and Test` on ubuntu is its first execution.
 
+## Next slice: what Synapse consumes and owes (measured 2026-10-14 at main 704fa34, rc.57)
+
+Built from the portfolio roadmap's entries for auth-framework, PersistAnt and UniSQL, checked against each repo's `origin/main`
+and crates.io. Nothing here is started; each item is its own PR.
+
+| # | Item | Measured | Owner / decision |
+|---|------|----------|------------------|
+| 15 | **Dependency currency** (CireSnave: newest versions at all times) | `redb` 4.3.0 -> 4.4.0 (the mailbox store, `mailbox-redb`); `sqlx` 0.8.6 -> 0.9.0; `redis` 0.32.4 -> 1.7.1 (a major); `auth-framework` 0.6.0-rc42 -> 0.6.0-rc55 (crates.io). redb first: it holds the on-disk mailbox, so check the file-format stamp before and after | Synapse lane |
+| 16 | **Default features compile layers the daemon does not use** | `native` (the default) includes `database`, `cache` and `auth`, so a default build compiles `sqlx`, `redis` and `auth-framework`. `sqlx` is referenced in `src/synapse/storage/{database,cache,migrations}.rs`, `redis` in `cache.rs`; `tests/end_to_end_integration_test.rs` is the one test that names `storage`. `synapsed` stores in redb. First step is to measure consumers (workspace crates, examples, tests), then propose retiring `database`/`cache` (breaking, named in the changelog) | CireSnave/PM decision; Synapse measures |
+| 17 | **auth-framework: consumed but not used** | The `auth` feature only pulls the dependency. `src/auth_integration_enhanced.rs` is `enhanced-auth`, which has never compiled; the `From<AuthError>` impls were removed for the minimal build. Account-owner authentication is not Synapse's job (portfolio decision: the Introduction app does OAuth), so auth-framework would land there, not in the core. Owed to auth-framework: nothing today | CireSnave: keep the dead feature, or remove `auth`, `enhanced-auth` and the module |
+| 18 | **PersistAnt: owed a store contract, consumes nothing** | `persistant` 0.4.10 is on crates.io. Its `DESIGN-KINDS.md` takes Synapse's mailbox (atomic multi-key transaction, ordered `(role, seq)` scan) as a requirement. Synapse already has the contract as `tests/mailbox_suite/mod.rs`, run against the memory and redb `MailStore`s. Owed: make the suite reusable so a PersistAnt-backed `MailStore` can be proved against it. Consumed later, only if PersistAnt offers them: `blob.replace_atomic` for the three atomic-replace sites. Stays native: `create_exclusive_atomic` (hard link) and `file_mode` (0600), which OpenDAL does not offer. **Synapse stays on redb until a PersistAnt backend passes the suite**; any on-disk change needs a migration | Synapse lane (suite); PersistAnt lane (backend) |
+| 19 | **UniSQL: a corpus, if the SQL survives** | `unisql` is `0.0.0` on crates.io; its `DESIGN.md` names Synapse's Postgres use as one input. Synapse owes nothing and consumes nothing now. If item 16 keeps the legacy relational layer, its SQL (24 `sqlx::` references in `database.rs` and `migrations.rs`) is a sample corpus for dialect translation and would be consumed through PersistAnt's relational kind; if it is retired, there is nothing to offer | Contingent on 16 |
+
 ## After the flip (unordered, not tasked)
 
 - Channel adapter push default and wake-on-mail across lanes (the claude-peers cutover is a separate question to CireSnave).

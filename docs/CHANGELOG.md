@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.58): ROADMAP.md next slice, items 15-19 (what Synapse consumes and owes)
+
+Docs only. Measured against `origin/main` of PersistAnt, UniSQL and auth-framework and against crates.io on 2026-10-14: four
+dependencies behind (`redb`, `sqlx`, `redis`, `auth-framework`), the default `native` feature compiling the legacy
+`database`/`cache`/`auth` layers the daemon does not use, `auth-framework` consumed but never compiled against, and the mailbox
+contract suite as what Synapse owes PersistAnt. No code changed; nothing started.
+
 ### Changed (rc.57): legacy files archived or deleted; `docs/API_REFERENCE.md` cut to the daemon, CLI and MCP surface
 
 At the PM's instruction. **Deleted** (all 0 bytes): root `err.txt`, `WINDOWS_LINKER_WORKAROUND.md` (the real one is
