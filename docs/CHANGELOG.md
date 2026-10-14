@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.49): README Quick Start named a crate and a method that do not exist
+
+The README told readers to depend on `message_routing_system = "0.1.0"` and `use message_routing_system::*`; the library is
+`synapse`. Its Basic Usage example called `register_peer`, which does not exist (`register_peer_key` does, with another
+signature). Basic Usage is now the CLI sequence run from a clean home at rc.48 (id init, claim, send, inbox, ack, list); the
+Rust example is removed. Docs only. `src/lib.rs:185` still carries the old dependency line, and the README sections after
+Quick Start (Real-World Example, Advanced Features) are not checked against the code.
+
 ### Added (rc.48): `ROADMAP.md`, the release path to the public flip
 
 Docs only; no code change. Orders the remaining work, and states what Synapse takes from and gives to auth-framework, OverMind,
