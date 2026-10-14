@@ -19,15 +19,17 @@ It moves bytes between processes; it does not put them into an agent (that is ea
 | 1 | CI green and protected: required checks, `--locked`, Cargo.lock tracked, actions on newest majors | done (rc.43-rc.46) | no |
 | 2 | Docker image push to `thinkersjournal/synapse` | works (sha-f506140 on Hub, per PM 2026-10-14) | no |
 | 3 | Coverage upload | done (org-level `CODECOV_TOKEN`, 2026-10-12) | no |
-| 4 | **`cargo publish --dry-run` in dependency order**: `synapse` (root) -> `synapse-security` -> `synapsed-client` -> `synapse-mcp-server` -> `synapse-claude-channel`; `synapsed` and `synapsectl` after `synapsed-client` | order read from the `crates/*/Cargo.toml` path deps at f506140; **dry-run itself not yet run** | **yes** |
-| 5 | **Cold first run from the README** on a clean machine/profile: every command in README works as written | not run | **yes** |
-| 6 | `docker-compose.yml` matches the daemon (it still describes a Postgres + 8080 + config-mount service) | stale | yes (it ships in the repo) |
+| 4 | **`cargo publish --dry-run` in dependency order**: `synapse` (root) -> `synapse-security` -> `synapsed-client` -> `synapse-mcp-server` -> `synapse-claude-channel`; `synapsed` and `synapsectl` after `synapsed-client` | root `synapse` passes at rc.48 (195 files, verified, exit 0, 2026-10-14). The six dependents cannot be dry-run until `synapse` rc.48 is on crates.io: each resolves it from the registry | **yes** (publish itself is CireSnave's) |
+| 5 | **Cold first run from the README** | done at rc.48 (#146): CLI sequence runs end to end; README no longer names `message_routing_system`/`register_peer` | no |
+| 6 | `docker-compose.yml` matches the daemon | done: one loopback-only daemon service with a volume, run against `thinkersjournal/synapse:main` (the old `:latest` tag does not exist on Hub). `ci_cd.yml` deploy jobs still `docker-compose pull/up` over ssh: unchanged, not exercised | no |
 | 7 | `whoami` / `push` advertisement: what the MCP server and the daemon say a client can do matches what they do | open | no, but a public surface |
 | 8 | Soak ends with `sent.log` matching the transcript | running (rc.33 daemon, 1 msg/10 min since 2026-10-12T18:31Z) | no (evidence) |
 | 9 | Alert delivery: `AlertTransport` has no implementation (board 131); alerts are logged only | seam only | no, said plainly in the docs |
 | 10 | Dependency currency: `auth-framework` is `0.6.0-rc42` here, crates.io has `0.6.0-rc55` | 13 rcs behind | CireSnave's "newest at all times" rule |
 | 11 | crates.io names: `synapse` is at 1.1.0 there (ours is 6.0.0-rc.47, higher); the six other names are `0.0.0` placeholders. Ownership/permission to publish them is **unverified** | unknown | **yes** |
 | 12 | `docs/` pass: stale pages (`DEPLOYMENT_GUIDE`, `CONFIGURATION_GUIDE`, `API_REFERENCE`) against the daemon-era surface | unmeasured | no |
+| 13 | **Daemon start failures name their cause**: `synapse claim` on a refused home prints only "synapsed exited (exit code: 2) and no daemon answered"; `synapsed` itself prints the reason (`permissions_too_open` + path, or `no account`) on its stderr, which the CLI's on-demand start drops. Fix: surface the daemon's stderr (or its last line) in the CLI error, with a test per cause | open (PM 2026-10-14) | no, but the first thing a new user hits |
+| 14 | `src/lib.rs:185` doc still says `message_routing_system = "0.1.0"` | open | no |
 
 Each item is its own PR with a version bump (PM allocates the number). Items 4-6 go first: they are mechanical and each one
 can fail the first public user.

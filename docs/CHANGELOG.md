@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.50): `docker-compose.yml` describes the daemon, not the legacy Postgres service
+
+The file ran `thinkersjournal/synapse:latest` (no such tag on Hub) with Postgres, ports 8080-8082, a config mount, Prometheus
+and Grafana, none of which `synapsed` uses. It is now one service with a named volume and no published port (`synapsed` is
+loopback only), image `thinkersjournal/synapse:main` overridable with `SYNAPSE_IMAGE`. Run against that image: `id init`,
+`up -d`, then `claim`, `send` and `inbox` through `docker compose exec` all worked; before `id init` the daemon restarts in a
+loop (exit 2, "no account"), which the header comment says. `monitoring/` is now unreferenced and left in place.
+ROADMAP.md: items 4-6 updated, items 13-14 added.
+
 ### Fixed (rc.49): README Quick Start named a crate and a method that do not exist
 
 The README told readers to depend on `message_routing_system = "0.1.0"` and `use message_routing_system::*`; the library is
