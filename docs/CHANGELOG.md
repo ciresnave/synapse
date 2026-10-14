@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.64): portfolio hygiene, no behaviour change (CodeRipper WSP-001, SUP-008, DOC-009)
+
+`.github/CODEOWNERS` (`* @ciresnave`); top-level `permissions: contents: read` in `ci_cd.yml` (no job needs more: Docker Hub and the
+deploy hosts use secrets, not the `GITHUB_TOKEN`); the three `postgres:13` CI service-container images carry a waiver comment (PM
+ruling 2026-10-14: CI-only, no credential of ours reaches them); `docs/GLOSSARY.md` (80 doc pages, 26 terms, each tied to its source).
+Actions were already SHA-pinned (rc.53). No source change.
+
 ### Changed (rc.63): `auth-framework` 0.6.0-rc42 -> 0.6.0-rc55 (ROADMAP item 15, last of four; PORTFOLIO drift)
 
 Pinned to the newest rc on crates.io (2026-10-14). Source unchanged: the optional `auth` feature (with `oauth-device-flows` and

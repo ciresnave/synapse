@@ -8,6 +8,12 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+# Least privilege (zizmor `excessive-permissions`, CodeRipper SUP-008): the token reads the repo and nothing else.
+# No job below needs more: Docker Hub and the deploy hosts authenticate with secrets, not the GITHUB_TOKEN.
+# Raise per job, never here.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -100,6 +106,7 @@ jobs:
     
     services:
       postgres:
+        # SUP-008 (unpinned-images) WAIVED by PM ruling 2026-10-14: CI-only service container, no credential of ours reaches it.
         image: postgres:13
         env:
           POSTGRES_USER: postgres
@@ -199,6 +206,7 @@ jobs:
 
     services:
       postgres:
+        # SUP-008 (unpinned-images) WAIVED by PM ruling 2026-10-14: CI-only service container, no credential of ours reaches it.
         image: postgres:13
         env:
           POSTGRES_USER: postgres
@@ -285,6 +293,7 @@ jobs:
 
     services:
       postgres:
+        # SUP-008 (unpinned-images) WAIVED by PM ruling 2026-10-14: CI-only service container, no credential of ours reaches it.
         image: postgres:13
         env:
           POSTGRES_USER: postgres
