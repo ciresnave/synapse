@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Security (rc.60): `rustls` 0.23.45 -> 0.23.46 in Cargo.lock
+
+Lock-only; no source change. `cargo audit` on rc.59 reported four vulnerabilities in rustls 0.23.45 published 2026-10-14
+(RUSTSEC-2026-0346 `Debug` impls expose TLS secrets, -0347 buffered data sent to the outer server after ECH rejection, -0348
+Brotli certificate decompression can allocate 1 GiB before authentication, -0349 unauthenticated ServerHello downgrades later
+connections); all fixed in 0.23.46 (on crates.io 2026-10-14 09:54Z). Found when the Security Audit job went red on every open PR.
+
 ### Changed (rc.59): `redb` 4.3.0 -> 4.4.0 (ROADMAP item 15, first of four)
 
 The mailbox store's dependency, taken under "newest versions at all times". redb's 4.4.0 changelog lists no file-format change
