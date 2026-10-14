@@ -22,7 +22,7 @@ It moves bytes between processes; it does not put them into an agent (that is ea
 | 4 | **`cargo publish --dry-run` in dependency order**: `synapse` (root) -> `synapse-security` -> `synapsed-client` -> `synapse-mcp-server` -> `synapse-claude-channel`; `synapsed` and `synapsectl` after `synapsed-client` | root `synapse` passes at rc.48 (195 files, verified, exit 0, 2026-10-14). The six dependents cannot be dry-run until `synapse` rc.48 is on crates.io: each resolves it from the registry | **yes** (publish itself is CireSnave's) |
 | 5 | **Cold first run from the README** | done at rc.48 (#146): CLI sequence runs end to end; README no longer names `message_routing_system`/`register_peer` | no |
 | 6 | `docker-compose.yml` matches the daemon | done: one loopback-only daemon service with a volume, run against `thinkersjournal/synapse:main` (the old `:latest` tag does not exist on Hub). `ci_cd.yml` deploy jobs still `docker-compose pull/up` over ssh: unchanged, not exercised | no |
-| 7 | `whoami` / `push` advertisement: what the MCP server and the daemon say a client can do matches what they do | open | no, but a public surface |
+| 7 | `whoami` push advertisement | done in rc.52: `push: {capability_key, method}` on the channel adapter, `null` on the generic one | no |
 | 8 | Soak ends with `sent.log` matching the transcript | running (rc.33 daemon, 1 msg/10 min since 2026-10-12T18:31Z) | no (evidence) |
 | 9 | Alert delivery: `AlertTransport` has no implementation (board 131); alerts are logged only | seam only | no, said plainly in the docs |
 | 10 | Dependency currency: `auth-framework` is `0.6.0-rc42` here, crates.io has `0.6.0-rc55` | 13 rcs behind | CireSnave's "newest at all times" rule |
@@ -44,6 +44,8 @@ can fail the first public user.
 | **KISS** | Nothing | Nothing | **no relationship today**: `git grep -i synapse origin/main` in KISS finds 0 files, and KISS standardises ML kernel interfaces. Do not invent one |
 | **Trust vouching** (to be spun out) | Optional trust-hook trait implementation, published on crates.io | `TrustSource` (`src/synapse/services/trust_source.rs`), the seam a vouching crate would implement | spin-out not scheduled (CireSnave 2026-10-08) |
 | **Introduction app** (not started) | Account-owner introductions, so Synapse never authenticates account owners itself | Agent certificates (slice f) are the cryptographic side | waits for a lane to state requirements |
+
+**Unverified:** no test reads back the `0600` mode of `synapsed-start.err` (item 13). The `mail` tests run on ubuntu in CI (`Build and Test`), so the file is created and read on Unix there, but its mode is asserted nowhere; I ran only on Windows.
 
 ## After the flip (unordered, not tasked)
 

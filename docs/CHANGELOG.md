@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.52): `whoami` advertises the push method
+
+`whoami` now carries `push`: `{"capability_key": "claude/channel", "method": "notifications/claude/channel"}` on the Claude Code
+channel adapter and `null` on the generic `synapse-mcp` adapter (the key is always present, so a client can tell "pushes
+nothing" from "an older server"). A client that bound its notification handlers before `initialize` can learn the method
+without a reconnect (spec 2026-10-12 section 2, the "Partly" row). Additive on the wire; no daemon change. Tests: the channel
+foreign-client test pins the object (red on rc.51); the adapter test requires the key present and `null` (the old form of that
+assertion passed without the change, because indexing a missing key reads as null, so it was tightened). The server `instructions`
+text does not yet name the method.
+
 ### Fixed (rc.51): a daemon that cannot start says why
 
 `synapse` started `synapsed` with stderr discarded, so a refusal showed only `synapsed is not running: synapsed exited (exit

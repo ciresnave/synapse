@@ -198,6 +198,8 @@ async fn send_fetch_ack_list_summary_and_whoami() {
     assert_eq!(me["global_id"], "alice@acct");
     assert!(me["epoch"].as_u64().unwrap() >= 1);
     assert!(!me["daemon_instance"].as_str().unwrap().is_empty());
+    // The generic adapter pushes nothing, and says so rather than leaving the field out.
+    assert_eq!(me.get("push"), Some(&serde_json::Value::Null), "{me}");
 
     // A bare role is in the sender's account; a duplicate id is a duplicate, not a second copy.
     let sent = alice

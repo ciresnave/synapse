@@ -257,6 +257,13 @@ async fn a_hand_written_client_negotiates_receives_the_push_and_acks_it() {
             .await,
     );
     assert_eq!(whoami["role"], "bob", "{whoami}");
+    // The push method is advertised out of band too, for a client that bound its handlers
+    // before `initialize` (spec 2026-10-12 section 2).
+    assert_eq!(
+        whoami["push"],
+        json!({"capability_key": "claude/channel", "method": CHANNEL_METHOD}),
+        "{whoami}"
+    );
 
     // 4. A message from another role arrives as a plain notification frame (no `id`).
     let sent = alice
