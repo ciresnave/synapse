@@ -814,6 +814,22 @@ fn a_daemon_that_refuses_a_too_open_key_names_the_refusal_and_the_home() {
     );
 }
 
+/// The file a starting daemon's stderr goes to is owner-only, as the rest of the home is. Unix
+/// only: Windows has no mode bits, and its owner-only check is the ACL test above.
+#[cfg(unix)]
+#[test]
+fn the_daemon_start_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    let out = claim_in(home.path());
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let mode = std::fs::metadata(home.path().join("synapsed-start.err"))
+        .expect("the start file is left in the home")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "mode {mode:o}");
+}
+
 /// Positive control: a daemon that starts fine leaks none of its stderr into the CLI's output.
 #[test]
 fn a_healthy_start_reports_no_daemon_stderr() {
