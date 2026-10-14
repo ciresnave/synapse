@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.65): `synapse::mailbox::conformance`, the `MailStore` contract as a public suite (ROADMAP item 18)
+
+Behind the new off-by-default feature `mailbox-conformance` (adds the optional `tempfile` dependency). The 17 cases that held
+`MemoryStore` and `RedbStore` to the same mailbox semantics moved from `tests/mailbox_suite` into the library, so a `MailStore` in
+another crate (PersistAnt's backend, or any store a user brings) can be proved against them:
+`synapse::mailbox::conformance::run_all(|| MyStore::fresh())`, or any case on its own. **This is a stable store contract:** a case
+is added only when the mailbox gains a guarantee, never to track an implementation detail, and a case is never loosened to let a
+store pass. `make` must return a fresh, empty store each call that stays valid after the closure returns. No behaviour change, no
+on-disk change; the in-repo suites run unchanged through a re-export (`mailbox` 21 + `mailbox_redb` 26 as before). New: `run_all`
+itself is tested against a conforming store and a known-bad one that forgets its writes (it must fail). Synapse stays on redb
+until a backend passes the suite.
+
 ### Changed (rc.64): portfolio hygiene, no behaviour change (CodeRipper WSP-001, SUP-008, DOC-009)
 
 `.github/CODEOWNERS` (`* @ciresnave`); top-level `permissions: contents: read` in `ci_cd.yml` (no job needs more: Docker Hub and the
