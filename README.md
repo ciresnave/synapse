@@ -138,9 +138,12 @@ Synapse operates on multiple layers to provide maximum flexibility and performan
 
 ### Installation
 
+To use the library, depend on the `synapse` crate (the library is `synapse`, not `message_routing_system`). The 6.0.0
+release-candidate series is not on crates.io yet (crates.io has `synapse` 1.1.0), so until it is, depend on the repository:
+
 ```toml
 [dependencies]
-message_routing_system = "0.1.0"
+synapse = { git = "https://github.com/ThinkersJournal/synapse" }
 ```
 
 #### Command-line tools
@@ -169,34 +172,26 @@ it is installed, `cargo install synapsectl` refuses to overwrite it; uninstall i
 
 ### Basic Usage
 
-```rust
-use message_routing_system::*;
+Two roles, `alice` and `bob`, exchanging one message through the daemon. This is the sequence that was run from a clean
+home on Windows at 6.0.0-rc.48, with the CLI installed by `cargo install --path crates/synapsectl` and
+`cargo install --path crates/synapsed` (cargo takes one `--path` per invocation):
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 1. Initialize the enhanced router
-    let config = Config::default();
-    let router = EnhancedSynapseRouter::new(config, "MyBot@example.com".to_string()).await?;
-
-    // 2. Register some identities (optional - auto-discovery also works)
-    router.register_peer("Alice", "alice@ai-lab.example.com").await?;
-    router.register_peer("Bob", "bob@robotics.company.com").await?;
-
-    // 3. Start all services (email server, transport discovery, etc.)
-    router.start().await?;
-
-    // 4. Send messages using simple names!
-    router.send_message_smart(
-        "Alice",                              // Just use the name
-        "Hello from Synapse!",                // Your message
-        MessageType::Direct,                  // Message type
-        SecurityLevel::Authenticated,         // Security level
-        MessageUrgency::Interactive,          // Urgency (affects transport choice)
-    ).await?;
-
-    Ok(())
-}
+```sh
+synapse id init --account me        # names: letters, digits, '-' and '_' only, 1 to 64
+synapse claim --role alice          # starts synapsed on demand; prints identity: alice@me
+synapse claim --role bob
+synapse send --role alice --to bob "hello"        # outcome: queued
+synapse inbox --role bob            # one JSON object per line; the message stays leased
+synapse ack --role bob <message_id> # outcome: removed
+synapse list --role alice           # every role, with presence and pending counts
 ```
+
+`SYNAPSE_HOME` chooses the keystore and session directory and `SYNAPSE_ADDR` the daemon's loopback address. On Windows the
+account directory must not be readable by anyone else: a `SYNAPSE_HOME` under `C:\s` was refused with `permissions_too_open` (the ACL was not read; the cause is inferred).
+Use a directory under your profile.
+
+The library example that stood here called a `register_peer` method that does not exist, so it was removed. See
+`examples/hello_world.rs` for code that builds.
 
 ### Real-World Example: AI Collaboration
 
