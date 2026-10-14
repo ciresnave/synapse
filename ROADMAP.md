@@ -45,7 +45,7 @@ can fail the first public user.
 | **Trust vouching** (to be spun out) | Optional trust-hook trait implementation, published on crates.io | `TrustSource` (`src/synapse/services/trust_source.rs`), the seam a vouching crate would implement | spin-out not scheduled (CireSnave 2026-10-08) |
 | **Introduction app** (not started) | Account-owner introductions, so Synapse never authenticates account owners itself | Agent certificates (slice f) are the cryptographic side | waits for a lane to state requirements |
 
-**Unverified:** no test reads back the `0600` mode of `synapsed-start.err` (item 13). The `mail` tests run on ubuntu in CI (`Build and Test`), so the file is created and read on Unix there, but its mode is asserted nowhere; I ran only on Windows.
+**Unverified until its first CI run:** `the_daemon_start_file_is_owner_only` (rc.54, `cfg(unix)`) asserts the `0600` mode of `synapsed-start.err`; it compiles to nothing on the Windows box it was written on, so it was not seen red or green locally and `Build and Test` on ubuntu is its first execution.
 
 ## After the flip (unordered, not tasked)
 

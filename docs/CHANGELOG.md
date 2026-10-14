@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.54): a test reads back the mode of `synapsed-start.err`
+
+`the_daemon_start_file_is_owner_only` (`cfg(unix)`, in `crates/synapsectl/tests/mail.rs`) asserts the file is `0600` after a
+healthy start, closing the gap the rc.52 ROADMAP note named. **Not run by me: this machine is Windows, so the test compiles
+to nothing here and was not seen red or green locally.** `Build and Test` on ubuntu is its first execution. Test-only.
+
 ### Changed (rc.53): every GitHub Action in `ci_cd.yml` pinned to a commit
 
 The PM's pin patch (portfolio `pin-patches-20261014`; the patch's own count is 17 moved and 4 kept, and its diff changes 21 lines). `actions/checkout` v7.0.1,
