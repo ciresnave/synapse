@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.63): `auth-framework` 0.6.0-rc42 -> 0.6.0-rc55 (ROADMAP item 15, last of four; PORTFOLIO drift)
+
+Pinned to the newest rc on crates.io (2026-10-14). Source unchanged: the optional `auth` feature (with `oauth-device-flows` and
+`enhanced-device-flow`) compiles on rc55 as it did on rc42. **Proved:** `cargo check --features auth --all-targets`, clippy
+`-D warnings`, fmt, SPDX gate, `--locked` pass on Windows; `cargo test --features auth` passes (three QUIC tests in
+`tests/transport_repairs.rs` failed once on a busy UDP port, and passed when run alone); the `enhanced-auth` guard
+(`.github/enhanced_auth_guard.py`, self-test 6/6) re-run against rc55 still passes, i.e. `enhanced-auth` still fails to compile
+with E0308/E0432/E0560/E0599, so that feature's recorded status is unchanged. **Limit:** Synapse's own code uses almost none of
+auth-framework (ROADMAP item 17), so the compile is most of what there is to prove; no runtime auth flow is exercised by a test here.
+
 ### Changed (rc.62): `redis` 0.32.4 -> 1.7.1 (ROADMAP item 15, third of four)
 
 The legacy `cache` feature's dependency, a major version taken under "newest versions at all times". Source needed **no
