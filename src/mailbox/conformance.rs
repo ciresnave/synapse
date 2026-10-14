@@ -19,7 +19,7 @@
 //! }
 //! ```
 
-use super::{Acked, Depth, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox};
+use super::{Acked, Depth, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox, Stored};
 use crate::certificate::RevocationLookup;
 use crate::keystore::Keystore;
 use crate::roles::{ClaimRequest, Superseded, sign_claim};
@@ -533,6 +533,61 @@ pub fn fetch_excluding_counts_delivered_messages_not_skipped_ones<S: MailStore>(
     assert_eq!(ids_of(&next), ["a", "c"]);
 }
 
+/// A write that returns `Err` leaves nothing behind: not the queued entry, not the sequence
+/// number it took, not a claimed role. This is the atomic multi-key transaction a store must give
+/// (a store that applies writes as they come and never undoes them passes every other case).
+pub fn a_failed_write_changes_nothing<S: MailStore>(make: impl Fn() -> S) {
+    let fresh_seq = {
+        let mut seq = 0;
+        make()
+            .write(&mut |txn| {
+                seq = txn.next_seq().map_err(MailError::Store)?;
+                Ok(())
+            })
+            .expect("a fresh store hands out a sequence number");
+        seq
+    };
+    let store = make();
+    let queued_at = t0();
+    let err = store
+        .write(&mut |txn| {
+            let seq = txn.next_seq().map_err(MailError::Store)?;
+            txn.put(
+                LANE,
+                Stored {
+                    envelope: env("half", LANE, b"body"),
+                    seq,
+                    enqueued_at: queued_at,
+                    lease: None,
+                    attempts: 0,
+                },
+            )
+            .map_err(MailError::Store)?;
+            txn.record_ack(LANE, "acked", queued_at)
+                .map_err(MailError::Store)?;
+            Err(MailError::NotFound)
+        })
+        .unwrap_err();
+    assert_eq!(err, MailError::NotFound, "the closure's error comes back");
+    store
+        .write(&mut |txn| {
+            assert_eq!(
+                txn.stats(LANE).unwrap(),
+                (0, 0),
+                "the entry was rolled back"
+            );
+            assert!(txn.queued(LANE, "half").unwrap().is_none());
+            assert!(txn.acked_at(LANE, "acked").unwrap().is_none());
+            assert_eq!(
+                txn.next_seq().unwrap(),
+                fresh_seq,
+                "the sequence number was not consumed"
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
 /// Run every case against stores from `make`, naming the case that failed.
 ///
 /// # Panics
@@ -590,6 +645,9 @@ pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
         "fetch_excluding_counts_delivered_messages_not_skipped_ones",
         || fetch_excluding_counts_delivered_messages_not_skipped_ones(&make),
     );
+    case("a_failed_write_changes_nothing", || {
+        a_failed_write_changes_nothing(&make)
+    });
 }
 
 fn case(name: &str, f: impl FnOnce()) {

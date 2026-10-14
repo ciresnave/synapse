@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.67): conformance case `a_failed_write_changes_nothing`; PersistAnt spike note
+
+A `MailStore` whose write applied changes as they came and never undid them on `Err` passed all 17 cases (measured with a `persistant-kv` adapter, `docs/spikes/persistant-kv-mailstore.md`). The new case holds a store to the atomic multi-key transaction: after a write that returns `Err`, no entry, ack record or sequence number remains. A store from another crate that lacked rollback will now fail `run_all`.
+
 ### Changed (rc.66): ROADMAP refresh, no code change
 
 Rows 10 and 18 now say what is done: `auth-framework` currency landed in rc.63; the conformance suite is public (rc.65) and `persistant` is 0.4.28.

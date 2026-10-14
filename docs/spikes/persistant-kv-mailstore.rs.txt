@@ -1,0 +1,179 @@
+//! SPIKE: a MailStore over persistant-kv's KvBackend, run against synapse::mailbox::conformance.
+use chrono::{DateTime, Utc};
+use futures::executor::block_on;
+use persistant_kv::{KvBackend, KvError, KvOnBlob, MemoryKv};
+use std::sync::Mutex;
+use synapse::mailbox::{MailError, MailStore, MailTxn, StoreError, Stored};
+use synapse::roles::RolesState;
+
+struct KvMailStore<K: KvBackend> {
+    kv: K,
+    gate: Mutex<()>,
+}
+impl<K: KvBackend> KvMailStore<K> {
+    fn new(kv: K) -> Self {
+        Self { kv, gate: Mutex::new(()) }
+    }
+}
+
+fn se(e: KvError) -> StoreError {
+    StoreError(e.to_string())
+}
+fn js<T: serde::Serialize>(v: &T) -> Vec<u8> {
+    serde_json::to_vec(v).unwrap()
+}
+fn un<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T, StoreError> {
+    serde_json::from_slice(b).map_err(|e| StoreError(e.to_string()))
+}
+
+struct Txn<'a, K: KvBackend> {
+    kv: &'a K,
+    /// (key, previous value) in mutation order; replayed backwards on rollback.
+    undo: Vec<(String, Option<Vec<u8>>)>,
+}
+impl<K: KvBackend> Txn<'_, K> {
+    fn get(&self, k: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        block_on(self.kv.get(k)).map_err(se)
+    }
+    fn set(&mut self, k: &str, v: Vec<u8>) -> Result<(), StoreError> {
+        let prev = self.get(k)?;
+        self.undo.push((k.to_string(), prev));
+        block_on(self.kv.put(k, v, None)).map_err(se)
+    }
+    fn del(&mut self, k: &str) -> Result<(), StoreError> {
+        let prev = self.get(k)?;
+        self.undo.push((k.to_string(), prev));
+        block_on(self.kv.delete(k)).map_err(se)
+    }
+    fn rollback(&mut self) {
+        while let Some((k, prev)) = self.undo.pop() {
+            let _ = match prev {
+                Some(v) => block_on(self.kv.put(&k, v, None)),
+                None => block_on(self.kv.delete(&k)),
+            };
+        }
+    }
+    fn keys(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        let mut out = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = block_on(self.kv.ordered_scan(prefix, after.as_deref(), 64)).map_err(se)?;
+            out.extend(page.keys);
+            match page.next {
+                Some(c) => after = Some(c),
+                None => return Ok(out),
+            }
+        }
+    }
+}
+fn qkey(role: &str, seq: u64) -> String {
+    format!("m/q/{role}/{seq:020}")
+}
+fn ikey(role: &str, id: &str) -> String {
+    format!("m/i/{role}/{id}")
+}
+fn akey(role: &str, id: &str) -> String {
+    format!("m/a/{role}/{id}")
+}
+
+impl<K: KvBackend> MailTxn for Txn<'_, K> {
+    fn stats(&self, role: &str) -> Result<(usize, u64), StoreError> {
+        let (mut n, mut b) = (0usize, 0u64);
+        self.scan(role, &mut |s| {
+            n += 1;
+            b += s.envelope.body.len() as u64;
+            true
+        })?;
+        Ok((n, b))
+    }
+    fn scan(&self, role: &str, visit: &mut dyn FnMut(&Stored) -> bool) -> Result<(), StoreError> {
+        for k in self.keys(&format!("m/q/{role}/"))? {
+            if let Some(v) = self.get(&k)? {
+                if !visit(&un::<Stored>(&v)?) {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError> {
+        let Some(seq) = self.get(&ikey(role, id))? else { return Ok(None) };
+        let seq: u64 = un(&seq)?;
+        self.get(&qkey(role, seq))?.map(|v| un(&v)).transpose()
+    }
+    fn put(&mut self, role: &str, stored: Stored) -> Result<(), StoreError> {
+        let id = stored.envelope.message_id.clone();
+        if let Some(old) = self.get(&ikey(role, &id))? {
+            let old: u64 = un(&old)?;
+            if old != stored.seq {
+                self.del(&qkey(role, old))?;
+            }
+        }
+        self.set(&qkey(role, stored.seq), js(&stored))?;
+        self.set(&ikey(role, &id), js(&stored.seq))
+    }
+    fn remove(&mut self, role: &str, id: &str) -> Result<(), StoreError> {
+        if let Some(seq) = self.get(&ikey(role, id))? {
+            let seq: u64 = un(&seq)?;
+            self.del(&qkey(role, seq))?;
+            self.del(&ikey(role, id))?;
+        }
+        Ok(())
+    }
+    fn acked_at(&self, role: &str, id: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
+        self.get(&akey(role, id))?.map(|v| un(&v)).transpose()
+    }
+    fn record_ack(&mut self, role: &str, id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+        self.set(&akey(role, id), js(&at))
+    }
+    fn sweep_acked(&mut self, before: DateTime<Utc>) -> Result<usize, StoreError> {
+        let mut n = 0;
+        for k in self.keys("m/a/")? {
+            if let Some(v) = self.get(&k)? {
+                if un::<DateTime<Utc>>(&v)? < before {
+                    self.del(&k)?;
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    }
+    fn next_seq(&mut self) -> Result<u64, StoreError> {
+        let n = self.get("m/seq")?.map(|v| un::<u64>(&v)).transpose()?.unwrap_or(0) + 1;
+        self.set("m/seq", js(&n))?;
+        Ok(n)
+    }
+    fn roles(&self) -> Result<RolesState, StoreError> {
+        Ok(self.get("m/roles")?.map(|v| un(&v)).transpose()?.unwrap_or_default())
+    }
+    fn set_roles(&mut self, s: &RolesState) -> Result<(), StoreError> {
+        self.set("m/roles", js(s))
+    }
+}
+
+impl<K: KvBackend> MailStore for KvMailStore<K> {
+    fn write(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        let _g = self.gate.lock().map_err(|_| MailError::Store(StoreError("gate poisoned".into())))?;
+        let mut t = Txn { kv: &self.kv, undo: Vec::new() };
+        let r = f(&mut t);
+        if r.is_err() {
+            t.rollback();
+        }
+        r
+    }
+}
+
+fn main() {
+    let which = std::env::args().nth(1).unwrap_or_else(|| "memorykv".into());
+    match which.as_str() {
+        "memorykv" => synapse::mailbox::conformance::run_all(|| KvMailStore::new(MemoryKv::new())),
+        "onblob" => synapse::mailbox::conformance::run_all(|| {
+            KvMailStore::new(KvOnBlob::new(persistant_blob::MemoryBlob::new()))
+        }),
+        _ => panic!("memorykv|onblob"),
+    }
+    println!("{which}: run_all passed");
+}
