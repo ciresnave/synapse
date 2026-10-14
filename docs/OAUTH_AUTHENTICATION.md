@@ -1,5 +1,10 @@
 # 🔐 Synapse OAuth/Authentication Integration
 
+> **Status (6.0.0-rc.55, 2026-10-14): not verified against the current code.** 34 of the 36 method names called in this
+> page's Rust samples (94%) match no `fn` in the workspace (`python .github/docs_staleness.py`; an upper bound: names from
+> external crates count as unknown). The page predates the daemon-era surface (`synapsed`, `synapse`, `synapse-mcp`). Read its
+> samples as illustrative. The surface that is tested is the README Quick Start and the MCP tools table in `docs/API_REFERENCE.md`.
+
 ## Overview
 
 The Synapse OAuth/Authentication Integration system provides comprehensive enterprise-grade authentication and authorization capabilities. This system supports multiple authentication providers, OAuth 2.0/OpenID Connect flows, and seamless integration with all Synapse transport layers.

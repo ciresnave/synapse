@@ -1,5 +1,10 @@
 # 🎉 Synapse New Features - Version 1.0.0
 
+> **Status (6.0.0-rc.55, 2026-10-14): not verified against the current code.** 8 of the 11 method names called in this
+> page's Rust samples (73%) match no `fn` in the workspace (`python .github/docs_staleness.py`; an upper bound: names from
+> external crates count as unknown). The page predates the daemon-era surface (`synapsed`, `synapse`, `synapse-mcp`). Read its
+> samples as illustrative. The surface that is tested is the README Quick Start and the MCP tools table in `docs/API_REFERENCE.md`.
+
 This document highlights the major new features and capabilities added to Synapse through the recent development cycle.
 
 ## 🌊 Real-time Streaming Support

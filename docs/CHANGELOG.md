@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.55): `.github/docs_staleness.py` and status banners on 12 stale docs (ROADMAP item 12)
+
+The script counts the method names called in each page's ```rust blocks that match no `fn` in the workspace (files from
+`git ls-files`; names from external crates count as unknown, so the rate is an upper bound). Measured at c14894b (rc.53), 12 pages
+scored 0.69 to 0.99 (`CONFIGURATION_GUIDE.md` 112 of 113 names, `ADVANCED_MONITORING.md` 52 of 55, `API_REFERENCE.md` 73 of 86);
+each now carries a banner saying it is unverified, its own numbers, and where the tested surface is. **The pages were not
+rewritten**: that needs per-page decisions I did not make. Not covered: prose, CLI flags, config keys, env vars, and the README
+sections after Quick Start (README scores 0.47, below the 0.5 banner line). `docs/STREAMING_SUPPORT.md` is 0 bytes. Docs and a
+CI-adjacent script only; nothing runs it in CI.
+
 ### Added (rc.54): a test reads back the mode of `synapsed-start.err`
 
 `the_daemon_start_file_is_owner_only` (`cfg(unix)`, in `crates/synapsectl/tests/mail.rs`) asserts the file is `0600` after a
