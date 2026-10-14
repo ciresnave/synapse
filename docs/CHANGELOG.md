@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.66): ROADMAP refresh, no code change
+
+Rows 10 and 18 now say what is done: `auth-framework` currency landed in rc.63; the conformance suite is public (rc.65) and `persistant` is 0.4.28.
+
 ### Added (rc.65): `synapse::mailbox::conformance`, the `MailStore` contract as a public suite (ROADMAP item 18)
 
 Behind the new off-by-default feature `mailbox-conformance` (adds the optional `tempfile` dependency). The 17 cases that held
