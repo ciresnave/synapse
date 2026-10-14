@@ -44,6 +44,10 @@ use synapse::security_events::SecurityEventKind;
 const ANNOUNCE_FILE: &str = "synapsed.json";
 /// How long a started daemon gets to announce itself and answer health.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
+/// A starting daemon's stderr, in the home; truncated at each start.
+const START_LOG: &str = "synapsed-start.err";
+/// How much of it the CLI reads back.
+const START_LOG_READ: u64 = 4096;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a command waits for another command's claim of the same role.
@@ -159,7 +163,7 @@ impl Daemon {
             }
         }
         // Started at most once per command (PM, #74).
-        let mut child = spawn_daemon(home)?;
+        let (mut child, mut start_log) = spawn_daemon(home)?;
         eprintln!("synapse: started synapsed (pid {})", child.id());
         let deadline = Instant::now() + START_TIMEOUT;
         loop {
@@ -172,14 +176,18 @@ impl Daemon {
             // exited is not coming back: say why now rather than wait out the deadline.
             if let (Some(addr), Ok(Some(status))) = (&squat.0, child.try_wait()) {
                 return Err(MailError::NoDaemon(format!(
-                    "synapsed exited ({status}); {}",
+                    "synapsed exited ({status}){}; {}",
+                    start_failure(&mut start_log, home),
                     squat_warning(addr)
                 )));
             }
             if Instant::now() >= deadline {
                 let why = match child.try_wait() {
                     Ok(Some(status)) => {
-                        format!("synapsed exited ({status}) and no daemon answered")
+                        format!(
+                            "synapsed exited ({status}){} and no daemon answered",
+                            start_failure(&mut start_log, home)
+                        )
                     }
                     _ => "synapsed did not answer within 5 s".to_string(),
                 };
@@ -503,12 +511,13 @@ fn synapsed_path() -> PathBuf {
 /// Start `synapsed` detached from this process: no console, no stdio, its own process group, and
 /// the home as its working directory (so it pins no directory the caller may want to delete). The
 /// environment is inherited, so `SYNAPSE_HOME` and `SYNAPSE_ADDR` reach it.
-fn spawn_daemon(home: &Path) -> Result<std::process::Child, MailError> {
+fn spawn_daemon(home: &Path) -> Result<(std::process::Child, Option<std::fs::File>), MailError> {
     let mut cmd = Command::new(synapsed_path());
+    let (stderr, start_log) = start_log(home);
     cmd.current_dir(home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -534,7 +543,59 @@ fn spawn_daemon(home: &Path) -> Result<std::process::Child, MailError> {
         }
     }
     cmd.spawn()
+        .map(|child| (child, start_log))
         .map_err(|e| MailError::NoDaemon(format!("cannot start synapsed: {e}")))
+}
+
+/// Where a starting daemon's stderr goes: a fresh file in the home, so that if it refuses to start
+/// the CLI can say why. A pipe would not do: a daemon that did start keeps the pipe's write end
+/// for its whole life, and one that fills it blocks on its own logging. `create_new` never
+/// follows a link planted in a home others can write, and the CLI reads the file back through
+/// this handle, not through the path. Any failure here means stderr is discarded, as before.
+fn start_log(home: &Path) -> (Stdio, Option<std::fs::File>) {
+    let path = home.join(START_LOG);
+    let _ = std::fs::remove_file(&path);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let Ok(file) = options.open(&path) else {
+        return (Stdio::null(), None);
+    };
+    match file.try_clone() {
+        Ok(clone) => (Stdio::from(clone), Some(file)),
+        Err(_) => (Stdio::null(), None),
+    }
+}
+
+/// The daemon's last words and the home they apply to, as ` (<reason>; home <path>)`; just the
+/// home if it said nothing. Bounded and stripped of control characters, because it is a child's
+/// output and goes to the user's terminal.
+fn start_failure(log: &mut Option<std::fs::File>, home: &Path) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut text = String::new();
+    if let Some(file) = log.as_mut()
+        && file.seek(SeekFrom::Start(0)).is_ok()
+    {
+        let mut bytes = Vec::new();
+        let _ = file.take(START_LOG_READ).read_to_end(&mut bytes);
+        text = String::from_utf8_lossy(&bytes).into_owned();
+    }
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(2)..].join(" / ");
+    let tail: String = tail.chars().filter(|c| !c.is_control()).take(512).collect();
+    if tail.is_empty() {
+        format!(" (home {})", home.display())
+    } else {
+        format!(": {tail} (home {})", home.display())
+    }
 }
 
 /// A Windows child inherits every inheritable handle of its parent, not only the stdio it is given.

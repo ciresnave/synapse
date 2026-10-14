@@ -83,6 +83,9 @@ impl fmt::Display for DaemonError {
         match self {
             DaemonError::NotLoopback => write!(f, "synapsed listens on loopback addresses only"),
             DaemonError::NoRandomness => write!(f, "the system random source failed"),
+            DaemonError::Keystore(e @ KeystoreError::PermissionsTooOpen(_)) => {
+                write!(f, "keystore: permissions_too_open: {e}")
+            }
             DaemonError::Keystore(e) => write!(f, "keystore: {e}"),
             DaemonError::Store(e) => write!(f, "{e}"),
             DaemonError::Mail(e) => write!(f, "{e}"),

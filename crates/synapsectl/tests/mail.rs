@@ -771,3 +771,55 @@ fn a_claim_times_out_while_another_holds_the_role_lock_and_succeeds_after() {
     lock.unlock().expect("the test releases the lock");
     home.ok(&["claim", "--role", "alpha"]);
 }
+
+/// Run `synapse claim` against `home`, which no daemon serves yet, so the CLI starts one.
+fn claim_in(home: &Path) -> Output {
+    ensure_synapsed_built();
+    Command::new(env!("CARGO_BIN_EXE_synapse"))
+        .args(["claim", "--role", "alpha"])
+        .env("SYNAPSE_HOME", home)
+        .env("SYNAPSE_ADDR", "127.0.0.1:0")
+        .env_remove("SYNAPSE_ROLE")
+        .output()
+        .expect("the synapse binary runs")
+}
+
+/// A daemon that refuses to start says why. The CLI used to start it with stderr discarded, so
+/// the user saw only "synapsed exited (exit code: 2) and no daemon answered".
+#[test]
+fn a_daemon_that_cannot_start_for_want_of_an_account_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = claim_in(dir.path());
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no account"), "{err}");
+    assert!(
+        err.contains(&dir.path().display().to_string()),
+        "home not named: {err}"
+    );
+}
+
+#[test]
+fn a_daemon_that_refuses_a_too_open_key_names_the_refusal_and_the_home() {
+    let home = Home::new();
+    loosen(&home.path().join("account").join("account.key.pem"));
+    let out = claim_in(home.path());
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("permissions_too_open"), "{err}");
+    assert!(err.contains("account key"), "{err}");
+    assert!(
+        err.contains(&home.path().display().to_string()),
+        "home not named: {err}"
+    );
+}
+
+/// Positive control: a daemon that starts fine leaks none of its stderr into the CLI's output.
+#[test]
+fn a_healthy_start_reports_no_daemon_stderr() {
+    let home = Home::new();
+    let out = claim_in(home.path());
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("listening on"), "{err}");
+}
