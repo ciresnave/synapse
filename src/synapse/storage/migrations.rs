@@ -68,7 +68,10 @@ impl MigrationManager {
     }
 
     async fn run_migration(&self, migration: &Migration) -> Result<()> {
-        sqlx::query(&migration.sql).execute(&self.pool).await?;
+        // Migration SQL is embedded in this crate, never user input.
+        sqlx::query(sqlx::AssertSqlSafe(migration.sql.clone()))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

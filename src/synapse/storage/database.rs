@@ -276,7 +276,9 @@ impl Database {
         query: &str,
         params: &[&str],
     ) -> Result<Vec<ParticipantProfile>> {
-        let mut query_builder = sqlx::query(query);
+        // Caller-supplied SQL by design (values still go through `bind`); sqlx 0.9
+        // requires this audit to be stated explicitly.
+        let mut query_builder = sqlx::query(sqlx::AssertSqlSafe(query.to_owned()));
         for param in params {
             query_builder = query_builder.bind(*param);
         }
@@ -415,7 +417,8 @@ impl Database {
             capability_conditions.join(" OR ")
         );
 
-        let mut query_builder = sqlx::query(&sql_query)
+        // Only `$n` placeholders are formatted in; no value reaches the string.
+        let mut query_builder = sqlx::query(sqlx::AssertSqlSafe(sql_query))
             .bind(requester_id)
             .bind(max_results as i64);
 
@@ -612,7 +615,9 @@ impl Database {
         query: &str,
         params: &[&str],
     ) -> Result<Vec<sqlx::postgres::PgRow>> {
-        let mut query_builder = sqlx::query(query);
+        // Caller-supplied SQL by design (values still go through `bind`); sqlx 0.9
+        // requires this audit to be stated explicitly.
+        let mut query_builder = sqlx::query(sqlx::AssertSqlSafe(query.to_owned()));
         for param in params {
             query_builder = query_builder.bind(*param);
         }
