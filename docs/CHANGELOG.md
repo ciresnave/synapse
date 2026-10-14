@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.48): `ROADMAP.md`, the release path to the public flip
+
+Docs only; no code change. Orders the remaining work, and states what Synapse takes from and gives to auth-framework, OverMind,
+PersistAnt and KISS (none today for KISS: 0 files mention Synapse). The publish order is read from the manifests; the
+`cargo publish --dry-run` itself has not run yet.
+
+
 ### Fixed (rc.47): `free_port()` in `tests/transport_repairs.rs` can no longer hand out the same port twice
 
 `Pair` asserts `alice_port != bob_port`, and `free_port()` bound port 0 and released it, so the kernel could give the same
