@@ -12,6 +12,9 @@
 //! [`MailStore`], and a claim's new role state is written in the same call that grants it.
 //! No clock: `now` is passed in. Design: `docs/superpowers/specs/2026-10-02-m4-mailbox-design.md`.
 
+#[cfg(feature = "mailbox-conformance")]
+pub mod conformance;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;

@@ -194,3 +194,32 @@ fn debug_never_prints_a_body() {
         "{shown}"
     );
 }
+
+// `run_all` is the entry point other crates use, so it is tested here against a store that is
+// known-good and against one that is known-bad: a runner that always passed would pass both.
+#[test]
+fn run_all_passes_a_conforming_store() {
+    synapse::mailbox::conformance::run_all(MemoryStore::new);
+}
+
+/// A store that forgets every write: its transactions run against a fresh empty state each time.
+struct Amnesiac;
+impl MailStore for Amnesiac {
+    fn write(
+        &self,
+        f: &mut dyn FnMut(&mut dyn synapse::mailbox::MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        MemoryStore::new().write(f)
+    }
+}
+
+#[test]
+fn run_all_rejects_a_store_that_forgets_its_writes() {
+    let outcome = std::panic::catch_unwind(|| {
+        synapse::mailbox::conformance::run_all(|| Amnesiac);
+    });
+    assert!(
+        outcome.is_err(),
+        "a store that persists nothing passed the conformance suite"
+    );
+}

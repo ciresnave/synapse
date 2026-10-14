@@ -1,0 +1,600 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! The mailbox conformance suite: the semantics a [`MailStore`] must have, as cases generic over
+//! the store, so every implementation (`MemoryStore`, `RedbStore`, and a store from another crate)
+//! is held to the same contract. Design: `docs/superpowers/specs/2026-10-02-m4-mailbox-design.md`.
+//!
+//! **A stable store contract.** Behind the off-by-default `mailbox-conformance` feature. A case is
+//! added only when the mailbox gains a guarantee, never to track an implementation detail, and a
+//! case is never loosened to let a store pass.
+//!
+//! Each case takes `make: impl Fn() -> S`, which must return a **fresh, empty** store on every
+//! call, and that store must stay valid after the closure returns (a durable store should keep
+//! its files until the process ends). A failing case panics; [`run_all`] runs every case and names
+//! the one that failed.
+//!
+//! ```ignore
+//! #[test]
+//! fn my_store_is_a_mailbox() {
+//!     synapse::mailbox::conformance::run_all(|| MyStore::open_fresh());
+//! }
+//! ```
+
+use super::{Acked, Depth, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox};
+use crate::certificate::RevocationLookup;
+use crate::keystore::Keystore;
+use crate::roles::{ClaimRequest, Superseded, sign_claim};
+use chrono::{DateTime, Duration, TimeZone, Utc};
+
+pub fn t0() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 2, 12, 0, 0).unwrap()
+}
+
+struct NoRevocations;
+impl RevocationLookup for NoRevocations {
+    fn is_revoked(&self, _issuer_key_id: &str, _serial: &[u8; 16]) -> bool {
+        false
+    }
+}
+
+/// A keystore with account `acct`, and helpers to claim its roles.
+pub struct Ids {
+    _dir: Option<tempfile::TempDir>,
+    path: std::path::PathBuf,
+    store: Keystore,
+    nonce: std::cell::Cell<u8>,
+}
+
+impl Default for Ids {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Ids {
+    pub fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        Keystore::init_account(dir.path(), "acct").expect("init");
+        let store = Keystore::open(dir.path()).expect("open");
+        Ids {
+            path: dir.path().to_path_buf(),
+            _dir: Some(dir),
+            store,
+            nonce: std::cell::Cell::new(0),
+        }
+    }
+
+    /// The same account, reopened from `path` (a crash test's child process). `nonce_base` keeps
+    /// the child's claim nonces apart from the parent's.
+    pub fn open_existing(path: &std::path::Path, nonce_base: u8) -> Self {
+        Ids {
+            _dir: None,
+            path: path.to_path_buf(),
+            store: Keystore::open(path).expect("reopen keystore"),
+            nonce: std::cell::Cell::new(nonce_base),
+        }
+    }
+
+    /// Where the keystore lives, for handing to a child process.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub fn request(&self, role: &str, now: DateTime<Utc>) -> ClaimRequest {
+        let n = self.nonce.get().wrapping_add(1);
+        self.nonce.set(n);
+        let identity = self.store.role(role, t0()).expect("role");
+        sign_claim(&identity, [n; 16], now).expect("sign")
+    }
+
+    /// Claim `role` and return the mailbox's result unchanged (for failure-path tests).
+    pub fn try_claim<S: MailStore>(
+        &self,
+        mailbox: &mut Mailbox<S>,
+        role: &str,
+        now: DateTime<Utc>,
+    ) -> Result<crate::roles::Grant, MailError> {
+        let req = self.request(role, now);
+        let key_id = self.store.account().key_id;
+        let key = self.store.account_public_key();
+        mailbox.claim(
+            &req,
+            &move |kid: &str| (kid == key_id).then_some(key),
+            &NoRevocations,
+            now,
+        )
+    }
+
+    /// Claim `role` (e.g. "lane") on `mailbox`; returns the granted epoch.
+    pub fn claim<S: MailStore>(
+        &self,
+        mailbox: &mut Mailbox<S>,
+        role: &str,
+        now: DateTime<Utc>,
+    ) -> u64 {
+        let req = self.request(role, now);
+        let key_id = self.store.account().key_id;
+        let key = self.store.account_public_key();
+        mailbox
+            .claim(
+                &req,
+                &move |kid: &str| (kid == key_id).then_some(key),
+                &NoRevocations,
+                now,
+            )
+            .expect("claim")
+            .epoch
+    }
+}
+
+pub fn open<S: MailStore>(store: S) -> Mailbox<S> {
+    Mailbox::open(store, MailConfig::default(), t0() - Duration::seconds(1)).expect("open")
+}
+
+pub fn env(id: &str, to: &str, body: &[u8]) -> Envelope {
+    Envelope {
+        message_id: id.to_string(),
+        to: to.to_string(),
+        from: "peer@acct".to_string(),
+        body: body.to_vec(),
+    }
+}
+
+fn ids_of(deliveries: &[super::Delivery]) -> Vec<String> {
+    deliveries
+        .iter()
+        .map(|d| d.envelope.message_id.clone())
+        .collect()
+}
+
+const LANE: &str = "lane@acct";
+
+pub fn enqueue_then_fetch_leases_and_hides<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    assert_eq!(
+        mb.enqueue(env("m1", LANE, b"hi"), t0()).unwrap(),
+        Enqueued::Queued
+    );
+    let got = mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    assert_eq!(ids_of(&got), ["m1"]);
+    assert_eq!(got[0].envelope.body, b"hi");
+    assert_eq!(got[0].attempts, 1);
+    assert_eq!(
+        got[0].lease_until,
+        t0() + Duration::seconds(60),
+        "default lease is 60s"
+    );
+    let again = mb
+        .fetch(LANE, epoch, 10, None, t0() + Duration::seconds(59))
+        .unwrap();
+    assert!(
+        again.is_empty(),
+        "a leased message is hidden until its lease expires"
+    );
+}
+
+pub fn an_expired_lease_redelivers_in_order<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    for id in ["m1", "m2", "m3"] {
+        mb.enqueue(env(id, LANE, b"x"), t0()).unwrap();
+    }
+    assert_eq!(
+        ids_of(&mb.fetch(LANE, epoch, 2, None, t0()).unwrap()),
+        ["m1", "m2"]
+    );
+    let later = t0() + Duration::seconds(61);
+    let redelivered = mb.fetch(LANE, epoch, 10, None, later).unwrap();
+    assert_eq!(
+        ids_of(&redelivered),
+        ["m1", "m2", "m3"],
+        "oldest first, redelivery keeps order"
+    );
+    assert_eq!(redelivered[0].attempts, 2);
+    assert_eq!(redelivered[2].attempts, 1);
+}
+
+pub fn ack_removes_for_good_and_a_resend_is_a_duplicate<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    assert_eq!(mb.ack(LANE, epoch, "m1", t0()).unwrap(), Acked::Removed);
+    let much_later = t0() + Duration::hours(1);
+    assert!(
+        mb.fetch(LANE, epoch, 10, None, much_later)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        mb.enqueue(env("m1", LANE, b"x"), much_later).unwrap(),
+        Enqueued::Duplicate,
+        "a resend of an acked message is recognised"
+    );
+    assert!(
+        mb.fetch(LANE, epoch, 10, None, much_later)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+pub fn a_duplicate_while_queued_is_not_queued_twice<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    assert_eq!(
+        mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap(),
+        Enqueued::Queued
+    );
+    assert_eq!(
+        mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap(),
+        Enqueued::Duplicate
+    );
+    assert_eq!(
+        ids_of(&mb.fetch(LANE, epoch, 10, None, t0()).unwrap()),
+        ["m1"]
+    );
+}
+
+pub fn a_superseded_epoch_cannot_fetch_or_ack<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let old = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    mb.fetch(LANE, old, 10, None, t0()).unwrap();
+    let new = ids.claim(&mut mb, "lane", t0() + Duration::seconds(1));
+    assert_eq!(new, old + 1);
+    let current = Superseded { current: new };
+    assert_eq!(
+        mb.fetch(LANE, old, 10, None, t0() + Duration::seconds(2))
+            .unwrap_err(),
+        MailError::Superseded(current)
+    );
+    assert_eq!(
+        mb.ack(LANE, old, "m1", t0() + Duration::seconds(2))
+            .unwrap_err(),
+        MailError::Superseded(current)
+    );
+}
+
+pub fn a_takeover_frees_the_old_leases_at_once<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let old = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    mb.fetch(LANE, old, 10, None, t0()).unwrap();
+    let soon = t0() + Duration::seconds(2); // well inside the old 60s lease
+    let new = ids.claim(&mut mb, "lane", soon);
+    let got = mb.fetch(LANE, new, 10, None, soon).unwrap();
+    assert_eq!(
+        ids_of(&got),
+        ["m1"],
+        "the new holder gets in-flight mail without waiting"
+    );
+    assert_eq!(mb.ack(LANE, new, "m1", soon).unwrap(), Acked::Removed);
+}
+
+pub fn only_the_lease_holder_acks<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    assert_eq!(
+        mb.ack(LANE, epoch, "m1", t0()).unwrap_err(),
+        MailError::NotYourLease,
+        "never fetched"
+    );
+    assert_eq!(
+        mb.ack(LANE, epoch, "nope", t0()).unwrap_err(),
+        MailError::NotFound
+    );
+    mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    let after_expiry = t0() + Duration::seconds(90);
+    assert_eq!(
+        mb.ack(LANE, epoch, "m1", after_expiry).unwrap(),
+        Acked::Removed,
+        "the holder may ack after its lease ran out: it processed the message"
+    );
+}
+
+pub fn ack_is_idempotent<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    assert_eq!(mb.ack(LANE, epoch, "m1", t0()).unwrap(), Acked::Removed);
+    assert_eq!(
+        mb.ack(LANE, epoch, "m1", t0()).unwrap(),
+        Acked::AlreadyAcked
+    );
+}
+
+pub fn the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let config = MailConfig {
+        max_messages: 2,
+        max_bytes: 10,
+        ..MailConfig::default()
+    };
+    let mut mb = Mailbox::open(make(), config, t0() - Duration::seconds(1)).expect("open");
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"abcd"), t0()).unwrap();
+    assert_eq!(
+        mb.enqueue(env("big", LANE, b"1234567"), t0()).unwrap_err(),
+        MailError::MailboxFull,
+        "4 + 7 bytes crosses the 10-byte bound"
+    );
+    mb.enqueue(env("m2", LANE, b"ef"), t0()).unwrap();
+    assert_eq!(
+        mb.enqueue(env("m3", LANE, b"g"), t0()).unwrap_err(),
+        MailError::MailboxFull,
+        "a third message crosses the 2-message bound"
+    );
+    assert_eq!(
+        ids_of(&mb.fetch(LANE, epoch, 10, None, t0()).unwrap()),
+        ["m1", "m2"]
+    );
+    // Acked mail no longer counts against the bound.
+    mb.ack(LANE, epoch, "m1", t0()).unwrap();
+    assert_eq!(
+        mb.enqueue(env("m3", LANE, b"g"), t0()).unwrap(),
+        Enqueued::Queued
+    );
+}
+
+pub fn sweep_deletes_old_acked_history_never_queued_mail<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("acked", LANE, b"x"), t0()).unwrap();
+    mb.enqueue(env("waiting", LANE, b"y"), t0()).unwrap();
+    mb.fetch(LANE, epoch, 1, None, t0()).unwrap();
+    mb.ack(LANE, epoch, "acked", t0()).unwrap();
+
+    let eight_days = t0() + Duration::days(8);
+    assert_eq!(
+        mb.sweep(eight_days).unwrap(),
+        1,
+        "the 8-day-old acked record goes"
+    );
+    // Its dedupe record went with it, so a resend now queues again (by design, after retention).
+    assert_eq!(
+        mb.enqueue(env("acked", LANE, b"x"), eight_days).unwrap(),
+        Enqueued::Queued
+    );
+    // The never-fetched message, older than retention, is still there.
+    let got = mb.fetch(LANE, epoch, 10, None, eight_days).unwrap();
+    assert_eq!(ids_of(&got), ["waiting", "acked"]);
+}
+
+pub fn a_lease_outside_the_range_is_refused<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    for lease in [Duration::seconds(4), Duration::minutes(16)] {
+        assert_eq!(
+            mb.fetch(LANE, epoch, 1, Some(lease), t0()).unwrap_err(),
+            MailError::LeaseOutOfRange
+        );
+    }
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    let got = mb
+        .fetch(LANE, epoch, 1, Some(Duration::minutes(15)), t0())
+        .unwrap();
+    assert_eq!(got[0].lease_until, t0() + Duration::minutes(15));
+}
+
+pub fn mail_waits_for_a_role_that_has_not_claimed_yet<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    mb.enqueue(env("early", LANE, b"x"), t0()).unwrap();
+    let later = t0() + Duration::minutes(10);
+    let epoch = ids.claim(&mut mb, "lane", later);
+    assert_eq!(
+        ids_of(&mb.fetch(LANE, epoch, 10, None, later).unwrap()),
+        ["early"]
+    );
+}
+
+pub fn claims_are_written_through_the_store<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    let mut seen = None;
+    mb.store()
+        .write(&mut |txn| {
+            seen = txn
+                .roles()
+                .map_err(MailError::Store)?
+                .roles
+                .get(LANE)
+                .map(|r| r.epoch);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen, Some(epoch));
+}
+
+fn depth_of<S: MailStore>(mb: &Mailbox<S>, global_id: &str, now: DateTime<Utc>) -> Depth {
+    *mb.depths(now)
+        .expect("depths")
+        .get(global_id)
+        .expect("a claimed role has a depth")
+}
+
+fn depth(queued: usize, leased: usize, oldest: Option<DateTime<Utc>>) -> Depth {
+    Depth {
+        queued,
+        leased,
+        oldest_enqueued_at: oldest,
+    }
+}
+
+/// S-1: `queued` is what a fetch would hand out next, `leased` what the current epoch holds, and
+/// `oldest_enqueued_at` spans both. Acked mail is in neither.
+pub fn depths_count_queued_and_leased_per_role<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    assert_eq!(depth_of(&mb, LANE, t0()), depth(0, 0, None), "no mail yet");
+    let t1 = t0() + Duration::seconds(1);
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    mb.enqueue(env("m2", LANE, b"yy"), t1).unwrap();
+    assert_eq!(depth_of(&mb, LANE, t1), depth(2, 0, Some(t0())));
+    assert_eq!(ids_of(&mb.fetch(LANE, epoch, 1, None, t1).unwrap()), ["m1"]);
+    assert_eq!(
+        depth_of(&mb, LANE, t1),
+        depth(1, 1, Some(t0())),
+        "the oldest is leased, and still the oldest"
+    );
+    mb.ack(LANE, epoch, "m1", t1).unwrap();
+    assert_eq!(
+        depth_of(&mb, LANE, t1),
+        depth(1, 0, Some(t1)),
+        "acked mail is gone"
+    );
+    // Only roles in the role table are reported, as `list` reports only those.
+    mb.enqueue(env("w1", "waiting@acct", b"x"), t1).unwrap();
+    let all = mb.depths(t1).unwrap();
+    assert_eq!(all.keys().collect::<Vec<_>>(), [LANE]);
+}
+
+/// S-1: a lease that expired, or that an older epoch holds, is deliverable, so it counts as queued.
+pub fn an_expired_or_superseded_lease_counts_as_queued<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let old = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m1", LANE, b"x"), t0()).unwrap();
+    mb.fetch(LANE, old, 1, Some(Duration::seconds(5)), t0())
+        .unwrap();
+    assert_eq!(depth_of(&mb, LANE, t0()), depth(0, 1, Some(t0())));
+    let expired = t0() + Duration::seconds(5);
+    assert_eq!(
+        depth_of(&mb, LANE, expired),
+        depth(1, 0, Some(t0())),
+        "a lease ends at its `until`, as fetch reads it"
+    );
+    mb.fetch(LANE, old, 1, None, expired).unwrap();
+    assert_eq!(depth_of(&mb, LANE, expired), depth(0, 1, Some(t0())));
+    let soon = expired + Duration::seconds(1);
+    ids.claim(&mut mb, "lane", soon);
+    assert_eq!(
+        depth_of(&mb, LANE, soon),
+        depth(1, 0, Some(t0())),
+        "a takeover voids the old epoch's lease"
+    );
+}
+
+pub fn fetch_excluding_skips_the_named_messages_and_leaves_them_unleased<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    for id in ["a", "b", "c"] {
+        mb.enqueue(env(id, LANE, b"x"), t0()).unwrap();
+    }
+    let skip = vec!["b".to_string()];
+    let got = mb
+        .fetch_excluding(LANE, epoch, 10, None, t0(), &skip)
+        .unwrap();
+    assert_eq!(ids_of(&got), ["a", "c"]);
+
+    // "b" was never leased: an ordinary fetch at the same instant returns it as a first attempt.
+    let rest = mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    assert_eq!(ids_of(&rest), ["b"]);
+    assert_eq!(rest[0].attempts, 1);
+}
+
+pub fn fetch_excluding_counts_delivered_messages_not_skipped_ones<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let mut mb = open(make());
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    for id in ["a", "b", "c"] {
+        mb.enqueue(env(id, LANE, b"x"), t0()).unwrap();
+    }
+    let skip = vec!["a".to_string()];
+    let got = mb
+        .fetch_excluding(LANE, epoch, 1, None, t0(), &skip)
+        .unwrap();
+    assert_eq!(ids_of(&got), ["b"]);
+    // An empty exclusion is exactly `fetch`.
+    let next = mb
+        .fetch_excluding(LANE, epoch, 10, None, t0(), &[])
+        .unwrap();
+    assert_eq!(ids_of(&next), ["a", "c"]);
+}
+
+/// Run every case against stores from `make`, naming the case that failed.
+///
+/// # Panics
+/// With the case name prefixed, on the first failing case.
+pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
+    case("enqueue_then_fetch_leases_and_hides", || {
+        enqueue_then_fetch_leases_and_hides(&make)
+    });
+    case("an_expired_lease_redelivers_in_order", || {
+        an_expired_lease_redelivers_in_order(&make)
+    });
+    case("ack_removes_for_good_and_a_resend_is_a_duplicate", || {
+        ack_removes_for_good_and_a_resend_is_a_duplicate(&make)
+    });
+    case("a_duplicate_while_queued_is_not_queued_twice", || {
+        a_duplicate_while_queued_is_not_queued_twice(&make)
+    });
+    case("a_superseded_epoch_cannot_fetch_or_ack", || {
+        a_superseded_epoch_cannot_fetch_or_ack(&make)
+    });
+    case("a_takeover_frees_the_old_leases_at_once", || {
+        a_takeover_frees_the_old_leases_at_once(&make)
+    });
+    case("only_the_lease_holder_acks", || {
+        only_the_lease_holder_acks(&make)
+    });
+    case("ack_is_idempotent", || ack_is_idempotent(&make));
+    case(
+        "the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue",
+        || the_bound_refuses_by_count_and_by_bytes_and_keeps_the_queue(&make),
+    );
+    case("sweep_deletes_old_acked_history_never_queued_mail", || {
+        sweep_deletes_old_acked_history_never_queued_mail(&make)
+    });
+    case("a_lease_outside_the_range_is_refused", || {
+        a_lease_outside_the_range_is_refused(&make)
+    });
+    case("mail_waits_for_a_role_that_has_not_claimed_yet", || {
+        mail_waits_for_a_role_that_has_not_claimed_yet(&make)
+    });
+    case("claims_are_written_through_the_store", || {
+        claims_are_written_through_the_store(&make)
+    });
+    case("depths_count_queued_and_leased_per_role", || {
+        depths_count_queued_and_leased_per_role(&make)
+    });
+    case("an_expired_or_superseded_lease_counts_as_queued", || {
+        an_expired_or_superseded_lease_counts_as_queued(&make)
+    });
+    case(
+        "fetch_excluding_skips_the_named_messages_and_leaves_them_unleased",
+        || fetch_excluding_skips_the_named_messages_and_leaves_them_unleased(&make),
+    );
+    case(
+        "fetch_excluding_counts_delivered_messages_not_skipped_ones",
+        || fetch_excluding_counts_delivered_messages_not_skipped_ones(&make),
+    );
+}
+
+fn case(name: &str, f: impl FnOnce()) {
+    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        eprintln!("mailbox conformance case failed: {name}");
+        std::panic::resume_unwind(e);
+    }
+}
