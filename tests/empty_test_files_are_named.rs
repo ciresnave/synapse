@@ -91,7 +91,7 @@ fn the_report_names_exactly_the_empty_test_files() {
 
     let actual = empty_by_content(&tests_dir);
 
-    let doc = fs::read_to_string(root.join("TEST_VALIDATION_AUDIT_REPORT.md"))
+    let doc = fs::read_to_string(root.join("docs/archive/TEST_VALIDATION_AUDIT_REPORT.md"))
         .expect("control: TEST_VALIDATION_AUDIT_REPORT.md is missing — repoint, do not delete");
 
     let stated = documented_empty_set(&doc).unwrap_or_else(|| {

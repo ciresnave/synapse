@@ -58,7 +58,7 @@ jobs:
   # written against an `auth-framework` API that has never been published
   # (`CAPABILITY_INVENTORY.md` §5.1/§5.2). It is deliberately left in-tree,
   # gated rather than deleted, because its fate is a Synapse/FAM merge
-  # decision. `COMPILATION_FIXES_COMPLETE.md` used to claim
+  # decision. `docs/archive/COMPILATION_FIXES_COMPLETE.md` used to claim
   # `cargo check --all-features --all-targets` succeeds; it does not, and
   # nothing in this pipeline ever ran that command, so the false claim could
   # never turn red on its own -- see that document's own correction.

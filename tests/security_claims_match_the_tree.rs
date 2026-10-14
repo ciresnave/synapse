@@ -81,7 +81,7 @@ fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn the_completion_report_may_not_claim_a_quantifier_the_tree_refutes() {
     let root = repo_root();
 
-    let report = fs::read_to_string(root.join("SECURITY_AUDIT_COMPLETION_REPORT.md"))
+    let report = fs::read_to_string(root.join("docs/archive/SECURITY_AUDIT_COMPLETION_REPORT.md"))
         .expect("control: SECURITY_AUDIT_COMPLETION_REPORT.md is missing — repoint this test rather than deleting it");
 
     // Non-vacuity: if the walk finds nothing, "zero placeholders" is trivially

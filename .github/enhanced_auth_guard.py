@@ -16,7 +16,7 @@ is written against an `auth-framework` API that has never been published --
 see `CAPABILITY_INVENTORY.md` §5.1/§5.2. It is deliberately left in-tree,
 gated, rather than deleted, because its fate (repaired, re-gated harder, or
 removed) is a Synapse/FAM merge decision, not this pipeline's to make.
-`COMPILATION_FIXES_COMPLETE.md` asserts `cargo check --all-features
+`docs/archive/COMPILATION_FIXES_COMPLETE.md` asserts `cargo check --all-features
 --all-targets` succeeds; it does not, and never has since `enhanced-auth`
 was wired up. See `docs/superpowers/..` history / GitHub issue #5 for the
 full chain that established this.
@@ -27,7 +27,7 @@ on its own. This gate is a DETECTOR for that gap -- not a fix for the module
 (CireSnave's standing FAM ruling makes that his call, not this pipeline's),
 and not a fix for the document (the document is corrected separately, in the
 same commit that adds this gate, using the same in-place-correction pattern
-`SECURITY_AUDIT_COMPLETION_REPORT.md` already uses elsewhere in this repo).
+`docs/archive/SECURITY_AUDIT_COMPLETION_REPORT.md` already uses elsewhere in this repo).
 
 ## What "pass" and "fail" mean here, stated explicitly because they invert
 
@@ -39,7 +39,7 @@ same commit that adds this gate, using the same in-place-correction pattern
 - **FAIL -- GOOD NEWS (exit 1)**: the build now SUCCEEDS. This is not a
   regression to chase -- it means `enhanced-auth` (or its dependency,
   `auth-framework`) was fixed, updated, or the module was changed to no
-  longer need the missing API. `COMPILATION_FIXES_COMPLETE.md`'s claim may
+  longer need the missing API. `docs/archive/COMPILATION_FIXES_COMPLETE.md`'s claim may
   now be true. Update the document and this script's RECORDED_ERROR_CODES
   (or delete this gate) before merging whatever fixed it.
 - **FAIL -- UNRECORDED REASON (exit 1)**: the build still fails, but NOT for
@@ -180,9 +180,9 @@ def classify(exit_code: int, diagnostics: list[dict]) -> tuple[bool, str]:
                     "",
                     f"That means {WATCHED_FILE} (behind the `enhanced-auth` feature)",
                     "now compiles -- something got fixed, updated, or removed.",
-                    "COMPILATION_FIXES_COMPLETE.md's claim that this command succeeds",
+                    "docs/archive/COMPILATION_FIXES_COMPLETE.md's claim that this command succeeds",
                     "may now be TRUE. Before merging whatever caused this:",
-                    "  1. Update COMPILATION_FIXES_COMPLETE.md's correction to say so.",
+                    "  1. Update docs/archive/COMPILATION_FIXES_COMPLETE.md's correction to say so.",
                     "  2. Update or delete RECORDED_ERROR_CODES / this gate --",
                     "     it has nothing left to detect once the gap it watches closes.",
                     "  3. Update CAPABILITY_INVENTORY.md §5.1/§5.2.",
@@ -216,7 +216,7 @@ def classify(exit_code: int, diagnostics: list[dict]) -> tuple[bool, str]:
                     f"PASS (this means '{WATCHED_FILE}' is still known-broken, as recorded).",
                     f"Recorded codes seen: {sorted(found & RECORDED_ERROR_CODES)}",
                     "See CAPABILITY_INVENTORY.md §5.1/§5.2 and",
-                    "COMPILATION_FIXES_COMPLETE.md's correction for the full context.",
+                    "docs/archive/COMPILATION_FIXES_COMPLETE.md's correction for the full context.",
                 ]
             )
         )
