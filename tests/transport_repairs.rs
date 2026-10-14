@@ -384,10 +384,19 @@ async fn round_trip(
     panic!("no message arrived over {kind:?} within 3 s");
 }
 
-/// A free loopback port, never one this process has already handed out. Bound and released, so another
-/// process could take it before the node binds it; `node` then fails with a clear message rather than
-/// a false pass. The kernel may give a just-released ephemeral port to the very next bind, which made
-/// two `free_port()` calls for one `Pair` (or for two tests running in parallel) occasionally equal.
+/// Whether `port` is free on loopback in BOTH the TCP and the UDP namespace. They are independent, so a
+/// port free on TCP says nothing about UDP: a TCP-only check handed the same port to two UDP-family
+/// transports (QUIC, UDP, NAT traversal) and the second failed to bind (#48).
+fn free_in_both_namespaces(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+        && std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// A free loopback port, never one this process has already handed out, free for TCP and for UDP
+/// (see [`free_in_both_namespaces`]), so any transport under test may bind it. Bound and released, so
+/// another process could take it before the node binds it; `node` then fails with a clear message
+/// rather than a false pass. The kernel may give a just-released ephemeral port to the very next bind,
+/// which made two `free_port()` calls for one `Pair` (or for two tests running in parallel) equal.
 fn free_port() -> u16 {
     static HANDED_OUT: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
     loop {
@@ -396,12 +405,33 @@ fn free_port() -> u16 {
             .local_addr()
             .expect("local_addr")
             .port();
+        if !free_in_both_namespaces(port) {
+            continue;
+        }
         let mut handed_out = HANDED_OUT.lock().unwrap_or_else(|e| e.into_inner());
         if !handed_out.contains(&port) {
             handed_out.push(port);
             return port;
         }
     }
+}
+
+/// A port held only on UDP is not free: the TCP table alone cannot see it (#48's systematic cause).
+/// The controls (free on TCP; free again once released) can lose a race to a parallel test that
+/// binds the same number, so the whole case is retried; the claim itself holds on every attempt.
+#[test]
+fn a_port_held_on_udp_is_not_free_even_though_tcp_is() {
+    for _ in 0..50 {
+        let held = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind udp");
+        let port = held.local_addr().expect("local_addr").port();
+        let tcp_free = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+        assert!(!free_in_both_namespaces(port), "held on UDP, so not free");
+        drop(held);
+        if tcp_free && free_in_both_namespaces(port) {
+            return;
+        }
+    }
+    panic!("no UDP port was free on TCP and free again once released in 50 tries");
 }
 
 /// `free_port` never hands the same port out twice in one process: `Pair` asserts its two ports differ,

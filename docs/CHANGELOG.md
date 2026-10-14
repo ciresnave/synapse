@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.69): `transport_repairs` ports are free on TCP and UDP (#48)
+
+`free_port()` asked only the TCP table, so two UDP-family transports (QUIC, UDP, NAT traversal) could be handed the same port and the second failed to bind, truncating the run. It now returns only ports free in both namespaces. Tests only.
+
 ### Added (rc.68): tests for a refused ack and an id-less message in the push loop (#121)
 
 `a_refused_ack_leaves_the_message_pending_and_the_loop_alive` takes the role over between the lease and the ack and shows the refused ack leaves the message pending, keeps its push count and does not fail the look. `a_message_without_an_id_parses_to_none` pins the total parse the loop's skip rests on; the skip itself is unreachable through a real daemon. No behaviour change. #119/#120 (an unbounded re-push) are ruled to a daemon attempts cap and are not in this change.
