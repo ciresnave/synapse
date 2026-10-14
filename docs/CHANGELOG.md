@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.56): the crate's docs.rs front page named a crate that does not exist
+
+`src/lib.rs` "Getting Started" step 1 told readers to depend on `message_routing_system = "0.1.0"` (the library is
+`synapse`; the README was fixed in rc.49). It now gives the git dependency the README gives. A doc comment only; I did not build
+it, so CI is the proof. Not changed: the commented-out `register_peer` call at `src/lib.rs:70` (inside an example, not
+compiled), and step 2's `cargo run --example email_integration_test` (the file exists in `examples/`; I did not run it).
+
 ### Added (rc.55): `.github/docs_staleness.py` and status banners on 12 stale docs (ROADMAP item 12)
 
 The script counts the method names called in each page's ```rust blocks that match no `fn` in the workspace (files from

@@ -29,7 +29,7 @@ It moves bytes between processes; it does not put them into an agent (that is ea
 | 11 | crates.io names: `synapse` is at 1.1.0 there (ours is 6.0.0-rc.47, higher); the six other names are `0.0.0` placeholders. Ownership/permission to publish them is **unverified** | unknown | **yes** |
 | 12 | `docs/` staleness pass | measured and bannered in rc.55 (`python .github/docs_staleness.py`): 12 pages at 0.69-0.99 unknown-method rate carry an unverified banner; **not rewritten** (per-page decisions: rewrite to the daemon surface, or delete). README Advanced Features sections are 0.47 and unbannered; `docs/STREAMING_SUPPORT.md` is empty; root-level `*_COMPLETE.md`/`*_REPORT.md` and `err.txt` look like leftovers (not examined) | no |
 | 13 | **Daemon start failures name their cause** (DONE in rc.51, #148): `synapse claim` on a refused home prints only "synapsed exited (exit code: 2) and no daemon answered"; `synapsed` itself prints the reason (`permissions_too_open` + path, or `no account`) on its stderr, which the CLI's on-demand start drops. Fix: surface the daemon's stderr (or its last line) in the CLI error, with a test per cause | open (PM 2026-10-14) | no, but the first thing a new user hits |
-| 14 | `src/lib.rs:185` doc still says `message_routing_system = "0.1.0"` | open | no |
+| 14 | `src/lib.rs:185` doc named `message_routing_system` | done in rc.56 (a commented-out `register_peer` at `src/lib.rs:70` remains) | no |
 
 Each item is its own PR with a version bump (PM allocates the number). Items 4-6 go first: they are mechanical and each one
 can fail the first public user.

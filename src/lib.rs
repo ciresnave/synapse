@@ -182,7 +182,8 @@
 //! - Resilient communication in unstable network conditions
 //! ## 🔧 Getting Started
 //!
-//! 1. **Add to Cargo.toml**: `message_routing_system = "0.1.0"`
+//! 1. **Add to Cargo.toml**: `synapse = { git = "https://github.com/ThinkersJournal/synapse" }` (the 6.0.0
+//!    release candidates are not on crates.io yet)
 //! 2. **See examples**: `cargo run --example email_integration_test`
 //! 3. **Read the docs**: Full API documentation and guides
 //! 4. **Join the community**: Contribute and get support
