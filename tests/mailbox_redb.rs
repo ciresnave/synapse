@@ -54,6 +54,7 @@ cases!(
     an_expired_or_superseded_lease_counts_as_queued,
     fetch_excluding_skips_the_named_messages_and_leaves_them_unleased,
     fetch_excluding_counts_delivered_messages_not_skipped_ones,
+    a_failed_write_changes_nothing,
 );
 
 const LANE: &str = "lane@acct";
