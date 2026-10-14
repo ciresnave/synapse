@@ -1158,6 +1158,7 @@ fn list_entries(
                 json!({
                     "queued": depth.queued,
                     "leased": depth.leased,
+                    "dead": depth.dead,
                     "oldest_enqueued_at": depth.oldest_enqueued_at.map(|at| at.to_rfc3339()),
                 })
             });
@@ -1207,6 +1208,7 @@ mod tests {
             Depth {
                 queued: 2,
                 leased: 1,
+                dead: 3,
                 oldest_enqueued_at: Some(now),
             },
         );
@@ -1214,10 +1216,11 @@ mod tests {
         let with = list_entries(&roles, &presence, Some(&depths), now);
         assert_eq!(with[0]["pending"]["queued"], 2);
         assert_eq!(with[0]["pending"]["leased"], 1);
+        assert_eq!(with[0]["pending"]["dead"], 3);
         assert_eq!(with[0]["pending"]["oldest_enqueued_at"], now.to_rfc3339());
         assert_eq!(
             with[1]["pending"],
-            json!({"queued": 0, "leased": 0, "oldest_enqueued_at": null}),
+            json!({"queued": 0, "leased": 0, "dead": 0, "oldest_enqueued_at": null}),
             "a role with no mail"
         );
 

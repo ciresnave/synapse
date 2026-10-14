@@ -1189,7 +1189,7 @@ async fn list_shows_mailbox_depth_per_role() {
     assert!(beta_pending["oldest_enqueued_at"].is_string(), "{text}");
     assert_eq!(
         pending(&listed, "alpha@acct"),
-        json!({"queued": 0, "leased": 0, "oldest_enqueued_at": null}),
+        json!({"queued": 0, "leased": 0, "dead": 0, "oldest_enqueued_at": null}),
         "no mail for alpha"
     );
 

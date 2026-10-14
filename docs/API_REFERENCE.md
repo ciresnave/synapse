@@ -40,7 +40,7 @@ Bound to a loopback address only (it refuses any other). Bodies are JSON and **d
 | `/v1/list` | GET | none | roles with `online` (heard from within 90 s), `summary`, `pending` |
 | `/v1/stats` | GET | none | per-role cumulative counters since this daemon started (a restart begins again from zero); there is no CLI reader for it |
 
-Delivery is at-least-once: a fetched message is leased and comes back if not acked before the lease ends.
+Delivery is at-least-once: a fetched message is leased and comes back if not acked before the lease ends. A message leased `max_deliveries` times (default 10) without an ack moves to the role's **dead set**: bounded and visible, never silently dropped. It keeps its body, `from`, attempts and enqueue time for the retention period; `list`'s `pending.dead` counts it; a resend of its id is a duplicate; the receiver's `ack` discards it. (Library: `Mailbox::dead_letters`, `Mailbox::requeue_dead`; no daemon endpoint or CLI reads the dead set yet.)
 
 ## MCP adapters
 

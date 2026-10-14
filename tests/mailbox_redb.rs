@@ -55,6 +55,9 @@ cases!(
     fetch_excluding_skips_the_named_messages_and_leaves_them_unleased,
     fetch_excluding_counts_delivered_messages_not_skipped_ones,
     a_failed_write_changes_nothing,
+    a_message_leased_max_deliveries_times_goes_dead_and_is_kept,
+    a_full_dead_set_keeps_the_message_queued,
+    a_dead_message_can_be_requeued,
 );
 
 const LANE: &str = "lane@acct";
