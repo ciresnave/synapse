@@ -28,7 +28,7 @@ It moves bytes between processes; it does not put them into an agent (that is ea
 | 10 | Dependency currency: `auth-framework` is `0.6.0-rc42` here, crates.io has `0.6.0-rc55` | 13 rcs behind | CireSnave's "newest at all times" rule |
 | 11 | crates.io names: `synapse` is at 1.1.0 there (ours is 6.0.0-rc.47, higher); the six other names are `0.0.0` placeholders. Ownership/permission to publish them is **unverified** | unknown | **yes** |
 | 12 | `docs/` pass: stale pages (`DEPLOYMENT_GUIDE`, `CONFIGURATION_GUIDE`, `API_REFERENCE`) against the daemon-era surface | unmeasured | no |
-| 13 | **Daemon start failures name their cause**: `synapse claim` on a refused home prints only "synapsed exited (exit code: 2) and no daemon answered"; `synapsed` itself prints the reason (`permissions_too_open` + path, or `no account`) on its stderr, which the CLI's on-demand start drops. Fix: surface the daemon's stderr (or its last line) in the CLI error, with a test per cause | open (PM 2026-10-14) | no, but the first thing a new user hits |
+| 13 | **Daemon start failures name their cause** (DONE in rc.51, #148): `synapse claim` on a refused home prints only "synapsed exited (exit code: 2) and no daemon answered"; `synapsed` itself prints the reason (`permissions_too_open` + path, or `no account`) on its stderr, which the CLI's on-demand start drops. Fix: surface the daemon's stderr (or its last line) in the CLI error, with a test per cause | open (PM 2026-10-14) | no, but the first thing a new user hits |
 | 14 | `src/lib.rs:185` doc still says `message_routing_system = "0.1.0"` | open | no |
 
 Each item is its own PR with a version bump (PM allocates the number). Items 4-6 go first: they are mechanical and each one

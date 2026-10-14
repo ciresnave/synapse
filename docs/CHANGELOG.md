@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.51): a daemon that cannot start says why
+
+`synapse` started `synapsed` with stderr discarded, so a refusal showed only `synapsed is not running: synapsed exited (exit
+code: 2) and no daemon answered`. The CLI now gives the daemon's stderr to a fresh file in the home (`synapsed-start.err`,
+created with `create_new`, so a link planted in a home others can write is not followed; read back through the same handle,
+not the path) and appends its last two lines, bounded to 512 characters and stripped of control characters, plus the home path,
+to both exit errors, for example `synapsed exited (exit code: 2): synapsed: keystore: no account: run synapse id init first
+(home <path>)`. `synapsed` also prefixes a refused keystore item with `permissions_too_open:`. A pipe was rejected: a live
+daemon holds its write end and blocks when it fills. The file is left in the home (a daemon that started keeps it open). Tests:
+no account, a too-open key, and a healthy start that leaks no daemon stderr. Red on rc.50 (the first two fail), green here;
+with the file read removed the first two fail again. The CLI still waits out the 5 s deadline after the daemon has exited, as
+before.
+
 ### Fixed (rc.50): `docker-compose.yml` describes the daemon, not the legacy Postgres service
 
 The file ran `thinkersjournal/synapse:latest` (no such tag on Hub) with Postgres, ports 8080-8082, a config mount, Prometheus
