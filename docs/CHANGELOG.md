@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.68): tests for a refused ack and an id-less message in the push loop (#121)
+
+`a_refused_ack_leaves_the_message_pending_and_the_loop_alive` takes the role over between the lease and the ack and shows the refused ack leaves the message pending, keeps its push count and does not fail the look. `a_message_without_an_id_parses_to_none` pins the total parse the loop's skip rests on; the skip itself is unreachable through a real daemon. No behaviour change. #119/#120 (an unbounded re-push) are ruled to a daemon attempts cap and are not in this change.
+
 ### Added (rc.67): conformance case `a_failed_write_changes_nothing`; PersistAnt spike note
 
 A `MailStore` whose write applied changes as they came and never undid them on `Err` passed all 17 cases (measured with a `persistant-kv` adapter, `docs/spikes/persistant-kv-mailstore.md`). The new case holds a store to the atomic multi-key transaction: after a write that returns `Err`, no entry, ack record or sequence number remains. A store from another crate that lacked rollback will now fail `run_all`.

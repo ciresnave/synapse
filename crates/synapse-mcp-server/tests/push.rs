@@ -18,7 +18,9 @@ use rmcp::service::NotificationContext;
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use synapse::keystore::Keystore;
-use synapse_mcp_server::push::{AckPolicy, PushConfig, PushServer, Renderer};
+use synapse_mcp_server::push::{
+    AckPolicy, Notifier, PushConfig, PushLedger, PushServer, Renderer, push_once_with,
+};
 use synapse_mcp_server::{McpConfig, MessageView, SendArgs, SynapseMcpServer};
 use synapsed_client::Daemon;
 
@@ -357,4 +359,117 @@ async fn a_receiver_only_renderer_stops_pushing_at_the_bound_and_never_removes_t
     let left = bob.pull(10, 5).await.unwrap();
     assert_eq!(left.len(), 1, "{left:?}");
     assert_eq!(left[0]["body"], "nobody will ack this");
+}
+
+/// A notifier that records what it was asked to write. With `takeover` set, the first write also
+/// claims the role again (an explicit claim: a mere start reuses the cached session) and starts a
+/// session on it, so the daemon supersedes the pushing session and its next ack is refused (the
+/// write happens between the lease and the ack).
+struct Recording {
+    seen: Mutex<Vec<Value>>,
+    takeover: Option<McpConfig>,
+    successor: tokio::sync::Mutex<Option<SynapseMcpServer>>,
+}
+
+impl Recording {
+    fn plain() -> Self {
+        Recording {
+            seen: Mutex::default(),
+            takeover: None,
+            successor: tokio::sync::Mutex::new(None),
+        }
+    }
+    fn with_takeover(config: McpConfig) -> Self {
+        Recording {
+            takeover: Some(config),
+            ..Recording::plain()
+        }
+    }
+}
+
+impl Notifier for Recording {
+    async fn notify(&self, params: Value) -> Result<(), String> {
+        self.seen.lock().unwrap().push(params);
+        if let Some(config) = &self.takeover {
+            let mut successor = self.successor.lock().await;
+            if successor.is_none() {
+                // An implicit start reuses the cached session; only an explicit claim supersedes.
+                let home = config.home.clone();
+                std::thread::spawn(move || Daemon::connect(&home)?.claim("bob").map(|_| ()))
+                    .join()
+                    .map_err(|_| "the claim thread panicked".to_string())?
+                    .map_err(|e| format!("the takeover claim failed: {e}"))?;
+                *successor = Some(
+                    SynapseMcpServer::start(config.clone())
+                        .await
+                        .map_err(|_| "the takeover session did not start".to_string())?,
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// #121: a refused ack is logged only. The message must stay pending (it is not forgotten, so the
+/// ack is retried after the next lease), and the loop keeps going. #119 tracks that a persistent
+/// refusal repeats without a bound; this pins what happens today.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_ack_leaves_the_message_pending_and_the_loop_alive() {
+    let home = Home::new();
+    let alice = SynapseMcpServer::start(home.config("alice")).await.unwrap();
+    let bob = SynapseMcpServer::start(home.config("bob")).await.unwrap();
+    alice
+        .send(Parameters(SendArgs {
+            to: "bob".into(),
+            body: "ack me".into(),
+            message_id: None,
+        }))
+        .await
+        .expect("send");
+    let config = PushConfig {
+        lease_secs: 5,
+        max_pushes: 2,
+        ..PushConfig::default()
+    };
+    let ledger = PushLedger::default();
+
+    // First look: pushed once, no ack yet (the ack needs two pushes by this process).
+    let first = Recording::plain();
+    assert_eq!(
+        push_once_with(&Example, &bob, &first, &config, &ledger).await,
+        Ok(1)
+    );
+    let id = first.seen.lock().unwrap()[0]["id"]
+        .as_str()
+        .expect("the push names its message")
+        .to_string();
+    assert_eq!(ledger.pushes(&id), 1);
+
+    // Second look, after the lease: the write supersedes this session, so the ack is refused.
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    let second = Recording::with_takeover(home.config("bob"));
+    assert_eq!(
+        push_once_with(&Example, &bob, &second, &config, &ledger).await,
+        Ok(1),
+        "a refused ack is not an error of the look"
+    );
+    assert_eq!(
+        ledger.pushes(&id),
+        2,
+        "a refused ack must not forget the count"
+    );
+    let successor = second.successor.lock().await;
+    let successor = successor.as_ref().expect("the takeover ran");
+    let left = successor.pull(10, 5).await.unwrap();
+    assert_eq!(left.len(), 1, "the refused ack left the message pending");
+}
+
+/// #121: a fetched message with no `message_id` has no id to count, push or ack. The parse is
+/// total, so the loop sees `None` and skips it. The daemon always sends the field, so the skip
+/// itself cannot be reached through a real daemon; this pins the parse it rests on.
+#[test]
+fn a_message_without_an_id_parses_to_none() {
+    let view = MessageView::from_wire(&json!({"from": "alice@acct", "body": "aGk="}));
+    assert_eq!(view.message_id(), None);
+    assert_eq!(view.from(), Some("alice@acct"));
 }
