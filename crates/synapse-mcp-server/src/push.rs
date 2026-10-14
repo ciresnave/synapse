@@ -316,8 +316,11 @@ impl<R: Renderer> PushServer<R> {
         config: PushConfig,
         renderer: R,
     ) -> Result<Self, String> {
+        let inner = SynapseMcpServer::start(mcp)
+            .await?
+            .with_push(renderer.capability_key(), renderer.method());
         Ok(Self {
-            inner: SynapseMcpServer::start(mcp).await?,
+            inner,
             renderer: Arc::new(renderer),
             config,
             started: Arc::new(AtomicBool::new(false)),

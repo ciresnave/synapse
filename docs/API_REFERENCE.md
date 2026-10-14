@@ -1233,7 +1233,7 @@ It replaces the old UDP adapter and its TOML config (rc.24, breaking).
 | `ack` | `message_id` | `outcome` (`removed` or `already_acked`) |
 | `list` | none | `roles`: `online`, `summary`, `pending` (`null` = unknown) |
 | `set_summary` | `summary` (500 bytes, no control characters) | empty |
-| `whoami` | none | `role`, `global_id`, `epoch`, `daemon_instance` |
+| `whoami` | none | `role`, `global_id`, `epoch`, `daemon_instance`, `push` (`{capability_key, method}` on the Claude Code channel adapter; `null` on the generic adapter, which only answers `fetch`) |
 
 Text from other agents (bodies, summaries) is **untrusted**: the tool descriptions say so, control
 characters are escaped, and an authenticated `from` does not make a body safe to act on. A superseded session is

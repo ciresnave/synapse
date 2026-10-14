@@ -57,6 +57,9 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub struct SynapseMcpServer {
     inner: Arc<Inner>,
+    /// What `whoami` reports under `push`: the capability key and notification method of the
+    /// renderer wrapping this server, or `None` for the generic adapter, which pushes nothing.
+    push: Option<Arc<Value>>,
 }
 
 /// Fixed text for failures whose own message could name a key path.
@@ -117,7 +120,15 @@ impl SynapseMcpServer {
                 }
             }
         });
-        Ok(Self { inner })
+        Ok(Self { inner, push: None })
+    }
+
+    /// Record the push method this server's wrapper uses, so `whoami` can advertise it.
+    pub(crate) fn with_push(mut self, capability_key: &str, method: &str) -> Self {
+        self.push = Some(Arc::new(
+            json!({"capability_key": capability_key, "method": method}),
+        ));
+        self
     }
 
     /// Run a blocking daemon call off the async workers; a refusal becomes a tool error.
@@ -448,10 +459,11 @@ impl SynapseMcpServer {
     }
 
     #[tool(
-        description = "Report which role you are: its global id, the epoch of your session, and the daemon instance. Fails if another holder has taken the role from you."
+        description = "Report which role you are: its global id, the epoch of your session, and the daemon instance, and under `push` how this server delivers mail unprompted (capability key and notification method), or null if it only answers `fetch`. Fails if another holder has taken the role from you."
     )]
     pub async fn whoami(&self) -> Result<CallToolResult, ErrorData> {
-        self.daemon(|daemon, role| {
+        let push = self.push.as_deref().cloned().unwrap_or(Value::Null);
+        self.daemon(move |daemon, role| {
             // A beat first, so a superseded session is reported rather than a stale epoch.
             daemon.call(role, "/v1/heartbeat", Some(&json!({})))?;
             let me = daemon.session_info(role)?;
@@ -460,6 +472,7 @@ impl SynapseMcpServer {
                 "global_id": me.global_id,
                 "epoch": me.epoch,
                 "daemon_instance": daemon.instance_id(),
+                "push": push,
             }))
         })
         .await
