@@ -1,5 +1,10 @@
 # 🚀 Enhanced Auth-Framework Integration for Synapse
 
+> **Status (6.0.0-rc.55, 2026-10-14): not verified against the current code.** 11 of the 16 method names called in this
+> page's Rust samples (69%) match no `fn` in the workspace (`python .github/docs_staleness.py`; an upper bound: names from
+> external crates count as unknown). The page predates the daemon-era surface (`synapsed`, `synapse`, `synapse-mcp`). Read its
+> samples as illustrative. The surface that is tested is the README Quick Start and the MCP tools table in `docs/API_REFERENCE.md`.
+
 This document outlines the integration of the latest auth-framework features into the Synapse neural communication network, providing enterprise-grade authentication for AI agents and neural network participants.
 
 ## 🆕 What's New in This Integration
