@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.57): legacy files archived or deleted; `docs/API_REFERENCE.md` cut to the daemon, CLI and MCP surface
+
+At the PM's instruction. **Deleted** (all 0 bytes): root `err.txt`, `WINDOWS_LINKER_WORKAROUND.md` (the real one is
+`docs/WINDOWS_LINKER_WORKAROUND.md`), `build-debug.ps1`, `test-build.ps1`, and `docs/STREAMING_SUPPORT.md`; the `err.txt` line in
+`.dockerignore` went with it. **Moved with `git mv`** to `docs/archive/` (new `README.md`): the eight root completion, fix and
+audit reports. Three of them are read by tests (`empty_test_files_are_named`, `integration_summary_matches_manifest`,
+`security_claims_match_the_tree`), which now point at `docs/archive/`; prose naming them in `.github/enhanced_auth_guard.py`, the
+`ci_cd.yml` comment and the m0 workspace-split spec was repointed, and `CAPABILITY_INVENTORY.md` (a measurement, not rewritten)
+gained a note. The guard's `--self-test` passes. **`docs/API_REFERENCE.md`** was rewritten from about 1,250 lines to the
+verified surface (`synapse` commands, `/v1` routes and body fields read from `crates/synapsed/src/lib.rs`, the MCP tools);
+the library reference is at `git show 6125f31:docs/API_REFERENCE.md`. The other 11 bannered pages keep their banners.
+
 ### Fixed (rc.56): the crate's docs.rs front page named a crate that does not exist
 
 `src/lib.rs` "Getting Started" step 1 told readers to depend on `message_routing_system = "0.1.0"` (the library is

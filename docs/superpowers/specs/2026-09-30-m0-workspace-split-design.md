@@ -53,7 +53,7 @@ crates/synapse-mcp/
 
 - **The core stays at the repo root.** Moving it into `crates/` would break every test that reads repo
   files through `CARGO_MANIFEST_DIR` (for example `security_claims_match_the_tree` reads
-  `SECURITY_AUDIT_COMPLETION_REPORT.md`), and that churn buys nothing.
+  `docs/archive/SECURITY_AUDIT_COMPLETION_REPORT.md`), and that churn buys nothing.
 - **`members = ["crates/*"]` is a glob.** Deleting `crates/` therefore removes every adapter without
   editing any manifest, which is how the guard job (§3.3) runs. Cargo has to accept a glob that matches
   nothing. Task 1 verifies that. If cargo rejects it, the job rewrites `members` instead, and the PR

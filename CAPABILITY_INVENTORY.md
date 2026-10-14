@@ -4,6 +4,10 @@
 `git ls-remote origin main`, 0 commits behind), on `rustc 1.100.0-nightly (cea272fa3, 2026-09-07)`,
 `cargo 1.100.0-nightly`, host `x86_64-pc-windows-msvc`.
 
+> **Note (rc.57, 2026-10-14):** this inventory is a measurement at the ref above and is not rewritten. Since then the eight
+> completion/audit reports it cites by bare name moved to `docs/archive/`, and the four 0-byte root files it lists
+> (`WINDOWS_LINKER_WORKAROUND.md`, `build-debug.ps1`, `test-build.ps1`, `err.txt`) and `docs/STREAMING_SUPPORT.md` were deleted.
+
 Every number below is the output of a command that was run. Where I state an absence, I state the
 positive control that proves the query could have found something. Nothing here is inferred from a
 document, a filename, or a commit message.

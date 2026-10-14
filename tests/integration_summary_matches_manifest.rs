@@ -72,9 +72,10 @@ fn documented_features(doc: &str) -> Option<Vec<String>> {
 fn the_integration_summary_agrees_with_cargo_toml() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("control: Cargo.toml");
-    let doc = fs::read_to_string(root.join("AUTH_FRAMEWORK_INTEGRATION_SUMMARY.md")).expect(
-        "control: AUTH_FRAMEWORK_INTEGRATION_SUMMARY.md is missing — repoint, do not delete",
-    );
+    let doc = fs::read_to_string(root.join("docs/archive/AUTH_FRAMEWORK_INTEGRATION_SUMMARY.md"))
+        .expect(
+            "control: AUTH_FRAMEWORK_INTEGRATION_SUMMARY.md is missing — repoint, do not delete",
+        );
 
     let mut actual = manifest_features(&manifest);
     actual.sort();
