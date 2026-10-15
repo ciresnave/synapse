@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.79): presence `cwd`/`repo`, list filters, sender summary and cwd on fetched mail
+
+A heartbeat may carry `cwd` and `repo` (self-reported, untrusted, at most 500 bytes, no control characters, else 400 `malformed`). `GET /v1/list` shows them and filters on `?cwd=` and `?repo=` (exact match). `/v1/fetch` messages carry `from_summary` and `from_cwd`, the sender's current presence (null when it has no live session), and the Claude Code channel passes them as escaped `meta.sender_summary` and `meta.sender_cwd`. `synapse-mcp-server` heartbeats its working directory and the repository around it. Closes cutover gaps G1 and G2.
+
 ### Added (rc.78): launch signals for lane launch on message (`GET /v1/waiting`)
 
 `synapsed` can now tell a launcher which roles have mail and no live session. `GET /v1/waiting[?wait=<=30]` is level-triggered; `POST /v1/launch-result` answers a signal (409 `stale_signal` for a stale id, epoch or attempt); `POST /v1/launch-clear` forgets a role's launch state. `/v1/list` gains a `launch` field. Off unless `SYNAPSE_LAUNCHER_ROLES` names the allowed role(s) (403 otherwise). Defaults: grace 5 s, wait 120 s, backoff 30 s / 2 min / 10 min, one signal plus three retries then `unreachable`. No signals until the daemon has been up for the online window. Spec: `docs/superpowers/specs/2026-10-15-cutover-and-lane-launch.md`.

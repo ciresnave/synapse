@@ -1456,3 +1456,69 @@ async fn fetch_can_exclude_messages_it_would_otherwise_lease() {
     }
     d.stop().await;
 }
+
+/// G1/G2: a heartbeat may carry `cwd` and `repo` (bounded, no control characters); `list` shows
+/// them and filters on them exactly; a fetched message carries the sender's summary and cwd.
+#[tokio::test]
+async fn presence_cwd_repo_filter_list_and_ride_on_fetched_mail() {
+    let d = start().await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
+    let (s, reply, _) = post(
+        &d,
+        "/v1/heartbeat",
+        Some(&alpha),
+        json!({"summary": "busy", "cwd": r"C:/Projects/synapse", "repo": "synapse"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{reply}");
+    // Refused, and nothing stored from the refused beat.
+    for bad in [json!({"cwd": "a\nb"}), json!({"repo": "x".repeat(501)})] {
+        let (s, reply, _) = post(&d, "/v1/heartbeat", Some(&beta), bad).await;
+        assert_eq!(s, 400, "{reply}");
+    }
+    let listed = |query: &'static str| {
+        let d = &d;
+        let beta = beta.clone();
+        async move {
+            let reply: Value = client()
+                .get(d.url(&format!("/v1/list{query}")))
+                .bearer_auth(&beta)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            reply["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["global_id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(listed("").await.len(), 2);
+    assert_eq!(listed("?repo=synapse").await, ["alpha@acct"]);
+    assert_eq!(
+        listed("?cwd=C%3A%2FProjects%2Fsynapse").await,
+        ["alpha@acct"]
+    );
+    assert!(listed("?repo=other").await.is_empty());
+    assert!(listed("?repo=synapse&cwd=nowhere").await.is_empty());
+
+    let (s, sent, _) = post(
+        &d,
+        "/v1/send",
+        Some(&alpha),
+        json!({"to": "beta@acct", "body_b64": B64.encode(b"hi")}),
+    )
+    .await;
+    assert_eq!(s, 200, "{sent}");
+    let (s, fetched, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
+    assert_eq!(s, 200, "{fetched}");
+    let m = &fetched["messages"][0];
+    assert_eq!(m["from_summary"], "busy");
+    assert_eq!(m["from_cwd"], r"C:/Projects/synapse");
+    d.stop().await;
+}
