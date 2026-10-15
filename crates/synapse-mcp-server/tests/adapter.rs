@@ -302,7 +302,7 @@ async fn a_malformed_call_and_an_unknown_recipient_are_tool_errors() {
 }
 
 /// Claim `role` directly over HTTP, bypassing the home's session cache, as another holder would.
-fn rival_claim(home: &Home, role: &str, nonce: u8) -> u64 {
+fn rival_claim(home: &Home, role: &str) -> u64 {
     let announce: Value =
         serde_json::from_str(&std::fs::read_to_string(home.path().join("synapsed.json")).unwrap())
             .unwrap();
@@ -314,7 +314,13 @@ fn rival_claim(home: &Home, role: &str, nonce: u8) -> u64 {
         .unwrap();
     // The daemon refuses claims signed at or before its start; the adapter's claims were later.
     let signed_at = chrono::Utc::now() + chrono::Duration::seconds(1);
-    let req = sign_claim_for(&identity, instance, [nonce; 16], signed_at).unwrap();
+    let req = sign_claim_for(
+        &identity,
+        instance,
+        *uuid::Uuid::new_v4().as_bytes(),
+        signed_at,
+    )
+    .unwrap();
     let body = json!({
         "audience": req.audience,
         "chain_pem": chain_to_pem(&req.chain),
@@ -347,7 +353,7 @@ async fn a_superseded_adapter_reports_it_and_does_not_claim_the_role_back() {
         .as_u64()
         .unwrap();
 
-    let taken = tokio::task::block_in_place(|| rival_claim(&home, "alice", 1));
+    let taken = tokio::task::block_in_place(|| rival_claim(&home, "alice"));
     assert_eq!(taken, before + 1);
 
     // The adapter's cached session is now stale. Each tool reports it; none re-claims.
@@ -363,7 +369,7 @@ async fn a_superseded_adapter_reports_it_and_does_not_claim_the_role_back() {
         assert!(refusal.contains("synapse claim"), "{tool}: {refusal}");
     }
     // The claim count: a re-claim by the adapter would make the next rival epoch jump by two.
-    let next = tokio::task::block_in_place(|| rival_claim(&home, "alice", 2));
+    let next = tokio::task::block_in_place(|| rival_claim(&home, "alice"));
     assert_eq!(next, taken + 1, "the adapter claimed the role back");
 }
 
