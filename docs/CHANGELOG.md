@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Packaging (rc.77): every published crate ships a README and both licence texts
+
+The six sub-crates (`synapse-security`, `synapsed-client`, `synapse-mcp-server`, `synapse-claude-channel`, `synapsed`, `synapsectl`) packaged with no README and no `LICENSE-MIT`/`LICENSE-APACHE`. Each now has a `README.md` (the `readme` key) and byte-identical copies of the root licence files. The workspace has no NOTICE file, so none is shipped
+
 ### Fixed (rc.76): `synapsed` api tests claim with a random nonce per claim (CodeQL `rust/hard-coded-cryptographic-value`)
 
 `claim` and `claim_body` in `crates/synapsed/tests/api.rs` no longer take a literal nonce byte; each claim draws a fresh random nonce. Test code only
