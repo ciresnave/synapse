@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.82"
+version = "6.0.0-rc.83"
 
 [package]
 name = "synapse"
@@ -445,20 +445,27 @@ jwt = ["dep:jsonwebtoken"]
 # Full native platform support (the original working config but with updated deps)
 native = ["native-base", "jwt"]
 
-# `native` without `jwt`.
-native-base = [
+# What the client crates (`synapsed-client`, `synapse-security`) build against: `native` without `jwt`
+# (rsa, RUSTSEC-2023-0071) and without `database`, `cache` and `auth` (sqlx, redis, auth-framework,
+# several thousand lock lines and their licences).
+client-base = [
     "core",
     "mailbox-redb",
     "networking",
     "nat_traversal",
     "email",
-    "database",
-    "auth",
     "crypto",
     "http",
     "mdns",
-    "cache",
     "telemetry",
+]
+
+# `native` without `jwt`.
+native-base = [
+    "client-base",
+    "database",
+    "auth",
+    "cache",
     "dep:sysinfo",
     "dep:parking_lot",
 ]

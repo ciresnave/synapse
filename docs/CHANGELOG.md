@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.83): client crates build without sqlx, redis and auth-framework
+
+New `client-base` feature: `native` without `jwt`, `database`, `cache` and `auth`. `synapse::synapse::storage::{cache,database,migrations}`, the `services` that need them (`discovery`, `privacy_manager`, `registry`) and `api::{discovery_api,participant_api}` are now behind `database`/`cache`, which `native` (the default) still enables, so a default build is unchanged. `synapsed-client` and `synapse-security` use `client-base`: their tree drops from 654 to 442 packages and has no `rsa`, `sqlx`, `redis`, `auth-framework` or `jsonwebtoken`.
+
 ### Changed (rc.82): `synapsed-client` and `synapse-security` no longer pull `rsa`
 
 `jsonwebtoken` (whose `rust_crypto` backend brings `rsa`, RUSTSEC-2023-0071) moves from `core` to a new `jwt` feature; `native` is now `native-base` + `jwt`, so the default build is unchanged. `synapsed-client` and `synapse-security` depend on `synapse` with `default-features = false, features = ["native-base"]`, so `cargo tree -p synapsed-client -i rsa` is empty. `tests/jwt_backend.rs` requires `jwt`. No API change.
