@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.73): test and parser code no longer trips CodeQL `rust/hard-coded-cryptographic-value` (alerts 121-140)
+
+Claim nonces and passwords in the tests are random per run (stable per label within a run), and the `unhex` helpers in `synapsed` and `synapsed-client` build their output without a zero-filled literal buffer. No behaviour change in shipped code.
+
 ### Added (rc.72): `synapse stats`
 
 `synapse stats --role <role>` prints `GET /v1/stats` one JSON object per role per line (`sent`, `acked`, `redelivered`, `expired`, plus the daemon's `scope` and `since`). The counters are since the daemon started; a restart begins again from zero. CLI only: no daemon or library change.

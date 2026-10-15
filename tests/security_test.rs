@@ -120,11 +120,11 @@ async fn test_digital_signature_security() {
 #[tokio::test]
 async fn test_password_key_derivation_security() {
     let crypto = SynapseKeyManager::new().await.unwrap();
-    let password = "SuperSecureP@ssw0rd!123";
+    let password = format!("pw-{}", uuid::Uuid::new_v4());
     let params = KeyDerivationParams::default();
 
     // Test key derivation
-    let key_result = crypto.derive_key_from_password(password, &params).await;
+    let key_result = crypto.derive_key_from_password(&password, &params).await;
     assert!(
         key_result.is_ok(),
         "Key derivation should succeed: {:?}",
@@ -140,7 +140,7 @@ async fn test_password_key_derivation_security() {
 
     // Test same password with same params produces same key (deterministic)
     let key2 = crypto
-        .derive_key_from_password(password, &params)
+        .derive_key_from_password(&password, &params)
         .await
         .unwrap();
     assert_eq!(
@@ -154,7 +154,7 @@ async fn test_password_key_derivation_security() {
         ..Default::default()
     };
     let key3 = crypto
-        .derive_key_from_password(password, &different_params)
+        .derive_key_from_password(&password, &different_params)
         .await
         .unwrap();
     assert_ne!(
@@ -282,13 +282,13 @@ async fn test_end_to_end_security_integration() {
     assert!(verified, "Signature should verify correctly");
 
     // 3. Test key derivation for password-based security
-    let password = "user_secure_password_123!";
+    let password = format!("pw-{}", uuid::Uuid::new_v4());
     let params = KeyDerivationParams {
         salt: "unique_salt_per_user".to_string(),
         ..Default::default()
     };
     let derived_key = crypto
-        .derive_key_from_password(password, &params)
+        .derive_key_from_password(&password, &params)
         .await
         .unwrap();
     assert!(
