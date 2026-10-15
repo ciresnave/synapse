@@ -121,6 +121,9 @@ struct Session {
 struct Presence {
     last_seen: DateTime<Utc>,
     summary: Option<String>,
+    /// Self-reported by the session on heartbeat: untrusted, display and filtering only.
+    cwd: Option<String>,
+    repo: Option<String>,
 }
 
 struct Shared {
@@ -743,6 +746,8 @@ fn authed(shared: &Shared, headers: &HeaderMap) -> Result<Session, ApiError> {
         .or_insert(Presence {
             last_seen: now,
             summary: None,
+            cwd: None,
+            repo: None,
         });
     entry.last_seen = now;
     Ok(session)
@@ -1013,12 +1018,18 @@ async fn fetch(
     // Counted after the fetch committed, never from the request: a refused fetch moves nothing.
     let redelivered = deliveries.iter().filter(|d| d.attempts > 1).count();
     let expired = deliveries.iter().filter(|d| d.prior_lease_lapsed).count();
+    // The sender's current self-reported presence, untrusted display text (null when the sender
+    // has no live session). One lock hold for the whole batch.
+    let senders = locked(&shared.presence)?;
     let messages: Vec<Value> = deliveries
         .into_iter()
         .map(|d| {
+            let seen = senders.get(&d.envelope.from);
             json!({
                 "message_id": d.envelope.message_id,
                 "from": d.envelope.from,
+                "from_summary": seen.and_then(|p| p.summary.clone()),
+                "from_cwd": seen.and_then(|p| p.cwd.clone()),
                 "body_b64": B64.encode(&d.envelope.body),
                 "enqueued_at": d.enqueued_at.to_rfc3339(),
                 "lease_until": d.lease_until.to_rfc3339(),
@@ -1026,6 +1037,7 @@ async fn fetch(
             })
         })
         .collect();
+    drop(senders);
     if redelivered > 0 {
         count(&shared, &session.global_id, |c| {
             c.redelivered += redelivered as u64;
@@ -1120,6 +1132,52 @@ async fn requeue(
 struct HeartbeatBody {
     #[serde(default)]
     summary: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+/// A self-reported presence text: bounded, no control characters.
+fn presence_text_ok(text: &str) -> bool {
+    text.len() <= MAX_SUMMARY && !text.chars().any(char::is_control)
+}
+
+/// The value of `key` in a query string, percent-decoded; the first occurrence wins.
+fn query_param(uri: &Uri, key: &str) -> Option<String> {
+    uri.query()?.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then(|| percent_decode(v))
+    })
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len()
+                && hex(bytes[i + 1]).is_some()
+                && hex(bytes[i + 2]).is_some() =>
+            {
+                out.push(
+                    (hex(bytes[i + 1]).unwrap_or(0) * 16 + hex(bytes[i + 2]).unwrap_or(0)) as u8,
+                );
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 async fn heartbeat(
@@ -1129,19 +1187,39 @@ async fn heartbeat(
 ) -> Result<Response, ApiError> {
     let session = authed(&shared, &headers)?;
     let body: HeartbeatBody = parse(&headers, &body)?;
-    if let Some(summary) = body.summary {
-        if summary.len() > MAX_SUMMARY || summary.chars().any(char::is_control) {
-            return Err(malformed("summary"));
+    for (name, value) in [
+        ("summary", &body.summary),
+        ("cwd", &body.cwd),
+        ("repo", &body.repo),
+    ] {
+        if value.as_deref().is_some_and(|v| !presence_text_ok(v)) {
+            return Err(malformed(name));
         }
-        if let Some(p) = locked(&shared.presence)?.get_mut(&session.global_id) {
-            p.summary = Some(summary);
+    }
+    if let Some(p) = locked(&shared.presence)?.get_mut(&session.global_id) {
+        if body.summary.is_some() {
+            p.summary = body.summary;
+        }
+        if body.cwd.is_some() {
+            p.cwd = body.cwd;
+        }
+        if body.repo.is_some() {
+            p.repo = body.repo;
         }
     }
     Ok(axum::Json(json!({})).into_response())
 }
 
-async fn list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<Response, ApiError> {
+/// `GET /v1/list[?cwd=<exact>][&repo=<exact>]`: filters match the self-reported presence fields
+/// exactly, so a role with no live presence never matches a filter.
+async fn list(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, ApiError> {
     authed(&shared, &headers)?;
+    let cwd = query_param(&uri, "cwd");
+    let repo = query_param(&uri, "repo");
     let now = Utc::now();
     // One lock hold, so every depth is counted against the epoch listed beside it.
     let (roles, depths) = {
@@ -1150,7 +1228,7 @@ async fn list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<R
     };
     let presence = locked(&shared.presence)?;
     let launches = locked(&shared.launches)?;
-    let out = list_entries(
+    let mut out = list_entries(
         &roles,
         &presence,
         depths.as_ref(),
@@ -1158,6 +1236,11 @@ async fn list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<R
         shared.online_window,
         now,
     );
+    for (key, want) in [("cwd", &cwd), ("repo", &repo)] {
+        if let Some(want) = want {
+            out.retain(|entry| entry[key].as_str() == Some(want.as_str()));
+        }
+    }
     Ok(axum::Json(json!({ "roles": out })).into_response())
 }
 
@@ -1414,6 +1497,8 @@ fn list_entries(
                 "online": seen.is_some_and(|p| now - p.last_seen <= online_window),
                 "last_seen": seen.map(|p| p.last_seen.to_rfc3339()),
                 "summary": seen.and_then(|p| p.summary.clone()),
+                "cwd": seen.and_then(|p| p.cwd.clone()),
+                "repo": seen.and_then(|p| p.repo.clone()),
                 "pending": pending,
                 "launch": launches.view(global_id),
             })
@@ -1447,6 +1532,8 @@ mod tests {
             Presence {
                 last_seen: now,
                 summary: Some("busy".into()),
+                cwd: None,
+                repo: None,
             },
         );
         let mut depths = BTreeMap::new();

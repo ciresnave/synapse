@@ -32,6 +32,29 @@ const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 /// The longest summary `synapsed` accepts (`MAX_SUMMARY`).
 const MAX_SUMMARY: usize = 500;
 
+/// The heartbeat body: this process's working directory and the name of the repository around
+/// it (the nearest ancestor holding `.git`), so other roles can find it by place. Self-reported
+/// and untrusted by the daemon; a value the daemon would refuse is left out, never sent.
+fn presence_fields() -> Value {
+    let mut body = serde_json::Map::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        let repo = cwd
+            .ancestors()
+            .find(|dir| dir.join(".git").exists())
+            .and_then(|dir| dir.file_name())
+            .map(|name| name.to_string_lossy().into_owned());
+        let ok = |text: &str| text.len() <= MAX_SUMMARY && !text.chars().any(char::is_control);
+        let cwd = cwd.to_string_lossy().into_owned();
+        if ok(&cwd) {
+            body.insert("cwd".into(), Value::String(cwd));
+        }
+        if let Some(repo) = repo.filter(|r| ok(r)) {
+            body.insert("repo".into(), Value::String(repo));
+        }
+    }
+    Value::Object(body)
+}
+
 /// Who this adapter is, and where its daemon's home is. No key material lives here.
 #[derive(Clone)]
 pub struct McpConfig {
@@ -78,7 +101,7 @@ fn describe(e: &MailError) -> String {
 fn connect(config: &McpConfig) -> Result<Daemon, String> {
     let daemon = Daemon::connect(&config.home).map_err(|e| describe(&e))?;
     daemon
-        .call(&config.role, "/v1/heartbeat", Some(&json!({})))
+        .call(&config.role, "/v1/heartbeat", Some(&presence_fields()))
         .map_err(|e| describe(&e))?;
     Ok(daemon)
 }
@@ -110,7 +133,7 @@ impl SynapseMcpServer {
                 let beat = tokio::task::spawn_blocking(move || {
                     inner
                         .daemon
-                        .call(&inner.role, "/v1/heartbeat", Some(&json!({})))
+                        .call(&inner.role, "/v1/heartbeat", Some(&presence_fields()))
                 })
                 .await;
                 // A refused beat (superseded, unknown session) is not retried into a re-claim; the
@@ -302,6 +325,16 @@ impl MessageView {
     /// The sender's global id, as the daemon verified it.
     pub fn from(&self) -> Option<&str> {
         self.from.as_deref()
+    }
+
+    /// The sender's self-reported summary, as of the fetch (untrusted display text).
+    pub fn from_summary(&self) -> Option<&str> {
+        self.shown["from_summary"].as_str()
+    }
+
+    /// The sender's self-reported working directory, as of the fetch (untrusted display text).
+    pub fn from_cwd(&self) -> Option<&str> {
+        self.shown["from_cwd"].as_str()
     }
 
     /// The daemon's delivery-attempt count for this message (it counts leases).
