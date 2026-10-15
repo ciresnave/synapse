@@ -155,8 +155,8 @@ re-implement signing.
 
 `/v1/waiting` and `/v1/launch-result` need a bearer session like every route, **and** the session's role must
 be in the daemon's `launcher_roles` (config, default empty, so the feature is off until set; recommended
-value: `overmind`). A role in that list can learn *that* mail waits and *how much*, never what. Any other
-role gets 403. The session comes from the same claim flow as any role, so the trust root is OverMind's role
+value: `agentlife-launcher`, the launch service's own role, distinct from `overmind` so it never takes OverMind's session). A role in that list can learn *that* mail waits and *how much*, never what. Any other
+role gets 403. The session comes from the same claim flow as any role, so the trust root is the launcher role's
 key, not a shared secret.
 
 ### C4. The launch result (named errors, never a silent drop: constraint 5)
@@ -263,7 +263,7 @@ OverMind's PRs (handler record, lane-restart on the daemon API, a `/v1/waiting` 
 - **CireSnave:** approve the `server:synapse` dev-channels record (step 1), and the cutover date after the
   3-day soak.
 - **PM:** who starts `synapsed` at login (G7); whether broadcast (G8) is needed.
-- **OverMind (answered 2026-10-15):** `launcher_roles=overmind` yes, conditional on C2a; `launch_grace` 5 s
+- **OverMind (answered 2026-10-15):** `launcher_roles`: OverMind agreed in principle, conditional on C2a; the launcher role is **`agentlife-launcher`** (AgentLife's service, PM 2026-10-15; a distinct role, since one session per (home,role) would knock OverMind off). The default stays empty; `launch_grace` 5 s
   yes; `launch_wait` 120 s accepted as a default but **unmeasured**: AgentLife should report a measured
   lane-start-to-claim time before it is relied on.
 - **OverMind/AgentLife:** who builds the poller service (C2a).

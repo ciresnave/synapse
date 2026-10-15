@@ -9,7 +9,7 @@
 //! Home: `SYNAPSE_HOME` (else the platform default, as for `synapse id`). Address: `SYNAPSE_ADDR`
 //! (default `127.0.0.1:7920`), loopback only. Logs never carry tokens or key material.
 //! Launch signals (`GET /v1/waiting`, lane launch on message) are OFF unless `SYNAPSE_LAUNCHER_ROLES`
-//! names the role(s), comma separated, that may read them (for example `overmind`).
+//! names the role(s), comma separated, that may read them (for example `agentlife-launcher`).
 //! Security events (failed bearers and claims, over-budget requests) go to
 //! `<home>/security-events.jsonl`, owner-only; they never carry a token, nonce or signature.
 
