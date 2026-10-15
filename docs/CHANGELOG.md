@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.82): `synapsed-client` and `synapse-security` no longer pull `rsa`
+
+`jsonwebtoken` (whose `rust_crypto` backend brings `rsa`, RUSTSEC-2023-0071) moves from `core` to a new `jwt` feature; `native` is now `native-base` + `jwt`, so the default build is unchanged. `synapsed-client` and `synapse-security` depend on `synapse` with `default-features = false, features = ["native-base"]`, so `cargo tree -p synapsed-client -i rsa` is empty. `tests/jwt_backend.rs` requires `jwt`. No API change.
+
 ### Added (rc.80): `synapsed-client` launch methods
 
 `Daemon::waiting(role, wait_secs)`, `Daemon::launch_result(...)` and `Daemon::launch_clear(role, target)` wrap `GET /v1/waiting`, `POST /v1/launch-result` and `POST /v1/launch-clear` for a launcher service. A `waiting` poll is capped at 25 s so it stays under the client's call timeout.
