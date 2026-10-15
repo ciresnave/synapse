@@ -109,12 +109,16 @@ async fn get_json(d: &Running, path: &str, token: &str) -> Value {
 /// A wire-format claim for `role`, signed after the daemon started (M3 refuses claims signed at or
 /// before the table's start).
 fn claim_body(d: &Running, role: &str, nonce: u8) -> Value {
+    claim_body_with(d, role, [nonce; 16])
+}
+
+fn claim_body_with(d: &Running, role: &str, nonce: [u8; 16]) -> Value {
     let store = Keystore::open(d.home.path()).unwrap();
     // The certificate is issued at the real time; only the claim is signed after the daemon's
     // start (a certificate issued in the daemon's future would be "not yet valid").
     let identity = store.role(role, Utc::now()).unwrap();
     let signed_at = Utc::now().max(d.started_at + chrono::Duration::seconds(1));
-    let req = sign_claim_for(&identity, &instance_id(d), [nonce; 16], signed_at).unwrap();
+    let req = sign_claim_for(&identity, &instance_id(d), nonce, signed_at).unwrap();
     json!({
         "audience": req.audience,
         "chain_pem": chain_to_pem(&req.chain),
@@ -132,7 +136,17 @@ fn instance_id(d: &Running) -> String {
 }
 
 async fn claim(d: &Running, role: &str, nonce: u8) -> (String, u64) {
-    let (status, reply, text) = post(d, "/v1/claim", None, claim_body(d, role, nonce)).await;
+    claim_with(d, claim_body(d, role, nonce)).await
+}
+
+/// A claim with a fresh random nonce, for tests that claim a role many times.
+async fn claim_fresh(d: &Running, role: &str) -> (String, u64) {
+    let nonce = *uuid::Uuid::new_v4().as_bytes();
+    claim_with(d, claim_body_with(d, role, nonce)).await
+}
+
+async fn claim_with(d: &Running, body: Value) -> (String, u64) {
+    let (status, reply, text) = post(d, "/v1/claim", None, body).await;
     assert_eq!(status, 200, "claim refused: {text}");
     (
         reply["session"]
@@ -302,8 +316,8 @@ async fn a_round_trip_between_two_roles() {
 #[tokio::test]
 async fn a_message_never_acked_goes_dead_and_can_be_requeued() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    claim(&d, "beta", 2).await;
+    let (alpha, _) = claim_fresh(&d, "alpha").await;
+    claim_fresh(&d, "beta").await;
     let (s, sent, _) = post(
         &d,
         "/v1/send",
@@ -313,8 +327,8 @@ async fn a_message_never_acked_goes_dead_and_can_be_requeued() {
     .await;
     assert_eq!(s, 200, "{sent}");
     let id = sent["message_id"].as_str().unwrap().to_string();
-    for round in 0..10u8 {
-        let beta = claim(&d, "beta", 10 + round).await.0;
+    for round in 0..10 {
+        let beta = claim_fresh(&d, "beta").await.0;
         let (s, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
         assert_eq!(s, 200, "{got}");
         assert_eq!(
@@ -323,7 +337,7 @@ async fn a_message_never_acked_goes_dead_and_can_be_requeued() {
             "round {round}"
         );
     }
-    let beta = claim(&d, "beta", 30).await.0;
+    let beta = claim_fresh(&d, "beta").await.0;
     let (_, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
     assert!(
         got["messages"].as_array().unwrap().is_empty(),
