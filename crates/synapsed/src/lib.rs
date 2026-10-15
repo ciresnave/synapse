@@ -54,6 +54,9 @@ use synapse::security_events::{
 };
 use synapse_security::FileSink;
 
+pub mod launch;
+pub use launch::LauncherConfig;
+
 /// Where and how the daemon runs.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -142,6 +145,12 @@ struct Shared {
     sweep_every: std::time::Duration,
     security: Security,
     pause: Pause,
+    /// Who may read launch signals, and their timing (feature off while `roles` is empty).
+    launcher: LauncherConfig,
+    /// Per-role launch state; in memory.
+    launches: Mutex<launch::Table>,
+    /// How recently a role must have been heard from to count as online.
+    online_window: chrono::Duration,
 }
 
 /// How the daemon waits out an owed failure delay before answering. The default sleeps on the tokio
@@ -358,6 +367,9 @@ impl Daemon {
                 sweep_every: cfg.sweep_every,
                 security: Security::new(SecurityConfig::default(), Arc::new(sink)),
                 pause: sleep_pause(),
+                launcher: LauncherConfig::default(),
+                launches: Mutex::new(launch::Table::new(started_at)),
+                online_window: ONLINE_WINDOW,
             },
         })
     }
@@ -375,6 +387,23 @@ impl Daemon {
     #[must_use]
     pub fn with_pause(mut self, pause: Pause) -> Daemon {
         self.shared.pause = pause;
+        self
+    }
+
+    /// Sets who may read launch signals (`GET /v1/waiting`) and the launch timing. The default has
+    /// no launcher roles, which leaves the three launch routes answering 403. Call after `open`,
+    /// before `serve`.
+    #[must_use]
+    pub fn with_launcher(mut self, launcher: LauncherConfig) -> Daemon {
+        self.shared.launcher = launcher;
+        self
+    }
+
+    /// Replaces how recently a role must have been heard from to count as online (default 90 s).
+    /// Tests shorten it; production keeps the default. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_online_window(mut self, window: chrono::Duration) -> Daemon {
+        self.shared.online_window = window;
         self
     }
 
@@ -435,6 +464,9 @@ impl Daemon {
             .route("/v1/heartbeat", post(heartbeat))
             .route("/v1/list", get(list))
             .route("/v1/stats", get(stats))
+            .route("/v1/waiting", get(waiting))
+            .route("/v1/launch-result", post(launch_result))
+            .route("/v1/launch-clear", post(launch_clear))
             // Inside `host_guard`, so a 421 is neither counted nor delayed.
             .layer(middleware::from_fn(move |req: Request, next: Next| {
                 delay_failures(pause.clone(), req, next)
@@ -1117,7 +1149,15 @@ async fn list(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<R
         (mailbox.roles_snapshot(), mailbox.depths(now).ok())
     };
     let presence = locked(&shared.presence)?;
-    let out = list_entries(&roles, &presence, depths.as_ref(), now);
+    let launches = locked(&shared.launches)?;
+    let out = list_entries(
+        &roles,
+        &presence,
+        depths.as_ref(),
+        &launches,
+        shared.online_window,
+        now,
+    );
     Ok(axum::Json(json!({ "roles": out })).into_response())
 }
 
@@ -1172,6 +1212,176 @@ async fn stats(
     .into_response())
 }
 
+/// The caller must be one of the configured launcher roles; with none configured, nobody is.
+fn require_launcher(shared: &Shared, session: &Session) -> Result<(), ApiError> {
+    let allowed = shared
+        .launcher
+        .roles
+        .iter()
+        .any(|role| format!("{role}@{}", shared.account) == session.global_id);
+    if allowed {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this role may not use the launch routes",
+        ))
+    }
+}
+
+/// Roles with mail waiting and no live session, as of `now`: queued mail, offline, the oldest
+/// pending message older than the grace, and the daemon up for at least the online window (before
+/// that, every presence is empty and every role would look offline).
+fn launch_candidates(
+    shared: &Shared,
+    now: DateTime<Utc>,
+) -> Result<Vec<launch::Candidate>, ApiError> {
+    if now - shared.started_at < shared.online_window {
+        return Ok(Vec::new());
+    }
+    let (roles, depths) = {
+        let mailbox = locked(&shared.mailbox)?;
+        (mailbox.roles_snapshot(), mailbox.depths(now)?)
+    };
+    let presence = locked(&shared.presence)?;
+    let mut out = Vec::new();
+    for global_id in roles.roles.keys() {
+        let Some(depth) = depths.get(global_id) else {
+            continue;
+        };
+        let Some(oldest) = depth.oldest_enqueued_at else {
+            continue;
+        };
+        let online = presence
+            .get(global_id)
+            .is_some_and(|p| now - p.last_seen <= shared.online_window);
+        if depth.queued == 0 || online || now - oldest < shared.launcher.grace {
+            continue;
+        }
+        out.push(launch::Candidate {
+            global_id: global_id.clone(),
+            queued: depth.queued,
+            oldest_enqueued_at: oldest,
+        });
+    }
+    Ok(out)
+}
+
+/// The longest `?wait=` a poll may hold the request.
+const MAX_WAIT_SECS: u64 = 30;
+
+/// `GET /v1/waiting[?wait=<secs>]`: the launcher's view of roles with mail and no live session.
+/// Level-triggered: it is recomputed on every read. Changes no mail. Only configured launcher roles.
+async fn waiting(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    require_launcher(&shared, &session)?;
+    let wait = match uri.query() {
+        None | Some("") => 0,
+        Some(q) => q
+            .strip_prefix("wait=")
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or_else(|| malformed("query"))?
+            .min(MAX_WAIT_SECS),
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    loop {
+        let now = Utc::now();
+        let candidates = launch_candidates(&shared, now)?;
+        let signals = locked(&shared.launches)?.evaluate(&shared.launcher, &candidates, now);
+        if !signals.is_empty() || tokio::time::Instant::now() >= deadline {
+            return Ok(axum::Json(json!({ "roles": signals })).into_response());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchResultBody {
+    signal_id: String,
+    epoch: String,
+    attempt: u32,
+    role: String,
+    outcome: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// A short code, never free text: letters, digits and `-_.:`.
+fn reason_ok(reason: &str) -> bool {
+    !reason.is_empty()
+        && reason.len() <= 64
+        && reason
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
+/// `POST /v1/launch-result`: the launcher's answer to one signal. An answer for a signal that is
+/// not open (another id, epoch or attempt, or already answered) is 409 `stale_signal`.
+async fn launch_result(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    require_launcher(&shared, &session)?;
+    let body: LaunchResultBody = parse(&headers, &body)?;
+    if !synapse::keystore::valid_name(&body.role) {
+        return Err(malformed("role"));
+    }
+    let outcome = launch::Outcome::parse(&body.outcome).ok_or_else(|| malformed("outcome"))?;
+    if body.reason.as_deref().is_some_and(|r| !reason_ok(r)) {
+        return Err(malformed("reason"));
+    }
+    let global_id = format!("{}@{}", body.role, shared.account);
+    let answer = launch::Answer {
+        signal_id: body.signal_id,
+        epoch: body.epoch,
+        attempt: body.attempt,
+        outcome,
+        reason: body.reason,
+    };
+    locked(&shared.launches)?
+        .result(&shared.launcher, &global_id, answer, Utc::now())
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "stale_signal",
+                "no open signal matches that id, epoch and attempt",
+            )
+        })?;
+    Ok(axum::Json(json!({})).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchClearBody {
+    role: String,
+}
+
+/// `POST /v1/launch-clear {role}`: forget a role's launch state (a `refused` or `unreachable`
+/// verdict included) and start a new epoch.
+async fn launch_clear(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    require_launcher(&shared, &session)?;
+    let body: LaunchClearBody = parse(&headers, &body)?;
+    if !synapse::keystore::valid_name(&body.role) {
+        return Err(malformed("role"));
+    }
+    let global_id = format!("{}@{}", body.role, shared.account);
+    let epoch = locked(&shared.launches)?.clear(&global_id);
+    Ok(axum::Json(json!({ "epoch": epoch })).into_response())
+}
+
 /// `list`'s entries. When the depths could not be read (a poisoned mailbox or a failed store),
 /// every `pending` is `null` and the rest is still served: presence lives in memory and is still
 /// right, and a watcher that also reads `online` here must not lose it to one unreadable field
@@ -1180,6 +1390,8 @@ fn list_entries(
     roles: &RolesState,
     presence: &HashMap<String, Presence>,
     depths: Option<&BTreeMap<String, Depth>>,
+    launches: &launch::Table,
+    online_window: chrono::Duration,
     now: DateTime<Utc>,
 ) -> Vec<Value> {
     roles
@@ -1199,10 +1411,11 @@ fn list_entries(
             json!({
                 "global_id": global_id,
                 "epoch": record.epoch,
-                "online": seen.is_some_and(|p| now - p.last_seen <= ONLINE_WINDOW),
+                "online": seen.is_some_and(|p| now - p.last_seen <= online_window),
                 "last_seen": seen.map(|p| p.last_seen.to_rfc3339()),
                 "summary": seen.and_then(|p| p.summary.clone()),
                 "pending": pending,
+                "launch": launches.view(global_id),
             })
         })
         .collect()
@@ -1247,7 +1460,14 @@ mod tests {
             },
         );
 
-        let with = list_entries(&roles, &presence, Some(&depths), now);
+        let with = list_entries(
+            &roles,
+            &presence,
+            Some(&depths),
+            &launch::Table::new(now),
+            ONLINE_WINDOW,
+            now,
+        );
         assert_eq!(with[0]["pending"]["queued"], 2);
         assert_eq!(with[0]["pending"]["leased"], 1);
         assert_eq!(with[0]["pending"]["dead"], 3);
@@ -1258,7 +1478,14 @@ mod tests {
             "a role with no mail"
         );
 
-        let without = list_entries(&roles, &presence, None, now);
+        let without = list_entries(
+            &roles,
+            &presence,
+            None,
+            &launch::Table::new(now),
+            ONLINE_WINDOW,
+            now,
+        );
         for entry in &without {
             assert!(entry["pending"].is_null(), "{entry}");
             assert_eq!(entry["epoch"], 4);
