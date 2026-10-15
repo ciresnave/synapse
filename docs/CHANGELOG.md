@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.78): launch signals for lane launch on message (`GET /v1/waiting`)
+
+`synapsed` can now tell a launcher which roles have mail and no live session. `GET /v1/waiting[?wait=<=30]` is level-triggered; `POST /v1/launch-result` answers a signal (409 `stale_signal` for a stale id, epoch or attempt); `POST /v1/launch-clear` forgets a role's launch state. `/v1/list` gains a `launch` field. Off unless `SYNAPSE_LAUNCHER_ROLES` names the allowed role(s) (403 otherwise). Defaults: grace 5 s, wait 120 s, backoff 30 s / 2 min / 10 min, one signal plus three retries then `unreachable`. No signals until the daemon has been up for the online window. Spec: `docs/superpowers/specs/2026-10-15-cutover-and-lane-launch.md`.
+
 ### Packaging (rc.77): every published crate ships a README and both licence texts
 
 The six sub-crates (`synapse-security`, `synapsed-client`, `synapse-mcp-server`, `synapse-claude-channel`, `synapsed`, `synapsectl`) packaged with no README and no `LICENSE-MIT`/`LICENSE-APACHE`. Each now has a `README.md` (the `readme` key) and byte-identical copies of the root licence files. The workspace has no NOTICE file, so none is shipped

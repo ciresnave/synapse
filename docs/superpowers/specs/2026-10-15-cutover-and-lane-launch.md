@@ -105,6 +105,9 @@ A role is **launchable** when all hold at one daemon read:
   and does not depend on that.) OverMind additionally allowlists roles and rate-caps launches per role,
   answering `refused` with `reason=policy`; `refused` stays terminal.
 
+- the daemon has been up at least the online window. Presence is in memory, so right after a daemon
+  restart every role looks offline; without this a restart would signal every role that has mail.
+
 Dead-set mail (`pending.dead`) never triggers a launch.
 
 ### C2. The signal (level-triggered, so no event is lost)
@@ -112,7 +115,7 @@ Dead-set mail (`pending.dead`) never triggers a launch.
 `GET /v1/waiting` returns the launchable roles:
 
 ```json
-{ "roles": [ { "role": "synapse", "signal_id": "synapse:<oldest queued global id>",
+{ "roles": [ { "role": "synapse", "signal_id": "synapse:<oldest pending enqueue time>",
                "count": 3, "oldest_enqueued_at": "...", "attempt": 1,
                "epoch": "<daemon start>.<n>" } ] }
 ```
@@ -123,9 +126,11 @@ Dead-set mail (`pending.dead`) never triggers a launch.
 - **Latency.** `?wait=<seconds>` (max 30) holds the request until a role becomes launchable, so OverMind
   long-polls and acts within about a second of the grace window. Plain polling also works.
 - **Contents.** Role, signal id, count and timestamps only. **No mail body, no sender, no token, no model,
-  no key material** (OverMind constraints 1 and 3). The signal id is `<role>:<global id of the oldest queued
-  message>`, stable while that message stays queued, so a repeat is recognisably the same signal
-  (constraint 2). When the oldest message is acked the id moves on, which is correct: a new launch need.
+  no key material** (OverMind constraints 1 and 3). The signal id is `<role>:<enqueue time of the oldest
+  pending message, RFC 3339 to microseconds>` (as built in rc.78; the mailbox exposes the time, not the
+  id, and the time is already in `/v1/list`). It is stable while that message stays pending, so a repeat
+  is recognisably the same signal (constraint 2). When the oldest message is acked the id moves on, which
+  is correct: a new launch need.
 - **Not a mail endpoint.** It never returns, leases or acks a message. Reading it changes nothing.
 
 ### C2a. Who runs the poller, and bootstrap
@@ -150,8 +155,8 @@ re-implement signing.
 
 `/v1/waiting` and `/v1/launch-result` need a bearer session like every route, **and** the session's role must
 be in the daemon's `launcher_roles` (config, default empty, so the feature is off until set; recommended
-value: `overmind`). A role in that list can learn *that* mail waits and *how much*, never what. Any other
-role gets 403. The session comes from the same claim flow as any role, so the trust root is OverMind's role
+value: `agentlife-launcher`, the launch service's own role, distinct from `overmind` so it never takes OverMind's session). A role in that list can learn *that* mail waits and *how much*, never what. Any other
+role gets 403. The session comes from the same claim flow as any role, so the trust root is the launcher role's
 key, not a shared secret.
 
 ### C4. The launch result (named errors, never a silent drop: constraint 5)
@@ -172,8 +177,9 @@ Synapse records it per role as `launch: {state, reason, since, attempts}` and sh
 | `started` | Mark `launching`; stop re-signalling that id for `launch_wait` (default 120 s). If the role has not claimed by then, the signal reappears with `attempt+1` |
 | `already-running` | Mark `launching`; same wait. (AgentLife's lane-start reports the role as running and OverMind relays it; Synapse has not heard a heartbeat: a heartbeat gap, not a launch need) |
 | `refused` | Terminal for that signal id: `launch.state = refused`, reason shown. No retry until the oldest message changes or it is cleared (C4a). Policy said no; asking again is noise |
-| `failed` | Retry with backoff: re-signal after 30 s, 2 min, 10 min; **3 attempts**, then `launch.state = unreachable`, reason shown, and a security-event/alert row is written (board 131's alert path is still a seam: until it is wired the row is the log line and the `/v1/list` field) |
-| no answer at all | Treated as `failed(reason=no-answer)` after `launch_wait`, same backoff |
+| `failed` | Retry with backoff: re-signal after 30 s, 2 min, 10 min: **one signal and three retries, four attempts in all** (the
+retry count is the length of the configured backoff list), then `launch.state = unreachable`, reason shown, and a security-event/alert row is written (board 131's alert path is still a seam: until it is wired the row is the log line and the `/v1/list` field) |
+| no answer at all | Treated as `failed(reason=no-answer)` after `launch_wait`, same backoff. A `launching` role that has not claimed after `launch_wait` is `failed(reason=no-claim)` and is re-signalled at once (the launch was believed, so no backoff), still counting the attempt |
 
 The bounds are config, not code constants. Mail is **never** dropped or expired by any of this.
 
@@ -257,7 +263,7 @@ OverMind's PRs (handler record, lane-restart on the daemon API, a `/v1/waiting` 
 - **CireSnave:** approve the `server:synapse` dev-channels record (step 1), and the cutover date after the
   3-day soak.
 - **PM:** who starts `synapsed` at login (G7); whether broadcast (G8) is needed.
-- **OverMind (answered 2026-10-15):** `launcher_roles=overmind` yes, conditional on C2a; `launch_grace` 5 s
+- **OverMind (answered 2026-10-15):** `launcher_roles`: OverMind agreed in principle, conditional on C2a; the launcher role is **`agentlife-launcher`** (AgentLife's service, PM 2026-10-15; a distinct role, since one session per (home,role) would knock OverMind off). The default stays empty; `launch_grace` 5 s
   yes; `launch_wait` 120 s accepted as a default but **unmeasured**: AgentLife should report a measured
   lane-start-to-claim time before it is relied on.
 - **OverMind/AgentLife:** who builds the poller service (C2a).
