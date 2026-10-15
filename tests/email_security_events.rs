@@ -7,7 +7,7 @@
 //! with a positive control (a legitimate caller is unaffected). Alert delivery awaits board 131.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::Duration;
 use synapse::email_server::security::{InboundLimits, LoginLimits};
@@ -25,9 +25,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
-const ALICE_PASSWORD: &str = "ALICE-PASSWORD-MUST-NOT-APPEAR";
-const BOB_PASSWORD: &str = "BOB-PASSWORD-MUST-NOT-APPEAR";
-const WRONG_PASSWORD: &str = "WRONG-PASSWORD-MUST-NOT-APPEAR";
+static ALICE_PASSWORD: LazyLock<String> =
+    LazyLock::new(|| format!("alice-pw-{}", uuid::Uuid::new_v4()));
+static BOB_PASSWORD: LazyLock<String> =
+    LazyLock::new(|| format!("bob-pw-{}", uuid::Uuid::new_v4()));
+static WRONG_PASSWORD: LazyLock<String> =
+    LazyLock::new(|| format!("wrong-pw-{}", uuid::Uuid::new_v4()));
 
 #[derive(Default)]
 struct Capture(Mutex<Vec<SecurityEvent>>);
@@ -77,11 +80,19 @@ fn assert_no_secret(capture: &Capture, known_field: &str) {
     );
     for e in &all {
         let f = fields(e);
-        for secret in [ALICE_PASSWORD, BOB_PASSWORD, WRONG_PASSWORD] {
+        for secret in [
+            ALICE_PASSWORD.as_str(),
+            BOB_PASSWORD.as_str(),
+            WRONG_PASSWORD.as_str(),
+        ] {
             assert!(!f.contains(secret), "a password leaked into {e:?}");
         }
         for user in ["alice", "bob"] {
-            for password in [ALICE_PASSWORD, BOB_PASSWORD, WRONG_PASSWORD] {
+            for password in [
+                ALICE_PASSWORD.as_str(),
+                BOB_PASSWORD.as_str(),
+                WRONG_PASSWORD.as_str(),
+            ] {
                 let blob = plain_blob(user, password);
                 assert!(!f.contains(&blob), "an AUTH PLAIN blob leaked into {e:?}");
             }
@@ -98,10 +109,15 @@ fn auth_handler() -> Arc<dyn AuthHandler + Send + Sync> {
         is_admin: false,
     };
     handler
-        .add_user_with_password("alice", ALICE_PASSWORD, "alice@synapse.local", perms())
+        .add_user_with_password(
+            "alice",
+            ALICE_PASSWORD.as_str(),
+            "alice@synapse.local",
+            perms(),
+        )
         .unwrap();
     handler
-        .add_user_with_password("bob", BOB_PASSWORD, "bob@synapse.local", perms())
+        .add_user_with_password("bob", BOB_PASSWORD.as_str(), "bob@synapse.local", perms())
         .unwrap();
     Arc::new(handler)
 }
@@ -269,7 +285,7 @@ async fn imap_bad_login_is_an_event() {
     let port = imap_server(login_limits(10, 100), Some(capture.clone())).await;
 
     // Positive control: the right password logs in and writes nothing.
-    let ok = imap_login(port, "alice", ALICE_PASSWORD).await;
+    let ok = imap_login(port, "alice", ALICE_PASSWORD.as_str()).await;
     assert!(ok.starts_with("a1 OK"), "got {ok:?}");
     assert!(
         capture.all().is_empty(),
@@ -278,7 +294,7 @@ async fn imap_bad_login_is_an_event() {
     );
 
     // Negative control: a wrong password is refused and recorded.
-    let no = imap_login(port, "alice", WRONG_PASSWORD).await;
+    let no = imap_login(port, "alice", WRONG_PASSWORD.as_str()).await;
     assert!(no.starts_with("a1 NO"), "got {no:?}");
     let failures = capture.of("email/imap-login", SecurityEventKind::AuthFailure);
     assert_eq!(failures.len(), 1, "{:?}", capture.all());
@@ -297,7 +313,7 @@ async fn imap_lockout_refuses_the_right_password() {
     let port = imap_server(login_limits(3, 100), Some(capture.clone())).await;
 
     for _ in 0..3 {
-        let no = imap_login(port, "alice", WRONG_PASSWORD).await;
+        let no = imap_login(port, "alice", WRONG_PASSWORD.as_str()).await;
         assert!(no.starts_with("a1 NO"), "got {no:?}");
     }
     let lockouts = capture.of("email/imap-login", SecurityEventKind::Lockout);
@@ -306,14 +322,14 @@ async fn imap_lockout_refuses_the_right_password() {
     assert!(lockouts[0].detail.contains("per_user"), "{:?}", lockouts[0]);
 
     // Negative control: locked, so even the right password is refused, exactly like a wrong one.
-    let locked = imap_login(port, "alice", ALICE_PASSWORD).await;
+    let locked = imap_login(port, "alice", ALICE_PASSWORD.as_str()).await;
     assert_eq!(locked.trim_end(), "a1 NO LOGIN failed");
     let last = capture.all().pop().unwrap();
     assert_eq!(last.kind, SecurityEventKind::AuthFailure);
     assert!(last.detail.contains("locked"), "{last:?}");
 
     // Positive control: another user, from the same source, still logs in.
-    let ok = imap_login(port, "bob", BOB_PASSWORD).await;
+    let ok = imap_login(port, "bob", BOB_PASSWORD.as_str()).await;
     assert!(ok.starts_with("a1 OK"), "got {ok:?}");
 }
 
@@ -329,7 +345,7 @@ async fn smtp_auth_lockout() {
     .await;
 
     for _ in 0..3 {
-        let no = smtp_auth(port, "alice", WRONG_PASSWORD).await;
+        let no = smtp_auth(port, "alice", WRONG_PASSWORD.as_str()).await;
         assert!(no.starts_with("535"), "got {no:?}");
     }
     assert_eq!(
@@ -350,11 +366,11 @@ async fn smtp_auth_lockout() {
     );
 
     // Negative control: locked, so the right password reads exactly like a wrong one.
-    let locked = smtp_auth(port, "alice", ALICE_PASSWORD).await;
+    let locked = smtp_auth(port, "alice", ALICE_PASSWORD.as_str()).await;
     assert!(locked.starts_with("535"), "got {locked:?}");
 
     // Positive control: another user still authenticates.
-    let ok = smtp_auth(port, "bob", BOB_PASSWORD).await;
+    let ok = smtp_auth(port, "bob", BOB_PASSWORD.as_str()).await;
     assert!(ok.starts_with("235"), "got {ok:?}");
 }
 
@@ -364,7 +380,7 @@ async fn per_source_backstop() {
     let port = imap_server(login_limits(100, 4), Some(capture.clone())).await;
 
     for i in 0..4 {
-        let no = imap_login(port, &format!("sprayed-{i}"), WRONG_PASSWORD).await;
+        let no = imap_login(port, &format!("sprayed-{i}"), WRONG_PASSWORD.as_str()).await;
         assert!(no.starts_with("a1 NO"), "got {no:?}");
     }
     let lockouts = capture.of("email/imap-login", SecurityEventKind::Lockout);
@@ -376,7 +392,7 @@ async fn per_source_backstop() {
     );
 
     // The backstop refuses that source, a real user included: that is what it is for.
-    let refused = imap_login(port, "bob", BOB_PASSWORD).await;
+    let refused = imap_login(port, "bob", BOB_PASSWORD.as_str()).await;
     assert!(refused.starts_with("a1 NO"), "got {refused:?}");
 }
 
@@ -548,11 +564,11 @@ async fn no_secret_in_any_event() {
     )
     .await;
     for _ in 0..3 {
-        imap_login(imap, "alice", WRONG_PASSWORD).await;
-        smtp_auth(smtp, "alice", WRONG_PASSWORD).await;
+        imap_login(imap, "alice", WRONG_PASSWORD.as_str()).await;
+        smtp_auth(smtp, "alice", WRONG_PASSWORD.as_str()).await;
     }
-    imap_login(imap, "alice", ALICE_PASSWORD).await;
-    smtp_auth(smtp, "alice", ALICE_PASSWORD).await;
+    imap_login(imap, "alice", ALICE_PASSWORD.as_str()).await;
+    smtp_auth(smtp, "alice", ALICE_PASSWORD.as_str()).await;
     assert_no_secret(&capture, "alice");
 }
 
@@ -560,13 +576,13 @@ async fn no_secret_in_any_event() {
 async fn no_sink_still_limits() {
     let port = imap_server(login_limits(3, 100), None).await;
     for _ in 0..3 {
-        imap_login(port, "alice", WRONG_PASSWORD).await;
+        imap_login(port, "alice", WRONG_PASSWORD.as_str()).await;
     }
     // Negative control: locked with no sink attached: the countermeasure does not depend on one.
-    let locked = imap_login(port, "alice", ALICE_PASSWORD).await;
+    let locked = imap_login(port, "alice", ALICE_PASSWORD.as_str()).await;
     assert!(locked.starts_with("a1 NO"), "got {locked:?}");
     // Positive control.
-    let ok = imap_login(port, "bob", BOB_PASSWORD).await;
+    let ok = imap_login(port, "bob", BOB_PASSWORD.as_str()).await;
     assert!(ok.starts_with("a1 OK"), "got {ok:?}");
 }
 
@@ -581,7 +597,7 @@ async fn usernames_are_bounded_before_keying() {
         imap_login(
             port,
             &format!("{shared}{}", tail.repeat(1_000)),
-            WRONG_PASSWORD,
+            WRONG_PASSWORD.as_str(),
         )
         .await;
     }
