@@ -862,3 +862,53 @@ fn a_healthy_start_reports_no_daemon_stderr() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("listening on"), "{err}");
 }
+
+/// The launch-signal client methods against a real daemon: a configured launcher role polls and
+/// answers; any other role is refused. (`SYNAPSE_LAUNCHER_ROLES` reaches the daemon the CLI starts.)
+#[test]
+fn the_client_launch_methods_work_for_the_launcher_role_only() {
+    let home = Home::new();
+    let first = home
+        .command(&["claim", "--role", "agentlife-launcher"])
+        .env("SYNAPSE_LAUNCHER_ROLES", "agentlife-launcher")
+        .output()
+        .expect("the synapse binary runs");
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    home.ok(&["claim", "--role", "beta"]);
+
+    let daemon = synapsed_client::Daemon::connect(home.path()).expect("the daemon is up");
+    let waiting = daemon.waiting("agentlife-launcher", 0).expect("polls");
+    assert_eq!(waiting["roles"], serde_json::json!([]));
+    // A wait above the client's cap is clamped, not a transport error.
+    daemon
+        .waiting("agentlife-launcher", 600)
+        .expect("long poll");
+
+    let epoch = daemon
+        .launch_clear("agentlife-launcher", "beta")
+        .expect("clears")["epoch"]
+        .as_str()
+        .expect("an epoch")
+        .to_string();
+    assert!(!epoch.is_empty());
+    let stale = daemon
+        .launch_result(
+            "agentlife-launcher",
+            "beta:none",
+            &epoch,
+            1,
+            "beta",
+            "failed",
+            None,
+        )
+        .expect_err("no open signal");
+    assert!(
+        matches!(&stale, synapsed_client::MailError::Api { kind, .. } if kind == "stale_signal"),
+        "{stale:?}"
+    );
+    let refused = daemon.waiting("beta", 0).expect_err("not a launcher");
+    assert!(
+        matches!(&refused, synapsed_client::MailError::Api { kind, .. } if kind == "forbidden"),
+        "{refused:?}"
+    );
+}

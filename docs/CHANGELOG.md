@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.80): `synapsed-client` launch methods
+
+`Daemon::waiting(role, wait_secs)`, `Daemon::launch_result(...)` and `Daemon::launch_clear(role, target)` wrap `GET /v1/waiting`, `POST /v1/launch-result` and `POST /v1/launch-clear` for a launcher service. A `waiting` poll is capped at 25 s so it stays under the client's call timeout.
+
 ### Added (rc.79): presence `cwd`/`repo`, list filters, sender summary and cwd on fetched mail
 
 A heartbeat may carry `cwd` and `repo` (self-reported, untrusted, at most 500 bytes, no control characters, else 400 `malformed`). `GET /v1/list` shows them and filters on `?cwd=` and `?repo=` (exact match). `/v1/fetch` messages carry `from_summary` and `from_cwd`, the sender's current presence (null when it has no live session), and the Claude Code channel passes them as escaped `meta.sender_summary` and `meta.sender_cwd`. `synapse-mcp-server` heartbeats its working directory and the repository around it. Closes cutover gaps G1 and G2.

@@ -50,6 +50,9 @@ const START_LOG: &str = "synapsed-start.err";
 const START_LOG_READ: u64 = 4096;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest `waiting` poll this client asks for: under `CALL_TIMEOUT`, and under the daemon's
+/// own 30 s cap.
+const MAX_WAITING_POLL_SECS: u64 = 25;
 /// How long a command waits for another command's claim of the same role.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -277,6 +280,57 @@ impl Daemon {
     pub fn call(&self, role: &str, path: &str, body: Option<&Value>) -> Result<Value, MailError> {
         let session = self.session(role)?;
         self.request(path, Some(&session.token), body)
+    }
+
+    /// `GET /v1/waiting`: the launch signals for roles with mail and no live session, as the
+    /// daemon's reply (`{"roles": [...]}`). Only a configured launcher role may call it (403
+    /// `forbidden` otherwise). `wait_secs` holds the request that long for a signal; it is capped
+    /// below the call timeout, so a poll never fails as a transport error.
+    pub fn waiting(&self, role: &str, wait_secs: u64) -> Result<Value, MailError> {
+        let wait = wait_secs.min(MAX_WAITING_POLL_SECS);
+        let path = if wait == 0 {
+            "/v1/waiting".to_string()
+        } else {
+            format!("/v1/waiting?wait={wait}")
+        };
+        self.call(role, &path, None)
+    }
+
+    /// `POST /v1/launch-result`: answer one signal. `outcome` is `launching`, `failed`, `refused`
+    /// or `unreachable`; `reason` a short code. A signal that is no longer open is the API error
+    /// `stale_signal`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_result(
+        &self,
+        role: &str,
+        signal_id: &str,
+        epoch: &str,
+        attempt: u32,
+        target_role: &str,
+        outcome: &str,
+        reason: Option<&str>,
+    ) -> Result<Value, MailError> {
+        let mut body = serde_json::json!({
+            "signal_id": signal_id,
+            "epoch": epoch,
+            "attempt": attempt,
+            "role": target_role,
+            "outcome": outcome,
+        });
+        if let Some(reason) = reason {
+            body["reason"] = Value::String(reason.to_string());
+        }
+        self.call(role, "/v1/launch-result", Some(&body))
+    }
+
+    /// `POST /v1/launch-clear`: forget `target_role`'s launch state (a `refused` or `unreachable`
+    /// verdict included) and start a new epoch. Returns `{"epoch": ...}`.
+    pub fn launch_clear(&self, role: &str, target_role: &str) -> Result<Value, MailError> {
+        self.call(
+            role,
+            "/v1/launch-clear",
+            Some(&serde_json::json!({ "role": target_role })),
+        )
     }
 
     /// The cached session for this daemon instance, else a claim. Under the role lock, so two

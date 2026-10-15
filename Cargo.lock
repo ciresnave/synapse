@@ -5181,7 +5181,7 @@ dependencies = [
 
 [[package]]
 name = "synapse"
-version = "6.0.0-rc.79"
+version = "6.0.0-rc.80"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -5267,7 +5267,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-claude-channel"
-version = "6.0.0-rc.79"
+version = "6.0.0-rc.80"
 dependencies = [
  "base64 0.23.1",
  "rmcp",
@@ -5282,7 +5282,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-mcp-server"
-version = "6.0.0-rc.79"
+version = "6.0.0-rc.80"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -5302,7 +5302,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-security"
-version = "6.0.0-rc.79"
+version = "6.0.0-rc.80"
 dependencies = [
  "chrono",
  "serde_json",
@@ -5312,7 +5312,7 @@ dependencies = [
 
 [[package]]
 name = "synapsectl"
-version = "6.0.0-rc.79"
+version = "6.0.0-rc.80"
 dependencies = [
  "chrono",
  "clap",
@@ -5326,7 +5326,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed"
-version = "6.0.0-rc.79"
+version = "6.0.0-rc.80"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5344,7 +5344,7 @@ dependencies = [
 
 [[package]]
 name = "synapsed-client"
-version = "6.0.0-rc.79"
+version = "6.0.0-rc.80"
 dependencies = [
  "base64 0.23.1",
  "chrono",
