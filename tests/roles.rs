@@ -57,8 +57,13 @@ fn table() -> Roles {
     Roles::new(t0() - Duration::seconds(1))
 }
 
+/// A per-process random base with `n` mixed into the last byte: the same `n` always gives the
+/// same nonce within a run, distinct `n` give distinct ones, and no key material is a literal.
 fn nonce(n: u8) -> [u8; 16] {
-    [n; 16]
+    static BASE: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    let mut out = *BASE.get_or_init(|| *uuid::Uuid::new_v4().as_bytes());
+    out[15] ^= n;
+    out
 }
 
 #[test]

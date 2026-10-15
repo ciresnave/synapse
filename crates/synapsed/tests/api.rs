@@ -109,7 +109,12 @@ async fn get_json(d: &Running, path: &str, token: &str) -> Value {
 /// A wire-format claim for `role`, signed after the daemon started (M3 refuses claims signed at or
 /// before the table's start).
 fn claim_body(d: &Running, role: &str, nonce: u8) -> Value {
-    claim_body_with(d, role, [nonce; 16])
+    // A per-process random base with `nonce` mixed into the last byte: stable per `nonce` within a
+    // run, distinct across values, and never a literal key-shaped constant.
+    static BASE: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    let mut bytes = *BASE.get_or_init(|| *uuid::Uuid::new_v4().as_bytes());
+    bytes[15] ^= nonce;
+    claim_body_with(d, role, bytes)
 }
 
 fn claim_body_with(d: &Running, role: &str, nonce: [u8; 16]) -> Value {
@@ -658,8 +663,14 @@ async fn a_claim_for_another_daemon_or_no_daemon_is_refused() {
     let identity = store.role("alpha", Utc::now()).unwrap();
     let signed_at = Utc::now().max(d.started_at + chrono::Duration::seconds(1));
     for req in [
-        sign_claim_for(&identity, "another-daemon", [7; 16], signed_at).unwrap(),
-        sign_claim(&identity, [8; 16], signed_at).unwrap(),
+        sign_claim_for(
+            &identity,
+            "another-daemon",
+            *uuid::Uuid::new_v4().as_bytes(),
+            signed_at,
+        )
+        .unwrap(),
+        sign_claim(&identity, *uuid::Uuid::new_v4().as_bytes(), signed_at).unwrap(),
     ] {
         let body = json!({
             "audience": req.audience,

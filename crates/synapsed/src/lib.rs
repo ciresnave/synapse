@@ -667,12 +667,11 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
     if s.len() != N * 2 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let mut out = [0u8; N];
-    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
-        let pair = std::str::from_utf8(chunk).ok()?;
-        out[i] = u8::from_str_radix(pair, 16).ok()?;
+    let mut out = Vec::with_capacity(N);
+    for chunk in s.as_bytes().chunks(2) {
+        out.push(u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?);
     }
-    Some(out)
+    out.try_into().ok()
 }
 
 /// The caller's session: Bearer token, looked up by its hash, then checked against the role's
