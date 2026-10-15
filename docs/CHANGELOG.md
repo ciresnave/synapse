@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.86): daemon start contract, delivery statement, 24 h pilot checklist
+
+`docs/superpowers/specs/2026-10-15-daemon-contract-and-pilot.md`: the `synapsed` start contract for AgentLife (G7), the accepted delivery statement (bounded push attempts, mailbox as source of truth), and the pilot checklist and measures. Docs only.
+
 ### Changed (rc.81): CodeQL hygiene, tests
 
 Integration tests no longer carry literal passwords: `email_security_events`, `email_server_has_no_default_users` and `basic_integration_test` use per-run random values (`rust/hard-coded-cryptographic-value`). The three historical built-in credentials the no-default-users test asserts are rejected stay literal, since they are the subject of that test.
