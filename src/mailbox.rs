@@ -37,6 +37,11 @@ pub struct MailConfig {
     pub max_messages: usize,
     /// Per role, counting queued envelope body bytes.
     pub max_bytes: u64,
+    /// How many times one message may be leased before it moves to the role's **dead set**
+    /// (`0`: no cap). A message that is leased and never acked (a poison message, a receiver that
+    /// fails every time) is otherwise redelivered for as long as it is queued. The dead set is
+    /// bounded and visible, never silently dropped: see [`Mailbox::dead_letters`].
+    pub max_deliveries: u32,
 }
 
 impl Default for MailConfig {
@@ -48,6 +53,7 @@ impl Default for MailConfig {
             retention: Duration::days(7),
             max_messages: 10_000,
             max_bytes: 64 * 1024 * 1024,
+            max_deliveries: 10,
         }
     }
 }
@@ -87,6 +93,13 @@ fn well_formed(env: &Envelope) -> bool {
         crate::keystore::valid_name(role) && crate::keystore::valid_name(account)
     });
     role_id && printable(&env.message_id) && printable(&env.from)
+}
+
+/// The pseudo-role under which a role's dead set is stored: the ordinary queue tables, so no store
+/// and no on-disk format changes. A real role name never contains `:` (see
+/// `keystore::valid_name`), so no sender can address it and it cannot collide with one.
+fn dead_role(role: &str) -> String {
+    format!("dead:{role}")
 }
 
 /// Who holds a message, and until when.
@@ -140,6 +153,9 @@ pub enum Acked {
 pub struct Depth {
     pub queued: usize,
     pub leased: usize,
+    /// Messages that reached `max_deliveries` and were set aside (see [`Mailbox::dead_letters`]).
+    /// Not in `queued` or `leased`, and not in `oldest_enqueued_at`.
+    pub dead: usize,
     pub oldest_enqueued_at: Option<DateTime<Utc>>,
 }
 
@@ -436,6 +452,7 @@ impl<S: MailStore> Mailbox<S> {
                     );
                 })
                 .map_err(MailError::Store)?;
+                depth.dead = txn.stats(&dead_role(role)).map_err(MailError::Store)?.0;
                 out.insert(role.clone(), depth);
             }
             Ok(())
@@ -475,6 +492,10 @@ impl<S: MailStore> Mailbox<S> {
             let id = env.message_id.as_str();
             if txn.queued(role, id).map_err(MailError::Store)?.is_some()
                 || txn.acked_at(role, id).map_err(MailError::Store)?.is_some()
+                || txn
+                    .queued(&dead_role(role), id)
+                    .map_err(MailError::Store)?
+                    .is_some()
             {
                 outcome = Enqueued::Duplicate;
                 return Ok(());
@@ -562,6 +583,7 @@ impl<S: MailStore> Mailbox<S> {
         if lease < self.config.min_lease || lease > self.config.max_lease {
             return Err(MailError::LeaseOutOfRange);
         }
+        let config = self.config.clone();
         let until = now + lease;
         let mut out = Vec::new();
         if max == 0 {
@@ -579,7 +601,24 @@ impl<S: MailStore> Mailbox<S> {
                 picked.len() < max
             })
             .map_err(MailError::Store)?;
+            let dead_set = dead_role(role);
             for mut stored in picked {
+                // Leased `max_deliveries` times already and still here: set it aside, body and all,
+                // instead of leasing it again. If the dead set is itself full it stays queued: a
+                // message is never dropped to make room.
+                if config.max_deliveries > 0 && stored.attempts >= config.max_deliveries {
+                    let (count, bytes) = txn.stats(&dead_set).map_err(MailError::Store)?;
+                    if count < config.max_messages
+                        && bytes.saturating_add(stored.envelope.body.len() as u64)
+                            <= config.max_bytes
+                    {
+                        let id = stored.envelope.message_id.clone();
+                        txn.remove(role, &id).map_err(MailError::Store)?;
+                        stored.lease = None;
+                        txn.put(&dead_set, stored).map_err(MailError::Store)?;
+                        continue;
+                    }
+                }
                 let prior_lease_lapsed = stored.lease.is_some_and(|held| held.until <= now);
                 stored.lease = Some(Lease { epoch, until });
                 stored.attempts = stored.attempts.saturating_add(1);
@@ -620,6 +659,19 @@ impl<S: MailStore> Mailbox<S> {
                 outcome = Acked::AlreadyAcked;
                 return Ok(());
             }
+            // Acking a dead message is the receiver discarding it.
+            let dead = dead_role(role);
+            if txn
+                .queued(&dead, message_id)
+                .map_err(MailError::Store)?
+                .is_some()
+            {
+                txn.remove(&dead, message_id).map_err(MailError::Store)?;
+                txn.record_ack(role, message_id, now)
+                    .map_err(MailError::Store)?;
+                outcome = Acked::Removed;
+                return Ok(());
+            }
             let stored = txn
                 .queued(role, message_id)
                 .map_err(MailError::Store)?
@@ -644,12 +696,82 @@ impl<S: MailStore> Mailbox<S> {
     pub fn sweep(&mut self, now: DateTime<Utc>) -> Result<usize, MailError> {
         self.live()?;
         let before = now - self.config.retention;
+        let roles = self.roles.snapshot();
         let mut swept = 0;
         self.store.write(&mut |txn| {
             swept = txn.sweep_acked(before).map_err(MailError::Store)?;
+            // The dead set is kept for the same retention, counted from when the message was
+            // enqueued, then removed: bounded, and visible until then.
+            for role in roles.roles.keys() {
+                let dead = dead_role(role);
+                let mut expired = Vec::new();
+                txn.scan(&dead, &mut |stored| {
+                    if stored.enqueued_at < before {
+                        expired.push(stored.envelope.message_id.clone());
+                    }
+                    true
+                })
+                .map_err(MailError::Store)?;
+                for id in expired {
+                    txn.remove(&dead, &id).map_err(MailError::Store)?;
+                    swept += 1;
+                }
+            }
             Ok(())
         })?;
         Ok(swept)
+    }
+
+    /// The role's dead set, oldest first, bodies included: what was set aside after
+    /// `max_deliveries` leases and never acked. Changes nothing. Bounded by `max_messages` and
+    /// `max_bytes` like the queue, and kept for `retention`; never silently dropped.
+    pub fn dead_letters(&self, role: &str, epoch: u64) -> Result<Vec<Stored>, MailError> {
+        self.live()?;
+        self.roles
+            .check(role, epoch)
+            .map_err(MailError::Superseded)?;
+        let mut out = Vec::new();
+        self.store.write(&mut |txn| {
+            out.clear();
+            txn.scan(&dead_role(role), &mut |stored| {
+                out.push(stored.clone());
+                true
+            })
+            .map_err(MailError::Store)
+        })?;
+        Ok(out)
+    }
+
+    /// Put a dead message back in the role's queue with its delivery count reset. The queue bound
+    /// applies: a full queue refuses with [`MailError::MailboxFull`] and the message stays dead.
+    pub fn requeue_dead(
+        &mut self,
+        role: &str,
+        epoch: u64,
+        message_id: &str,
+    ) -> Result<(), MailError> {
+        self.live()?;
+        self.roles
+            .check(role, epoch)
+            .map_err(MailError::Superseded)?;
+        let config = self.config.clone();
+        self.store.write(&mut |txn| {
+            let dead = dead_role(role);
+            let mut stored = txn
+                .queued(&dead, message_id)
+                .map_err(MailError::Store)?
+                .ok_or(MailError::NotFound)?;
+            let (count, bytes) = txn.stats(role).map_err(MailError::Store)?;
+            if count + 1 > config.max_messages
+                || bytes.saturating_add(stored.envelope.body.len() as u64) > config.max_bytes
+            {
+                return Err(MailError::MailboxFull);
+            }
+            txn.remove(&dead, message_id).map_err(MailError::Store)?;
+            stored.attempts = 0;
+            stored.lease = None;
+            txn.put(role, stored).map_err(MailError::Store)
+        })
     }
 }
 

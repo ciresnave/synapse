@@ -432,6 +432,7 @@ fn depth(queued: usize, leased: usize, oldest: Option<DateTime<Utc>>) -> Depth {
     Depth {
         queued,
         leased,
+        dead: 0,
         oldest_enqueued_at: oldest,
     }
 }
@@ -588,6 +589,104 @@ pub fn a_failed_write_changes_nothing<S: MailStore>(make: impl Fn() -> S) {
         .unwrap();
 }
 
+/// A message leased `max_deliveries` times and never acked is set aside in the role's dead set, body
+/// and all: not redelivered again, not dropped, counted in `Depth::dead`, a resend of its id is a
+/// duplicate, and the receiver's ack discards it.
+pub fn a_message_leased_max_deliveries_times_goes_dead_and_is_kept<S: MailStore>(
+    make: impl Fn() -> S,
+) {
+    let ids = Ids::new();
+    let config = MailConfig {
+        max_deliveries: 3,
+        ..MailConfig::default()
+    };
+    let mut mb = Mailbox::open(make(), config, t0() - Duration::seconds(1)).expect("open");
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("poison", LANE, b"payload"), t0()).unwrap();
+    for round in 0..3 {
+        let at = t0() + Duration::seconds(61 * round);
+        let got = mb.fetch(LANE, epoch, 10, None, at).unwrap();
+        assert_eq!(ids_of(&got), ["poison"], "lease {}", round + 1);
+        assert_eq!(got[0].attempts, round as u32 + 1);
+    }
+    let at = t0() + Duration::seconds(61 * 3);
+    assert!(
+        mb.fetch(LANE, epoch, 10, None, at).unwrap().is_empty(),
+        "past the cap it is not leased again"
+    );
+    let depth = depth_of(&mb, LANE, at);
+    assert_eq!((depth.queued, depth.leased, depth.dead), (0, 0, 1));
+    let dead = mb.dead_letters(LANE, epoch).unwrap();
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0].envelope.message_id, "poison");
+    assert_eq!(dead[0].envelope.body, b"payload", "the body is kept");
+    assert_eq!(dead[0].attempts, 3);
+    assert_eq!(
+        mb.enqueue(env("poison", LANE, b"payload"), at).unwrap(),
+        Enqueued::Duplicate,
+        "a resend of a dead message is not queued again"
+    );
+    assert_eq!(mb.ack(LANE, epoch, "poison", at).unwrap(), Acked::Removed);
+    assert!(mb.dead_letters(LANE, epoch).unwrap().is_empty());
+    assert_eq!(depth_of(&mb, LANE, at).dead, 0);
+}
+
+/// A full dead set never costs a message: the one past the cap stays queued and is leased again.
+pub fn a_full_dead_set_keeps_the_message_queued<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let config = MailConfig {
+        max_deliveries: 1,
+        max_messages: 1,
+        ..MailConfig::default()
+    };
+    let mut mb = Mailbox::open(make(), config, t0() - Duration::seconds(1)).expect("open");
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("first", LANE, b"a"), t0()).unwrap();
+    mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    let t1 = t0() + Duration::seconds(61);
+    assert!(mb.fetch(LANE, epoch, 10, None, t1).unwrap().is_empty());
+    assert_eq!(
+        depth_of(&mb, LANE, t1).dead,
+        1,
+        "the bound of 1 is now full"
+    );
+    mb.enqueue(env("second", LANE, b"b"), t1).unwrap();
+    mb.fetch(LANE, epoch, 10, None, t1).unwrap();
+    let t2 = t1 + Duration::seconds(61);
+    let got = mb.fetch(LANE, epoch, 10, None, t2).unwrap();
+    assert_eq!(
+        ids_of(&got),
+        ["second"],
+        "kept and leased again, not dropped"
+    );
+    assert_eq!(got[0].attempts, 2);
+    assert_eq!(depth_of(&mb, LANE, t2).dead, 1);
+}
+
+/// A dead message can be put back: queued again with its count reset.
+pub fn a_dead_message_can_be_requeued<S: MailStore>(make: impl Fn() -> S) {
+    let ids = Ids::new();
+    let config = MailConfig {
+        max_deliveries: 1,
+        ..MailConfig::default()
+    };
+    let mut mb = Mailbox::open(make(), config, t0() - Duration::seconds(1)).expect("open");
+    let epoch = ids.claim(&mut mb, "lane", t0());
+    mb.enqueue(env("m", LANE, b"x"), t0()).unwrap();
+    mb.fetch(LANE, epoch, 10, None, t0()).unwrap();
+    let t1 = t0() + Duration::seconds(61);
+    assert!(mb.fetch(LANE, epoch, 10, None, t1).unwrap().is_empty());
+    assert_eq!(
+        mb.requeue_dead(LANE, epoch, "nope").unwrap_err(),
+        MailError::NotFound
+    );
+    mb.requeue_dead(LANE, epoch, "m").unwrap();
+    assert!(mb.dead_letters(LANE, epoch).unwrap().is_empty());
+    let got = mb.fetch(LANE, epoch, 10, None, t1).unwrap();
+    assert_eq!(ids_of(&got), ["m"]);
+    assert_eq!(got[0].attempts, 1, "the count was reset");
+}
+
 /// Run every case against stores from `make`, naming the case that failed.
 ///
 /// # Panics
@@ -647,6 +746,16 @@ pub fn run_all<S: MailStore>(make: impl Fn() -> S) {
     );
     case("a_failed_write_changes_nothing", || {
         a_failed_write_changes_nothing(&make)
+    });
+    case(
+        "a_message_leased_max_deliveries_times_goes_dead_and_is_kept",
+        || a_message_leased_max_deliveries_times_goes_dead_and_is_kept(&make),
+    );
+    case("a_full_dead_set_keeps_the_message_queued", || {
+        a_full_dead_set_keeps_the_message_queued(&make)
+    });
+    case("a_dead_message_can_be_requeued", || {
+        a_dead_message_can_be_requeued(&make)
     });
 }
 

@@ -287,12 +287,20 @@ pub async fn push_once_with<R: Renderer, N: Notifier>(
                 }
             };
             if ack {
-                // A refused ack leaves the message pending: it is pushed again after the lease and
-                // the ack retried. A transient refusal costs one more push; a persistent one repeats
-                // every lease, so it is logged (the text is fixed and key-free, like the loop's).
+                // A refused ack leaves the message pending, and this process stops pushing it
+                // (parked); the receiver's own `ack` or the daemon's delivery cap ends it. Logged:
+                // the text is fixed and key-free, like the loop's.
                 match source.confirm(id.to_string()).await {
                     Ok(()) => ledger.forget(id),
-                    Err(e) => tracing::warn!("synapse push: the adapter's ack was refused: {e}"),
+                    Err(e) => {
+                        // Park it for this process: pulled again, it would be pushed every lease
+                        // with the ack refused every time (#119). The daemon's delivery cap
+                        // (`max_deliveries`) sets it aside in the dead set for good.
+                        ledger.park(id);
+                        tracing::warn!(
+                            "synapse push: the adapter's ack was refused; the message is parked: {e}"
+                        );
+                    }
                 }
             }
         }

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.70): the dead set: a delivery cap in the daemon (#119, #120)
+
+A message leased `max_deliveries` times (default 10) and never acked now moves to the role's **dead set**: bounded and visible, never silently dropped. It keeps its body, `from`, attempts and enqueue time. It is stored under the pseudo-role `dead:<role>` in the ordinary queue tables, so no `MailStore` and no on-disk format changes. A full dead set (the queue bounds) leaves the message queued and leased again: nothing is dropped to make room. A resend of a dead id is a duplicate; the receiver's `ack` discards it; the dead set is swept with acked history after `retention`.
+
+- `MailConfig::max_deliveries: u32` (`0` = no cap) and `Depth::dead: usize` are new public fields (**Breaking** for code that builds either by literal). `list` reports `pending.dead`.
+- `Mailbox::dead_letters(role, epoch)` and `Mailbox::requeue_dead(role, epoch, id)` read and replay it. No daemon endpoint or CLI exposes them yet.
+- Three conformance cases (`a_message_leased_max_deliveries_times_goes_dead_and_is_kept`, `a_full_dead_set_keeps_the_message_queued`, `a_dead_message_can_be_requeued`) join the stable suite, run against memory and redb.
+- The push adapter parks a message whose ack the daemon refused, for the process (#119): it no longer re-pushes it every lease. #120's never-acked failing writes are bounded by the cap.
+
 ### Fixed (rc.69): `transport_repairs` ports are free on TCP and UDP (#48)
 
 `free_port()` asked only the TCP table, so two UDP-family transports (QUIC, UDP, NAT traversal) could be handed the same port and the second failed to bind, truncating the run. It now returns only ports free in both namespaces. Tests only.

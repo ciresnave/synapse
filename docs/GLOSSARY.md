@@ -7,6 +7,7 @@ the definition can be checked; this page is not a design document. Alphabetical.
 |------|---------|--------|
 | **Account key** | An Ed25519 key pinned in a `TrustStore` by its `key_id`; a certificate chain whose root names one is trusted for the account. | `src/sender_auth.rs` |
 | **Ack** | The consumer's statement that a leased message was handled: `Mailbox::ack` removes it. Until then it can be delivered again. | `src/mailbox.rs` |
+| **Dead set** | A role's messages that were leased `max_deliveries` times and never acked. Bounded by the queue bounds and kept for retention, with their bodies: bounded and visible, never silently dropped. Counted as `pending.dead` in `list`. | `src/mailbox.rs` |
 | **At-least-once** | The mailbox's delivery guarantee: a message may arrive more than once (a lease that expires makes it deliverable again), so consumers dedupe by `message_id`. | `src/mailbox.rs` |
 | **Channel adapter** | `synapse-claude-channel`: the process that puts mailbox messages into a Claude Code session. Synapse moves bytes between processes; it does not put them into an agent, that is each agent's client or an adapter. | `crates/synapse-claude-channel`, `ROADMAP.md` |
 | **Claim** | A role taking ownership of its mailbox. A role's newest claim voids every lease an older epoch held. | `src/roles.rs`, `src/mailbox.rs` |
