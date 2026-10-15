@@ -14,7 +14,12 @@ mod basic_integration_tests {
         let config = Config::for_testing();
         assert!(config.validate().is_ok(), "Test config should be valid");
 
-        let gmail_config = Config::gmail_config("test", "ai_model", "test@gmail.com", "password");
+        let gmail_config = Config::gmail_config(
+            "test",
+            "ai_model",
+            "test@gmail.com",
+            format!("pw-{}", uuid::Uuid::new_v4()),
+        );
         assert!(
             gmail_config.validate().is_ok(),
             "Gmail config should be valid"

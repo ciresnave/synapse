@@ -36,18 +36,14 @@ fn a_new_auth_handler_accepts_no_built_in_credentials() {
 #[test]
 fn an_account_the_operator_adds_authenticates() {
     let handler = SynapseAuthHandler::new();
+    let password = format!("op-{}", uuid::Uuid::new_v4());
     handler
-        .add_user_with_password(
-            "ops",
-            "a long operator password",
-            "ops@example.com",
-            permissions(),
-        )
+        .add_user_with_password("ops", &password, "ops@example.com", permissions())
         .unwrap();
+    assert!(handler.authenticate("ops", &password).unwrap());
     assert!(
-        handler
-            .authenticate("ops", "a long operator password")
+        !handler
+            .authenticate("ops", &format!("{password}-wrong"))
             .unwrap()
     );
-    assert!(!handler.authenticate("ops", "wrong").unwrap());
 }

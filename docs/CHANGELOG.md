@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.81): CodeQL hygiene, tests
+
+Integration tests no longer carry literal passwords: `email_security_events`, `email_server_has_no_default_users` and `basic_integration_test` use per-run random values (`rust/hard-coded-cryptographic-value`). The three historical built-in credentials the no-default-users test asserts are rejected stay literal, since they are the subject of that test.
+
 ### Added (rc.80): `synapsed-client` launch methods
 
 `Daemon::waiting(role, wait_secs)`, `Daemon::launch_result(...)` and `Daemon::launch_clear(role, target)` wrap `GET /v1/waiting`, `POST /v1/launch-result` and `POST /v1/launch-clear` for a launcher service. A `waiting` poll is capped at 25 s so it stays under the client's call timeout.
