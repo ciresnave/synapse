@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.81"
+version = "6.0.0-rc.82"
 
 [package]
 name = "synapse"
@@ -332,6 +332,11 @@ name = "end_to_end_integration_test"
 path = "tests/end_to_end_integration_test.rs"
 test = false
 
+[[test]]
+name = "jwt_backend"
+path = "tests/jwt_backend.rs"
+required-features = ["jwt"]
+
 [features]
 default = ["native"]
 
@@ -365,7 +370,6 @@ core = [
     "dep:ahash",
     "dep:clap",
     "dep:regex",
-    "dep:jsonwebtoken",
     "dep:pem",
     "dep:bcrypt",
     "dep:hmac",
@@ -433,8 +437,16 @@ database = ["core", "cache", "dep:sqlx"]
 # Authentication feature (adds federated authentication)
 auth = ["core", "auth-framework"]
 
+# JWT support. Only tests/jwt_backend.rs uses it. Kept out of `core` and `native-base` because
+# jsonwebtoken's `rust_crypto` backend pulls `rsa` (RUSTSEC-2023-0071, no fix): a consumer that wants
+# the client crates without it depends on `native-base`, as `synapsed-client` does.
+jwt = ["dep:jsonwebtoken"]
+
 # Full native platform support (the original working config but with updated deps)
-native = [
+native = ["native-base", "jwt"]
+
+# `native` without `jwt`.
+native-base = [
     "core",
     "mailbox-redb",
     "networking",
