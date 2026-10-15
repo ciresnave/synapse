@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Added (rc.72): `synapse stats`
+
+`synapse stats --role <role>` prints `GET /v1/stats` one JSON object per role per line (`sent`, `acked`, `redelivered`, `expired`, plus the daemon's `scope` and `since`). The counters are since the daemon started; a restart begins again from zero. CLI only: no daemon or library change.
+
 ### Added (rc.71): read and replay the dead set from the daemon and the CLI
 
 `GET /v1/dead` returns the caller's dead set, oldest first, bodies included; `POST /v1/requeue {message_id}` puts one dead message back in the queue with its delivery count reset (`404` if it is not dead; `mailbox_full` and it stays dead if the queue is full). `synapse dead` and `synapse requeue <message_id>` are the CLI. The set stays bounded and visible, never silently dropped; an `ack` still discards a dead message. The push adapter's parked-id behaviour is now pinned by a test. No change to existing routes, no `MailStore` or on-disk change.
