@@ -587,6 +587,7 @@ pub fn a_failed_write_changes_nothing<S: MailStore>(make: impl Fn() -> S) {
             Ok(())
         })
         .unwrap();
+}
 
 /// A message leased `max_deliveries` times and never acked is set aside in the role's dead set, body
 /// and all: not redelivered again, not dropped, counted in `Depth::dead`, a resend of its id is a
