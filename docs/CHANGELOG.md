@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.74): the MCP adapter test no longer trips CodeQL `rust/hard-coded-cryptographic-value` (alerts 47-48)
+
+The rival-claim helper in `synapse-mcp-server/tests/adapter.rs` draws a random nonce per claim instead of taking a literal byte
+
 ### Fixed (rc.73): test and parser code no longer trips CodeQL `rust/hard-coded-cryptographic-value` (alerts 121-140)
 
 Claim nonces and passwords in the tests are random per run (stable per label within a run), and the `unhex` helpers in `synapsed` and `synapsed-client` build their output without a zero-filled literal buffer. No behaviour change in shipped code.
