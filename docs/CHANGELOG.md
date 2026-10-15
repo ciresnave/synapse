@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.82): `synapsed-client` and `synapse-security` no longer pull `rsa`
+
+`jsonwebtoken` (whose `rust_crypto` backend brings `rsa`, RUSTSEC-2023-0071) moves from `core` to a new `jwt` feature; `native` is now `native-base` + `jwt`, so the default build is unchanged. `synapsed-client` and `synapse-security` depend on `synapse` with `default-features = false, features = ["native-base"]`, so `cargo tree -p synapsed-client -i rsa` is empty. `tests/jwt_backend.rs` requires `jwt`. No API change.
+
 ### Changed (rc.81): CodeQL hygiene, tests
 
 Integration tests no longer carry literal passwords: `email_security_events`, `email_server_has_no_default_users` and `basic_integration_test` use per-run random values (`rust/hard-coded-cryptographic-value`). The three historical built-in credentials the no-default-users test asserts are rejected stay literal, since they are the subject of that test.
