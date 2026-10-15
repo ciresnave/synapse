@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Fixed (rc.76): `synapsed` api tests claim with a random nonce per claim (CodeQL `rust/hard-coded-cryptographic-value`)
+
+`claim` and `claim_body` in `crates/synapsed/tests/api.rs` no longer take a literal nonce byte; each claim draws a fresh random nonce. Test code only
+
 ### Docs (rc.75): design for the claude-peers cutover, wake-on-mail and lane launch on message
 
 `docs/superpowers/specs/2026-10-15-cutover-and-lane-launch.md`: gaps lanes still use claude-peers for, the cutover order, and the `/v1/waiting` signal and launch-result contract OverMind and AgentLife code against. Design only; no behaviour change

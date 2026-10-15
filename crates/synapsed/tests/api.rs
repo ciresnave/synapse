@@ -108,13 +108,10 @@ async fn get_json(d: &Running, path: &str, token: &str) -> Value {
 
 /// A wire-format claim for `role`, signed after the daemon started (M3 refuses claims signed at or
 /// before the table's start).
-fn claim_body(d: &Running, role: &str, nonce: u8) -> Value {
-    // A per-process random base with `nonce` mixed into the last byte: stable per `nonce` within a
-    // run, distinct across values, and never a literal key-shaped constant.
-    static BASE: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
-    let mut bytes = *BASE.get_or_init(|| *uuid::Uuid::new_v4().as_bytes());
-    bytes[15] ^= nonce;
-    claim_body_with(d, role, bytes)
+fn claim_body(d: &Running, role: &str) -> Value {
+    // A fresh random nonce per claim: no test carries a literal nonce, and a test that needs a
+    // replay reuses the returned body.
+    claim_body_with(d, role, *uuid::Uuid::new_v4().as_bytes())
 }
 
 fn claim_body_with(d: &Running, role: &str, nonce: [u8; 16]) -> Value {
@@ -140,8 +137,8 @@ fn instance_id(d: &Running) -> String {
     v["instance_id"].as_str().unwrap().to_string()
 }
 
-async fn claim(d: &Running, role: &str, nonce: u8) -> (String, u64) {
-    claim_with(d, claim_body(d, role, nonce)).await
+async fn claim(d: &Running, role: &str) -> (String, u64) {
+    claim_with(d, claim_body(d, role)).await
 }
 
 /// A claim with a fresh random nonce, for tests that claim a role many times.
@@ -282,8 +279,8 @@ async fn stopping_removes_only_its_own_announce_file() {
 #[tokio::test]
 async fn a_round_trip_between_two_roles() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
     let body = B64.encode(b"hello beta");
     let (s, sent, _) = post(
         &d,
@@ -383,7 +380,7 @@ async fn a_message_never_acked_goes_dead_and_can_be_requeued() {
 #[tokio::test]
 async fn a_forged_from_is_refused() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (alpha, _) = claim(&d, "alpha").await;
     let (s, _, _) = post(
         &d,
         "/v1/send",
@@ -432,8 +429,8 @@ async fn a_bad_or_missing_token_is_401() {
 #[tokio::test]
 async fn an_old_epoch_token_is_409_after_takeover() {
     let d = start().await;
-    let (old, first) = claim(&d, "alpha", 1).await;
-    let (_new, second) = claim(&d, "alpha", 2).await;
+    let (old, first) = claim(&d, "alpha").await;
+    let (_new, second) = claim(&d, "alpha").await;
     assert_eq!(second, first + 1);
     let (s, reply, _) = post(
         &d,
@@ -451,7 +448,7 @@ async fn an_old_epoch_token_is_409_after_takeover() {
 #[tokio::test]
 async fn a_claim_without_key_proof_issues_no_token() {
     let d = start().await;
-    let mut body = claim_body(&d, "alpha", 1);
+    let mut body = claim_body(&d, "alpha");
     let mut sig = B64.decode(body["signature_b64"].as_str().unwrap()).unwrap();
     sig[0] ^= 1;
     body["signature_b64"] = json!(B64.encode(&sig));
@@ -507,7 +504,7 @@ async fn a_wrong_host_header_is_421() {
 #[tokio::test]
 async fn no_response_carries_cors_headers() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (alpha, _) = claim(&d, "alpha").await;
     let responses = vec![
         client()
             .get(d.url("/v1/health"))
@@ -545,7 +542,7 @@ async fn no_response_carries_cors_headers() {
 #[tokio::test]
 async fn a_post_without_json_content_type_is_415() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (alpha, _) = claim(&d, "alpha").await;
     let s = client()
         .post(d.url("/v1/fetch"))
         .bearer_auth(&alpha)
@@ -582,8 +579,8 @@ async fn a_second_daemon_on_the_same_home_fails() {
 #[tokio::test]
 async fn no_token_or_key_material_leaks() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (_beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (_beta, _) = claim(&d, "beta").await;
     let mut bodies = Vec::new();
     for (path, body) in [
         (
@@ -624,7 +621,7 @@ async fn no_token_or_key_material_leaks() {
 #[tokio::test]
 async fn list_shows_claimed_roles_with_presence() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (alpha, _) = claim(&d, "alpha").await;
     let (s, _, _) = post(
         &d,
         "/v1/heartbeat",
@@ -720,9 +717,9 @@ async fn the_instance_id_is_announced_only_in_an_owner_only_file() {
 #[tokio::test]
 async fn a_squatted_message_id_does_not_suppress_another_senders_message() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (beta, _) = claim(&d, "beta", 2).await;
-    let (gamma, _) = claim(&d, "gamma", 3).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
+    let (gamma, _) = claim(&d, "gamma").await;
     let send = |token: String, body: &'static [u8]| {
         let d = &d;
         async move {
@@ -763,7 +760,7 @@ async fn a_squatted_message_id_does_not_suppress_another_senders_message() {
 #[tokio::test]
 async fn mail_for_a_foreign_account_or_an_unclaimed_role_is_refused() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (alpha, _) = claim(&d, "alpha").await;
     for to in ["x@other", "never-claimed@acct"] {
         let (s, reply, _) = post(
             &d,
@@ -782,7 +779,7 @@ async fn mail_for_a_foreign_account_or_an_unclaimed_role_is_refused() {
 #[tokio::test]
 async fn an_oversized_lease_is_400_not_a_panic() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (alpha, _) = claim(&d, "alpha").await;
     let (s, reply, _) = post(
         &d,
         "/v1/fetch",
@@ -841,8 +838,8 @@ async fn send_to(d: &Running, token: &str, to: &str, body: &[u8]) -> String {
 #[tokio::test]
 async fn acking_a_message_you_do_not_hold_the_lease_on_is_403_not_your_lease() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
 
     // Never fetched, so no lease at all.
     let unleased = send_to(&d, &alpha, "beta@acct", b"one").await;
@@ -862,7 +859,7 @@ async fn acking_a_message_you_do_not_hold_the_lease_on_is_403_not_your_lease() {
     let leased = send_to(&d, &alpha, "beta@acct", b"two").await;
     let (_, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
     assert_eq!(got["messages"][0]["message_id"], leased.as_str());
-    let (beta2, _) = claim(&d, "beta", 3).await;
+    let (beta2, _) = claim(&d, "beta").await;
     let (s, reply, _) = post(&d, "/v1/ack", Some(&beta2), json!({"message_id": leased})).await;
     assert_eq!(s, 403, "{reply}");
     assert_eq!(reply["error"], "not_your_lease");
@@ -874,8 +871,8 @@ async fn acking_a_message_you_do_not_hold_the_lease_on_is_403_not_your_lease() {
 #[tokio::test]
 async fn a_message_id_with_a_slash_or_control_char_is_400_malformed() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (_beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (_beta, _) = claim(&d, "beta").await;
     for bad in ["a/b", "a\u{7}"] {
         let (s, reply, _) = post(
             &d,
@@ -933,7 +930,7 @@ async fn post_get_list(d: &Running, token: &str) -> (u16, Value, String) {
 #[tokio::test]
 async fn a_heartbeat_summary_too_long_or_with_a_control_char_is_400_malformed() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
+    let (alpha, _) = claim(&d, "alpha").await;
     for bad in ["x".repeat(501), "line one\nline two".to_string()] {
         let (s, reply, _) = post(&d, "/v1/heartbeat", Some(&alpha), json!({"summary": bad})).await;
         assert_eq!(s, 400, "{reply}");
@@ -957,8 +954,8 @@ async fn a_full_mailbox_is_413_mailbox_full() {
     const BODY: usize = 1_500_000; // base64 inflates to 2_000_000 < axum's 2 MiB request limit
     const CAP: usize = 64 * 1024 * 1024;
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (_beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (_beta, _) = claim(&d, "beta").await;
     let body = vec![7u8; BODY];
 
     let fits = CAP / BODY;
@@ -1084,7 +1081,7 @@ async fn an_owed_delay_is_really_waited_out() {
 #[tokio::test]
 async fn bad_bearers_are_delayed_and_recorded() {
     let (d, pauses) = start_recorded().await;
-    let (good, _) = claim(&d, "alpha", 1).await;
+    let (good, _) = claim(&d, "alpha").await;
     pauses.take();
     let bad = ["a1", "b2", "c3"].map(|b| b.repeat(32));
     let mut last = None;
@@ -1116,8 +1113,8 @@ async fn refused_claims_are_delayed_and_recorded() {
     let (d, pauses) = start_recorded().await;
     let mut secrets = Vec::new();
     let mut last = None;
-    for n in [0x71u8, 0x72, 0x73] {
-        let mut body = claim_body(&d, "alpha", n);
+    for _ in 0..3 {
+        let mut body = claim_body(&d, "alpha");
         let mut sig = B64.decode(body["signature_b64"].as_str().unwrap()).unwrap();
         sig[0] ^= 1;
         body["signature_b64"] = json!(B64.encode(&sig));
@@ -1129,7 +1126,7 @@ async fn refused_claims_are_delayed_and_recorded() {
         last = pauses.owed();
     }
     assert!(last >= Some(SLOW), "the 3rd refusal owed {last:?}");
-    let mut malformed = claim_body(&d, "alpha", 0x74);
+    let mut malformed = claim_body(&d, "alpha");
     malformed["nonce_hex"] = json!("zz");
     let (s, reply, _) = post(&d, "/v1/claim", None, malformed).await;
     assert_eq!(s, 400, "{reply}");
@@ -1148,7 +1145,7 @@ async fn refused_claims_are_delayed_and_recorded() {
         );
     }
     // Positive control: a valid claim is not slowed by the failures before it.
-    let (s, reply, _) = post(&d, "/v1/claim", None, claim_body(&d, "alpha", 0x75)).await;
+    let (s, reply, _) = post(&d, "/v1/claim", None, claim_body(&d, "alpha")).await;
     assert_eq!(s, 200, "{reply}");
     assert_eq!(pauses.owed(), None, "a valid claim was held back");
     d.stop().await;
@@ -1189,8 +1186,8 @@ async fn challenged_health_over_budget_is_slowed_not_refused() {
 #[tokio::test]
 async fn repeated_unknown_recipients_are_delayed_per_role() {
     let (d, pauses) = start_recorded().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
     pauses.take();
     let body = json!({"to": "ghost@acct", "body_b64": B64.encode(b"x")});
     let mut last = None;
@@ -1217,8 +1214,8 @@ async fn repeated_unknown_recipients_are_delayed_per_role() {
 #[tokio::test]
 async fn repeated_bad_acks_are_delayed_per_role() {
     let (d, pauses) = start_recorded().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
     pauses.take();
     let body = json!({"message_id": "alpha@acct/nothing"});
     let mut last = None;
@@ -1275,8 +1272,8 @@ fn a_too_open_security_event_file_refuses_to_start() {
 #[tokio::test]
 async fn list_shows_mailbox_depth_per_role() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
     let pending = |listed: &Value, role: &str| {
         listed["roles"]
             .as_array()
@@ -1356,8 +1353,8 @@ fn counters(stats: &Value, role: &str) -> [u64; 4] {
 async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
     let d = start().await;
     assert_eq!(get_stats(&d, None).await.0, 401, "needs a token");
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
 
     let (s, stats, _) = get_stats(&d, Some(&alpha)).await;
     assert_eq!(s, 200, "{stats}");
@@ -1400,7 +1397,7 @@ async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
     assert_eq!(counters(&stats, "beta@acct"), [4, 1, 3, 3]);
 
     // A takeover voids beta's live leases: redelivered, but nothing expired.
-    let (beta2, _) = claim(&d, "beta", 3).await;
+    let (beta2, _) = claim(&d, "beta").await;
     let (_, got, _) = post(&d, "/v1/fetch", Some(&beta2), json!({})).await;
     assert_eq!(got["messages"].as_array().unwrap().len(), 3);
     let (s, stats, text) = get_stats(&d, Some(&beta2)).await;
@@ -1416,8 +1413,8 @@ async fn stats_count_sent_acked_redelivered_and_expired_per_role() {
 #[tokio::test]
 async fn fetch_can_exclude_messages_it_would_otherwise_lease() {
     let d = start().await;
-    let (alpha, _) = claim(&d, "alpha", 1).await;
-    let (beta, _) = claim(&d, "beta", 2).await;
+    let (alpha, _) = claim(&d, "alpha").await;
+    let (beta, _) = claim(&d, "beta").await;
     let mut ids = Vec::new();
     for text in ["one", "two"] {
         let (s, sent, _) = post(
