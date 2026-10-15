@@ -430,6 +430,8 @@ impl Daemon {
             .route("/v1/send", post(send))
             .route("/v1/fetch", post(fetch))
             .route("/v1/ack", post(ack))
+            .route("/v1/dead", get(dead))
+            .route("/v1/requeue", post(requeue))
             .route("/v1/heartbeat", post(heartbeat))
             .route("/v1/list", get(list))
             .route("/v1/stats", get(stats))
@@ -1047,6 +1049,39 @@ async fn ack(
         "outcome": match outcome { Acked::Removed => "removed", Acked::AlreadyAcked => "already_acked" },
     }))
     .into_response())
+}
+
+/// The caller's dead set (messages leased `max_deliveries` times and never acked), oldest first,
+/// bodies included. Changes nothing.
+async fn dead(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let stored = locked(&shared.mailbox)?.dead_letters(&session.global_id, session.epoch)?;
+    let messages: Vec<Value> = stored
+        .into_iter()
+        .map(|s| {
+            json!({
+                "message_id": s.envelope.message_id,
+                "from": s.envelope.from,
+                "body_b64": B64.encode(&s.envelope.body),
+                "enqueued_at": s.enqueued_at.to_rfc3339(),
+                "attempts": s.attempts,
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({ "messages": messages })).into_response())
+}
+
+/// Put one of the caller's dead messages back in its queue with the delivery count reset. A full
+/// queue refuses (`mailbox_full`) and the message stays dead.
+async fn requeue(
+    State(shared): State<Arc<Shared>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let session = authed(&shared, &headers)?;
+    let body: AckBody = parse(&headers, &body)?;
+    locked(&shared.mailbox)?.requeue_dead(&session.global_id, session.epoch, &body.message_id)?;
+    Ok(axum::Json(json!({ "outcome": "requeued" })).into_response())
 }
 
 #[derive(Deserialize, Default)]

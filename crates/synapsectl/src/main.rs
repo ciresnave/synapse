@@ -6,8 +6,8 @@
 //! keystore's path (spec `docs/superpowers/specs/2026-10-01-m2-keystore-design.md` §3.3).
 //!
 //! M5b adds the mail commands over `synapsed`, which they start if it is not running:
-//! `synapse claim|send|inbox|ack|list --role <role>` (or `SYNAPSE_ROLE`). `inbox` and `list` print
-//! one JSON object per line. Session tokens are never printed.
+//! `synapse claim|send|inbox|ack|dead|requeue|list --role <role>` (or `SYNAPSE_ROLE`). `inbox`, `dead`
+//! and `list` print one JSON object per line. Session tokens are never printed.
 
 use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
@@ -63,6 +63,18 @@ enum Command {
     },
     /// Acknowledge a fetched message, removing it from the inbox.
     Ack {
+        #[command(flatten)]
+        role: RoleArg,
+        message_id: String,
+    },
+    /// List the role's dead set: messages leased the daemon's delivery cap of times and never
+    /// acked, set aside (not dropped), one JSON object per line. `ack` one to discard it.
+    Dead {
+        #[command(flatten)]
+        role: RoleArg,
+    },
+    /// Put a dead message back in the role's inbox with its delivery count reset.
+    Requeue {
         #[command(flatten)]
         role: RoleArg,
         message_id: String,
@@ -211,6 +223,25 @@ fn run(cli: Cli) -> Result<(), MailError> {
             let reply = daemon.call(
                 &role.role,
                 "/v1/ack",
+                Some(&json!({"message_id": message_id})),
+            )?;
+            println!(
+                "outcome: {}",
+                printable(reply["outcome"].as_str().unwrap_or(""))
+            );
+        }
+        Command::Dead { role } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.call(&role.role, "/v1/dead", None)?;
+            for message in reply["messages"].as_array().into_iter().flatten() {
+                println!("{}", inbox_line(message));
+            }
+        }
+        Command::Requeue { role, message_id } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.call(
+                &role.role,
+                "/v1/requeue",
                 Some(&json!({"message_id": message_id})),
             )?;
             println!(

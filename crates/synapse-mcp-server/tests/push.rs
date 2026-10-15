@@ -410,9 +410,9 @@ impl Notifier for Recording {
     }
 }
 
-/// #121: a refused ack is logged only. The message must stay pending (it is not forgotten, so the
-/// ack is retried after the next lease), and the loop keeps going. #119 tracks that a persistent
-/// refusal repeats without a bound; this pins what happens today.
+/// #121, #119: a refused ack is logged and the id is parked for the process, so a persistent
+/// refusal is not pushed again every lease. The message stays pending (the daemon's delivery cap
+/// sets it aside in the dead set), and the loop keeps going.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_refused_ack_leaves_the_message_pending_and_the_loop_alive() {
     let home = Home::new();
@@ -457,6 +457,11 @@ async fn a_refused_ack_leaves_the_message_pending_and_the_loop_alive() {
         ledger.pushes(&id),
         2,
         "a refused ack must not forget the count"
+    );
+    assert_eq!(
+        ledger.parked(),
+        std::slice::from_ref(&id),
+        "the refused ack parked the id for this process"
     );
     let successor = second.successor.lock().await;
     let successor = successor.as_ref().expect("the takeover ran");
