@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.75): design for the claude-peers cutover, wake-on-mail and lane launch on message
+
+`docs/superpowers/specs/2026-10-15-cutover-and-lane-launch.md`: gaps lanes still use claude-peers for, the cutover order, and the `/v1/waiting` signal and launch-result contract OverMind and AgentLife code against. Design only; no behaviour change
+
 ### Fixed (rc.74): the MCP adapter test no longer trips CodeQL `rust/hard-coded-cryptographic-value` (alerts 47-48)
 
 The rival-claim helper in `synapse-mcp-server/tests/adapter.rs` draws a random nonce per claim instead of taking a literal byte

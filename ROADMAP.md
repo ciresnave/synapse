@@ -62,7 +62,7 @@ and crates.io. Nothing here is started; each item is its own PR.
 
 ## After the flip (unordered, not tasked)
 
-- Channel adapter push default and wake-on-mail across lanes (the claude-peers cutover is a separate question to CireSnave).
+- **claude-peers cutover, wake-on-mail and lane launch on message** (CireSnave, 2026-10-15: *"Claude-peers is going away. Synapse is its replacement."*, a decision, not a question). Design: `docs/superpowers/specs/2026-10-15-cutover-and-lane-launch.md`; code PRs follow it.
 - `synapse stats` CLI reader for `/v1/stats` (PM allocates the number if asked).
 - Deferred minors listed in HANDOFF (M5a/M5b/M6b), and issues #1, #20-22, #48, #49, #55, #56.
 - The 6.0.0 final cut (rc series -> 6.0.0) once items 4-6 and 11 are done.
