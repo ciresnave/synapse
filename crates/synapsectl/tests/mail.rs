@@ -161,6 +161,29 @@ fn line<'a>(text: &'a str, label: &str) -> &'a str {
 }
 
 #[test]
+fn stats_prints_one_object_per_role_with_scope_and_since() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    home.ok(&["claim", "--role", "beta"]);
+    home.ok(&["send", "--role", "alpha", "--to", "beta", "hello"]);
+    let stats = json_lines(&home.ok(&["stats", "--role", "alpha"]));
+    let entry = |id: &str| {
+        stats
+            .iter()
+            .find(|r| r["global_id"] == id)
+            .unwrap_or_else(|| panic!("{id} not in {stats:?}"))
+    };
+    assert_eq!(entry("beta@acct")["sent"], 1, "{stats:?}");
+    assert_eq!(entry("beta@acct")["acked"], 0);
+    assert_eq!(entry("alpha@acct")["sent"], 0);
+    assert!(
+        stats
+            .iter()
+            .all(|r| r["scope"] == "process" && r["since"].is_string())
+    );
+}
+
+#[test]
 fn a_command_against_a_stopped_daemon_starts_it() {
     let home = Home::new();
     assert!(

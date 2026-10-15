@@ -6,8 +6,8 @@
 //! keystore's path (spec `docs/superpowers/specs/2026-10-01-m2-keystore-design.md` §3.3).
 //!
 //! M5b adds the mail commands over `synapsed`, which they start if it is not running:
-//! `synapse claim|send|inbox|ack|dead|requeue|list --role <role>` (or `SYNAPSE_ROLE`). `inbox`, `dead`
-//! and `list` print one JSON object per line. Session tokens are never printed.
+//! `synapse claim|send|inbox|ack|dead|requeue|list|stats --role <role>` (or `SYNAPSE_ROLE`).
+//! `inbox`, `dead`, `list` and `stats` print one JSON object per line. Session tokens are never printed.
 
 use std::io::{IsTerminal, Read};
 use std::process::ExitCode;
@@ -78,6 +78,13 @@ enum Command {
         #[command(flatten)]
         role: RoleArg,
         message_id: String,
+    },
+    /// Per-role message counters since this daemon started (a restart begins again from zero):
+    /// `sent`, `acked`, `redelivered`, `expired`, one JSON object per line, each with the
+    /// daemon's `scope` and `since`.
+    Stats {
+        #[command(flatten)]
+        role: RoleArg,
     },
     /// List every role the daemon knows, with presence, one JSON object per line.
     List {
@@ -248,6 +255,16 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 "outcome: {}",
                 printable(reply["outcome"].as_str().unwrap_or(""))
             );
+        }
+        Command::Stats { role } => {
+            let daemon = connect(&home, &role)?;
+            let reply = daemon.call(&role.role, "/v1/stats", None)?;
+            for entry in reply["roles"].as_array().into_iter().flatten() {
+                let mut entry = entry.clone();
+                entry["scope"] = reply["scope"].clone();
+                entry["since"] = reply["since"].clone();
+                println!("{entry}");
+            }
         }
         Command::List { role } => {
             let daemon = connect(&home, &role)?;
