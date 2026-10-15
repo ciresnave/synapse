@@ -95,15 +95,30 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
+async fn get_json(d: &Running, path: &str, token: &str) -> Value {
+    let reply = client()
+        .get(d.url(path))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status().as_u16(), 200, "GET {path}");
+    reply.json().await.unwrap()
+}
+
 /// A wire-format claim for `role`, signed after the daemon started (M3 refuses claims signed at or
 /// before the table's start).
 fn claim_body(d: &Running, role: &str, nonce: u8) -> Value {
+    claim_body_with(d, role, [nonce; 16])
+}
+
+fn claim_body_with(d: &Running, role: &str, nonce: [u8; 16]) -> Value {
     let store = Keystore::open(d.home.path()).unwrap();
     // The certificate is issued at the real time; only the claim is signed after the daemon's
     // start (a certificate issued in the daemon's future would be "not yet valid").
     let identity = store.role(role, Utc::now()).unwrap();
     let signed_at = Utc::now().max(d.started_at + chrono::Duration::seconds(1));
-    let req = sign_claim_for(&identity, &instance_id(d), [nonce; 16], signed_at).unwrap();
+    let req = sign_claim_for(&identity, &instance_id(d), nonce, signed_at).unwrap();
     json!({
         "audience": req.audience,
         "chain_pem": chain_to_pem(&req.chain),
@@ -121,7 +136,17 @@ fn instance_id(d: &Running) -> String {
 }
 
 async fn claim(d: &Running, role: &str, nonce: u8) -> (String, u64) {
-    let (status, reply, text) = post(d, "/v1/claim", None, claim_body(d, role, nonce)).await;
+    claim_with(d, claim_body(d, role, nonce)).await
+}
+
+/// A claim with a fresh random nonce, for tests that claim a role many times.
+async fn claim_fresh(d: &Running, role: &str) -> (String, u64) {
+    let nonce = *uuid::Uuid::new_v4().as_bytes();
+    claim_with(d, claim_body_with(d, role, nonce)).await
+}
+
+async fn claim_with(d: &Running, body: Value) -> (String, u64) {
+    let (status, reply, text) = post(d, "/v1/claim", None, body).await;
     assert_eq!(status, 200, "claim refused: {text}");
     (
         reply["session"]
@@ -285,6 +310,71 @@ async fn a_round_trip_between_two_roles() {
     d.stop().await;
 }
 
+/// A message fetched `max_deliveries` times (each time by a fresh holder, which voids the prior
+/// lease) moves to the role's dead set: `/v1/dead` shows it with its body, `/v1/requeue` puts it
+/// back with the count reset.
+#[tokio::test]
+async fn a_message_never_acked_goes_dead_and_can_be_requeued() {
+    let d = start().await;
+    let (alpha, _) = claim_fresh(&d, "alpha").await;
+    claim_fresh(&d, "beta").await;
+    let (s, sent, _) = post(
+        &d,
+        "/v1/send",
+        Some(&alpha),
+        json!({"to": "beta@acct", "message_id": "m1", "body_b64": B64.encode(b"poison")}),
+    )
+    .await;
+    assert_eq!(s, 200, "{sent}");
+    let id = sent["message_id"].as_str().unwrap().to_string();
+    for round in 0..10 {
+        let beta = claim_fresh(&d, "beta").await.0;
+        let (s, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
+        assert_eq!(s, 200, "{got}");
+        assert_eq!(
+            got["messages"].as_array().unwrap().len(),
+            1,
+            "round {round}"
+        );
+    }
+    let beta = claim_fresh(&d, "beta").await.0;
+    let (_, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
+    assert!(
+        got["messages"].as_array().unwrap().is_empty(),
+        "the tenth lease was the last: {got}"
+    );
+    let dead = get_json(&d, "/v1/dead", &beta).await;
+    let dead = dead["messages"].as_array().unwrap();
+    assert_eq!(dead.len(), 1, "{dead:?}");
+    assert_eq!(dead[0]["message_id"], id.as_str());
+    assert_eq!(dead[0]["from"], "alpha@acct");
+    assert_eq!(dead[0]["attempts"], 10);
+    assert_eq!(
+        B64.decode(dead[0]["body_b64"].as_str().unwrap()).unwrap(),
+        b"poison"
+    );
+    let listed = get_json(&d, "/v1/list", &beta).await;
+    let beta_entry = listed["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["global_id"] == "beta@acct")
+        .expect("beta listed");
+    assert_eq!(beta_entry["pending"]["dead"], 1);
+
+    let (s, requeued, _) = post(&d, "/v1/requeue", Some(&beta), json!({"message_id": id})).await;
+    assert_eq!(s, 200, "{requeued}");
+    assert_eq!(requeued["outcome"], "requeued");
+    let (_, got, _) = post(&d, "/v1/fetch", Some(&beta), json!({})).await;
+    assert_eq!(
+        got["messages"][0]["attempts"], 1,
+        "the count was reset: {got}"
+    );
+    let (s, _, _) = post(&d, "/v1/requeue", Some(&beta), json!({"message_id": id})).await;
+    assert_eq!(s, 404, "a message that is not dead cannot be requeued");
+    d.stop().await;
+}
+
 #[tokio::test]
 async fn a_forged_from_is_refused() {
     let d = start().await;
@@ -305,7 +395,13 @@ async fn a_bad_or_missing_token_is_401() {
     // 17 bad requests: a roomy budget, so this test measures status codes and not the limiter.
     let d = start_with(Some(tuned(1000, 200, 2000, std::time::Duration::ZERO))).await;
     let bad = "00".repeat(32);
-    for path in ["/v1/send", "/v1/fetch", "/v1/ack", "/v1/heartbeat"] {
+    for path in [
+        "/v1/send",
+        "/v1/fetch",
+        "/v1/ack",
+        "/v1/heartbeat",
+        "/v1/requeue",
+    ] {
         let plus = format!("+a{}", "0".repeat(62)); // u8::from_str_radix accepts "+a"
         for token in [
             None,

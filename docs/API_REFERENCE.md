@@ -15,6 +15,8 @@ identity resolution; about 1,200 lines) was removed in rc.57 because most of its
 | `synapse send --role <role> --to <to> [MESSAGE]` | send (`MESSAGE`, else stdin); `<to>` is `<role>` or `<role>@<account>`; `--id` for an idempotent resend |
 | `synapse inbox --role <role>` | fetch waiting messages, one JSON object per line; each stays leased until acked |
 | `synapse ack --role <role> <message_id>` | acknowledge, removing it from the inbox |
+| `synapse dead --role <role>` | the role's dead set (messages set aside after `max_deliveries` leases), one JSON object per line |
+| `synapse requeue --role <role> <message_id>` | puts a dead message back in the inbox with its delivery count reset |
 | `synapse list --role <role>` | every role the daemon knows, with presence and pending counts, one JSON object per line |
 
 Environment: `SYNAPSE_HOME` (keystore, sessions, mailbox; default `%LOCALAPPDATA%\synapse` on Windows, else
@@ -36,11 +38,13 @@ Bound to a loopback address only (it refuses any other). Bodies are JSON and **d
 | `/v1/send` | POST | `to`, `message_id?`, `body_b64` | `queued` or `duplicate`; stored id is `<sender>/<client id>` (client id at most 100 bytes) |
 | `/v1/fetch` | POST | `max?`, `lease_secs?`, `exclude?` | `max` defaults to 10, clamped to 100; `exclude` at most 100 ids of at most 256 bytes: passed over, not leased |
 | `/v1/ack` | POST | `message_id` | `removed` or `already_acked` |
+| `/v1/dead` | GET | none | the caller's dead set, oldest first: `message_id`, `from`, `body_b64`, `enqueued_at`, `attempts`; changes nothing |
+| `/v1/requeue` | POST | `message_id` | `requeued`: a dead message back in the queue with its delivery count reset; `404` if it is not dead, `mailbox_full` (it stays dead) if the queue is full |
 | `/v1/heartbeat` | POST | `summary?` | presence; `summary` at most 500 bytes |
 | `/v1/list` | GET | none | roles with `online` (heard from within 90 s), `summary`, `pending` |
 | `/v1/stats` | GET | none | per-role cumulative counters since this daemon started (a restart begins again from zero); there is no CLI reader for it |
 
-Delivery is at-least-once: a fetched message is leased and comes back if not acked before the lease ends. A message leased `max_deliveries` times (default 10) without an ack moves to the role's **dead set**: bounded and visible, never silently dropped. It keeps its body, `from`, attempts and enqueue time for the retention period; `list`'s `pending.dead` counts it; a resend of its id is a duplicate; the receiver's `ack` discards it. (Library: `Mailbox::dead_letters`, `Mailbox::requeue_dead`; no daemon endpoint or CLI reads the dead set yet.)
+Delivery is at-least-once: a fetched message is leased and comes back if not acked before the lease ends. A message leased `max_deliveries` times (default 10) without an ack moves to the role's **dead set**: bounded and visible, never silently dropped. It keeps its body, `from`, attempts and enqueue time for the retention period; `list`'s `pending.dead` counts it; a resend of its id is a duplicate; the receiver's `ack` discards it. `GET /v1/dead` reads the set and `POST /v1/requeue` replays one message; the CLI is `synapse dead` and `synapse requeue <message_id>`. (Library: `Mailbox::dead_letters`, `Mailbox::requeue_dead`.)
 
 ## MCP adapters
 
