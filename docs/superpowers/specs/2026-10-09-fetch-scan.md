@@ -4,7 +4,7 @@ From the synapse lane, 2026-10-09. PM order 3 (after the depth-scan harness), to
 soak. Evidence: `origin/main` `dd18922` (6.0.0-rc.26); numbers are from the PM-accepted depth-scan run
 at `e1468f7` on this laptop (1 KiB bodies, 10 000 messages per role, half leased, 100 samples):
 `fetch(max=1)` past the leased half, p50 46 ms, p99 63 ms. Re-take with
-`cargo test --release --features mailbox-redb --test mailbox_depth_cost -- --ignored --nocapture`.
+`cargo bench --features mailbox-redb --bench mailbox_depth_cost`.
 
 ## The problem
 

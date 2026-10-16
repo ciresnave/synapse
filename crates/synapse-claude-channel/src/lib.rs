@@ -29,15 +29,15 @@
 //! # Wire probe (repeatable)
 //!
 //! The real Claude Code client sends `server/discover` and `initialize` together, so the adapter must
-//! be probed with the real client, not a fake. `real_claude_code_wire_probe` (ignored; needs the
+//! be probed with the real client, not a fake. the `wire_probe` example (a program, not a test; needs the
 //! `claude` CLI, or `SYNAPSE_PROBE_CLAUDE`) puts the `tee_mcp` example between Claude Code and the
 //! adapter, logs both directions, and checks the `-32022` refusal and the `initialize` result. It
 //! makes no model request and kills only the child it spawned. Run:
-//! `cargo test -p synapse-claude-channel --test channel -- --ignored --nocapture real_claude_code_wire_probe`.
+//! `cargo run -p synapse-claude-channel --example wire_probe`.
 //! It does not exercise a live push, which needs a dev-channel approval.
 //!
-//! To re-take the mailbox-depth cost numbers, see the header of `tests/mailbox_depth_cost.rs` (#98):
-//! `cargo test --release --features mailbox-redb --test mailbox_depth_cost -- --ignored --nocapture`.
+//! To re-take the mailbox-depth cost numbers, see the header of `benches/mailbox_depth_cost.rs` (#98):
+//! `cargo bench --features mailbox-redb --bench mailbox_depth_cost`.
 //!
 //! # Trust
 //!

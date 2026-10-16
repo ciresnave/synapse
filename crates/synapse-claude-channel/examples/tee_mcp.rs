@@ -3,8 +3,8 @@
 //!
 //! Runs `<command>` with its stdin and stdout relayed unchanged, and appends every line in each
 //! direction to `<log-file>` as `C>S <line>` (client to server) or `S>C <line>`. The relay is
-//! byte-for-byte; only the log is derived. Used by the ignored `real_claude_code_wire_probe` test
-//! in `tests/channel.rs`, which puts it between the real Claude Code client and the adapter.
+//! byte-for-byte; only the log is derived. Used by the `wire_probe` example,
+//! which puts it between the real Claude Code client and the adapter.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};

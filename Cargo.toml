@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.95"
+version = "6.0.0-rc.96"
 
 [package]
 name = "synapse"
@@ -300,6 +300,16 @@ required-features = ["minimal", "http"]
 name = "comprehensive_feature_test"
 path = "tests/comprehensive_feature_test.rs"
 test = false
+
+[[bench]]
+name = "mailbox_depth_cost"
+harness = false
+required-features = ["mailbox-redb"]
+
+[[bench]]
+name = "mailbox_fetch_cost"
+harness = false
+required-features = ["mailbox-redb"]
 
 [[test]]
 name = "jwt_backend"

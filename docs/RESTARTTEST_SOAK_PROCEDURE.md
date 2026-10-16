@@ -32,8 +32,8 @@ conditions. Cutover (dropping `server:claude-peers`) is **not** part of either p
    with `C:\Users\cires\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin` on `PATH`. Record
    `git rev-parse HEAD` and `synapsed`'s `/v1/health` `version`. Binaries: `synapsed`, `synapse`
    (from the `synapsectl` crate), `synapse-claude-channel`.
-2. **The wire probe passes.** It needs the `claude` CLI on `PATH` (or `SYNAPSE_PROBE_CLAUDE`) and a logged-in account, builds the `tee_mcp` example itself, and starts a real `claude -p hi --model haiku` child that the test stops once the adapter has answered `initialize` (the test's own comments say it makes no model request and kills only that child; not verified by running it). It needs no dev-channel approval:
-   `cargo test -p synapse-claude-channel --test channel -- --ignored --nocapture real_claude_code_wire_probe`
+2. **The wire probe passes.** It is an example, not a test (no `#[ignore]`). It needs the `claude` CLI on `PATH` (or `SYNAPSE_PROBE_CLAUDE`) and a logged-in account, builds the `tee_mcp` example itself, and starts a real `claude -p hi --model haiku` child that the test stops once the adapter has answered `initialize` (the test's own comments say it makes no model request and kills only that child; not verified by running it). It needs no dev-channel approval:
+   `cargo run -p synapse-claude-channel --example wire_probe` (prints `wire probe: ok`; exit 1 with the reason otherwise)
    Expect *(source)*: `initialize` accepted at `2025-11-25`, `serverInfo.name` = `synapse`, and, only if
    the client sent `server/discover` (the assertion is conditional), that it was answered `-32022`. If it fails, stop: the live test would fail the same way.
 3. **The approval exists, or CireSnave will answer the dialog by hand.** `lane-restart`'s approval for
