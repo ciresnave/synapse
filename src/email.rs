@@ -9,49 +9,18 @@ use crate::{
 use std::collections::HashMap;
 use std::string::ToString;
 
-use lettre::{SmtpTransport, transport::smtp::authentication::Credentials};
-
 /// Email transport for sending and receiving EMRP messages
 #[derive(Debug, Clone)]
 pub struct EmailTransport {
     config: EmailConfig,
-    // No longer read: `send_message` now refuses unconditionally rather than ever sending an
-    // unsigned message (see its doc comment), so this crate has no code path left that hands a
-    // message to it. Kept on the struct rather than removed -- dropping it is the kind of
-    // larger, unrelated restructuring this fix explicitly stays out of.
-    #[allow(dead_code)]
-    smtp_transport: SmtpTransport,
 }
 
 impl EmailTransport {
     /// Create a new email transport
     pub async fn new(config: EmailConfig) -> Result<Self> {
-        // Create SMTP transport
-        let smtp_transport = if config.smtp.use_ssl {
-            SmtpTransport::relay(&config.smtp.host)
-                .map_err(|e| EmailError::SmtpConnection(e.to_string()))?
-                .port(config.smtp.port)
-                .credentials(Credentials::new(
-                    config.smtp.username.clone(),
-                    config.smtp.password.expose().to_string(),
-                ))
-                .build()
-        } else {
-            let transport_builder = SmtpTransport::relay(&config.smtp.host)
-                .map_err(|e| EmailError::SmtpConnection(e.to_string()))?
-                .port(config.smtp.port)
-                .credentials(Credentials::new(
-                    config.smtp.username.clone(),
-                    config.smtp.password.expose().to_string(),
-                ));
-
-            transport_builder.build()
-        };
-
-        Ok(Self {
-            config,
-            smtp_transport,
-        })
+        // No SMTP transport is built: `send_message` refuses unconditionally (see its doc
+        // comment), so nothing would hold or use one.
+        Ok(Self { config })
     }
 
     /// Send an EMRP message via email
@@ -77,11 +46,11 @@ impl EmailTransport {
 
     /// Generate appropriate email subject
     ///
-    /// No longer called in production code: its only caller, `create_email_message`, was removed
-    /// along with the unsigned-send path in `send_message` (see that function's doc comment).
-    /// Kept and still covered by `test_subject_generation` since this crate's future signed email
-    /// path (via `SynapseRouter`) is expected to want the same subject formatting.
-    #[allow(dead_code)]
+    /// Test-only: its only production caller, `create_email_message`, was removed along with the
+    /// unsigned-send path in `send_message` (see that function's doc comment). A future signed email
+    /// path (via `SynapseRouter`) is expected to want the same subject formatting; when it lands it
+    /// drops the `cfg(test)`.
+    #[cfg(test)]
     fn generate_subject(&self, simple_msg: &SimpleMessage) -> String {
         match simple_msg.message_type {
             MessageType::ToolCall => format!(
@@ -337,9 +306,6 @@ mod tests {
 
         // Note: This will fail in actual test runs due to SMTP connection
         // In real tests, we'd use a mock transport
-        EmailTransport {
-            config,
-            smtp_transport: SmtpTransport::unencrypted_localhost(),
-        }
+        EmailTransport { config }
     }
 }

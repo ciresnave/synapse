@@ -308,10 +308,6 @@ fn grant_everyone_read(path: &Path) {
     assert!(status.success(), "icacls did not apply the grant");
 }
 
-#[cfg(unix)]
-#[allow(dead_code)]
-fn grant_everyone_read(_path: &Path) {}
-
 /// Review I2: an update of an existing id keeps the stored body, so it must also keep the stored
 /// body length; otherwise STATS (the max_bytes bound) drifts. MemoryStore and RedbStore must agree.
 #[test]

@@ -735,7 +735,10 @@ fn sessions_dir(home: &Path) -> Result<PathBuf, MailError> {
 /// An exclusive per-role OS lock on `<home>/sessions/<role>.lock`, held while this value lives.
 /// The OS releases it when the holder exits, crashed or not, so a leftover file blocks nobody and
 /// no lock is ever broken out from under a live holder. The file itself is left in place.
-struct RoleLock(#[allow(dead_code)] std::fs::File);
+struct RoleLock {
+    /// Held, never read: dropping it releases the OS lock.
+    _file: std::fs::File,
+}
 
 impl RoleLock {
     fn acquire(home: &Path, role: &str) -> Result<RoleLock, MailError> {
@@ -749,7 +752,7 @@ impl RoleLock {
         let deadline = Instant::now() + LOCK_TIMEOUT;
         loop {
             if try_lock(&file)? {
-                return Ok(RoleLock(file));
+                return Ok(RoleLock { _file: file });
             }
             if Instant::now() >= deadline {
                 return Err(MailError::Usage(format!(

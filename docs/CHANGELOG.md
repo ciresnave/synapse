@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.97): no `#[allow(dead_code)]`
+
+CireSnave, 2026-10-16: *"That same general dislike applies to #[allow(dead_code)] as well.  That should also be a last resort."* All 15 are gone, each by deleting, using or gating the item. Deleted (never read): `EmailTransport.smtp_transport` (its `new` no longer builds a relay it never used, so a bad SMTP host is no longer an error from `new`), the SMTP and IMAP session `id`, `connected_at`, `tag`, `SmtpMessage.from`, `ServerMetrics.messages_delivered` (never incremented), and `UdpTransportImpl.circuit_breaker`. Used: `ServerMetrics`' remaining fields are now `pub` (they were written but unreadable behind `get_metrics`). Gated: `generate_subject` is `#[cfg(test)]`. The rest were stale: `MultiTransportRouter.our_entity_id` is read, `RoleLock` holds its file as `_file`, and a test-only unix stub was unneeded. No wire change.
+
 ### Changed (rc.96): no test is `#[ignore]`d
 
 CireSnave, 2026-10-16: *"I really dislike #[ignore]d things.  If there is an issue, it should almost always be fixed.  #[ignore] should be a last resort."* The three ignored tests were not tests. `mailbox_depth_cost` and `mailbox_fetch_cost` are measurements: they are now `harness = false` benches (`cargo bench --features mailbox-redb --bench <name>`). `real_claude_code_wire_probe` needs the real `claude` CLI and a login, which CI does not have: it is now the `wire_probe` example (`cargo run -p synapse-claude-channel --example wire_probe`, exit 1 on failure). Docs that cited `--ignored` follow. No library or wire change.

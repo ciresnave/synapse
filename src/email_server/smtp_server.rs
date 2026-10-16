@@ -5,7 +5,7 @@ use crate::types::SecureMessage;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -91,42 +91,34 @@ pub struct TlsConfig {
 
 #[derive(Debug)]
 struct ClientSession {
-    #[allow(dead_code)]
-    id: String,
     /// The peer's IP, the key the limiters use.
     source: String,
     authenticated: bool,
     current_message: Option<SmtpMessage>,
-    #[allow(dead_code)]
-    connected_at: SystemTime,
 }
 
 #[derive(Debug)]
 struct SmtpMessage {
-    #[allow(dead_code)]
-    from: String,
     to: Vec<String>,
     data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ServerMetrics {
-    #[allow(dead_code)]
-    messages_received: u64,
-    #[allow(dead_code)]
-    messages_delivered: u64,
-    connections_accepted: u64,
-    #[allow(dead_code)]
-    average_processing_time_ms: f64,
-    #[allow(dead_code)]
-    last_reset: SystemTime,
+    /// Messages stored since `last_reset`.
+    pub messages_received: u64,
+    /// Connections accepted since `last_reset`.
+    pub connections_accepted: u64,
+    /// Running average (halved with each new sample) of the time to store a message.
+    pub average_processing_time_ms: f64,
+    /// When these counters started (the server's creation; nothing resets them).
+    pub last_reset: SystemTime,
 }
 
 impl Default for ServerMetrics {
     fn default() -> Self {
         Self {
             messages_received: 0,
-            messages_delivered: 0,
             connections_accepted: 0,
             average_processing_time_ms: 0.0,
             last_reset: SystemTime::now(),
@@ -275,17 +267,9 @@ impl SynapseSmtpServer {
         let mut writer = write_half;
 
         let mut session = ClientSession {
-            id: format!(
-                "smtp_{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
-            ),
             source,
             authenticated: false,
             current_message: None,
-            connected_at: SystemTime::now(),
         };
 
         // Send greeting
@@ -504,7 +488,6 @@ impl SynapseSmtpServer {
                     match self.auth_handler.is_authorized_sender(&from_addr) {
                         Ok(true) => {
                             session.current_message = Some(SmtpMessage {
-                                from: from_addr,
                                 to: Vec::new(),
                                 data: Vec::new(),
                             });
@@ -798,7 +781,6 @@ mod tests {
 
         server
             .store_message(SmtpMessage {
-                from: "alice@synapse.local".to_string(),
                 to: vec!["bob@synapse.local".to_string()],
                 data: body,
             })
@@ -825,7 +807,6 @@ mod tests {
 
         let err = server
             .store_message(SmtpMessage {
-                from: "alice@synapse.local".to_string(),
                 to: vec!["bob@synapse.local".to_string()],
                 data: b"not json at all".to_vec(),
             })
