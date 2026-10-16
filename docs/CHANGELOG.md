@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.98): ROADMAP rows 4, 11, 18 brought up to date
+
+Rows 4 and 11 (publish dry-run, crates.io names) are done: the family is published at 6.0.0-rc.97. Row 18 records the 2026-10-16 spike of a `MailStore` over persistant `KvOnRelational` (all 21 conformance cases pass on SQLite, PostgreSQL 16 and MySQL 8.4; a deadlock defect on PostgreSQL/MySQL batches with `Require(absent)` was reported to PersistAnt). Docs only; no code change.
+
 ### Changed (rc.97): no `#[allow(dead_code)]`
 
 CireSnave, 2026-10-16: *"That same general dislike applies to #[allow(dead_code)] as well.  That should also be a last resort."* All 15 are gone, each by deleting, using or gating the item. Deleted (never read): `EmailTransport.smtp_transport` (`new` still calls lettre's `relay` and returns its `SmtpConnection` error, then drops the result; behaviour is unchanged. `relay` accepted all 10 bad hosts tried on 2026-10-16, so that error branch is unreachable in practice and a bad SMTP host is only found at send time: a real check would be a separate hardening change), the SMTP and IMAP session `id`, `connected_at`, `tag`, `SmtpMessage.from`, `ServerMetrics.messages_delivered` (never incremented), and `UdpTransportImpl.circuit_breaker`. Used: `ServerMetrics`' remaining fields are now `pub` (they were written but unreadable behind `get_metrics`). Gated: `generate_subject` is `#[cfg(test)]`. The rest were stale: `MultiTransportRouter.our_entity_id` is read, `RoleLock` holds its file as `_file`, and a test-only unix stub was unneeded. No wire change.
