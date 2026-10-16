@@ -346,7 +346,17 @@ pub struct ConnectivityRecommendations {
     pub message: String,
 }
 
-/// Extension trait for creating NAT/firewall-friendly configurations
+/// Password the [`ConnectivityConfigExt`] builders put in the SMTP and IMAP settings. It is not a
+/// credential: no account has it, so a config that still carries it cannot authenticate.
+const PLACEHOLDER_PASSWORD: &str = "app_password";
+
+/// Extension trait for creating NAT/firewall-friendly configurations.
+///
+/// # Warning: the returned config has a placeholder password
+///
+/// Every builder fills `email.smtp.password` and `email.imap.password` with a placeholder and a
+/// guessed `<entity_name>@gmail.com` address. The caller must overwrite the username and both
+/// passwords with real credentials before connecting; until then every login is refused.
 pub trait ConnectivityConfigExt {
     /// Create a configuration optimized for NAT/firewall environments
     fn for_constrained_network(entity_name: &str, entity_type: &str) -> Config;
@@ -365,7 +375,7 @@ impl ConnectivityConfigExt for Config {
             entity_name,
             entity_type,
             format!("{}@gmail.com", entity_name.to_lowercase()),
-            "app_password",
+            PLACEHOLDER_PASSWORD,
         );
 
         // Optimize for polling-based operation
@@ -382,7 +392,7 @@ impl ConnectivityConfigExt for Config {
             entity_name,
             entity_type,
             format!("{}@gmail.com", entity_name.to_lowercase()),
-            "app_password",
+            PLACEHOLDER_PASSWORD,
         )
     }
 
@@ -395,7 +405,7 @@ impl ConnectivityConfigExt for Config {
             entity_name,
             entity_type,
             format!("{}@gmail.com", entity_name.to_lowercase()),
-            "app_password",
+            PLACEHOLDER_PASSWORD,
         )
     }
 }
@@ -426,6 +436,25 @@ mod tests {
         assert_eq!(config.entity.local_name, "test_entity");
         assert_eq!(config.router.max_retries, 5);
         assert_eq!(config.router.idle_timeout, 30);
+    }
+
+    #[test]
+    fn builders_leave_the_documented_placeholder_password() {
+        // The builders' contract: both mail passwords are the placeholder, so a caller that forgot
+        // to set real ones is detectable here rather than silently holding a made-up credential.
+        for config in [
+            Config::for_constrained_network("test_entity", "ai_model"),
+            Config::for_ipv6_only("test_entity", "ai_model"),
+            Config::with_backup_providers("test_entity", "ai_model"),
+        ] {
+            assert_eq!(config.email.smtp.password.expose(), PLACEHOLDER_PASSWORD);
+            assert_eq!(config.email.imap.password.expose(), PLACEHOLDER_PASSWORD);
+        }
+
+        // Positive control: a caller-set password replaces it.
+        let mut config = Config::for_ipv6_only("test_entity", "ai_model");
+        config.email.smtp.password = crate::types::SecretString::new("set-by-the-caller");
+        assert_ne!(config.email.smtp.password.expose(), PLACEHOLDER_PASSWORD);
     }
 
     #[test]

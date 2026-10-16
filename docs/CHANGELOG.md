@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Changed (rc.85): CodeQL hygiene, config and connectivity tests
+
+`config.rs` tests use per-run random passwords instead of literals. `connectivity.rs`: the `"app_password"` value the builders put in generated configs is now the named constant `PLACEHOLDER_PASSWORD`, `ConnectivityConfigExt` documents that it is a placeholder to be replaced, and a test pins the behaviour. No API change.
+
 ### Docs (rc.84): cutover readiness assessment and daemon contract + pilot (board 217)
 
 `docs/CUTOVER_READINESS_2026-10-15.md`: G1-G9 status at rc.81, lane usage of claude-peers against what Synapse covers, what the rc.33 soak did not test, side-by-side and rollback plan, verdict NOT READY with the shortest list to ready. `docs/superpowers/specs/2026-10-15-daemon-contract-and-pilot.md`: the synapsed start contract for AgentLife, the accepted delivery statement, and the 24 h pilot checklist with measures and stop conditions. Docs only.

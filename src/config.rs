@@ -427,7 +427,12 @@ mod tests {
 
     #[test]
     fn test_gmail_config() {
-        let config = Config::gmail_config("Eric", "human", "eric@gmail.com", "app_password");
+        let config = Config::gmail_config(
+            "Eric",
+            "human",
+            "eric@gmail.com",
+            format!("pw-{}", uuid::Uuid::new_v4()),
+        );
         assert_eq!(config.email.smtp.host, "smtp.gmail.com");
         assert_eq!(config.email.imap.host, "imap.gmail.com");
         assert!(config.validate().is_ok());
@@ -486,7 +491,7 @@ mod tests {
             "Test",
             "ai_model",
             "test@gmail.com",
-            "password",
+            format!("pw-{}", uuid::Uuid::new_v4()),
         );
         assert!(gmail_config.is_ok());
 
@@ -495,7 +500,7 @@ mod tests {
             "Test",
             "ai_model",
             "test@example.com",
-            "password",
+            format!("pw-{}", uuid::Uuid::new_v4()),
         );
         assert!(unknown_config.is_err());
     }
