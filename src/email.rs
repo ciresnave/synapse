@@ -9,6 +9,8 @@ use crate::{
 use std::collections::HashMap;
 use std::string::ToString;
 
+use lettre::SmtpTransport;
+
 /// Email transport for sending and receiving EMRP messages
 #[derive(Debug, Clone)]
 pub struct EmailTransport {
@@ -18,8 +20,10 @@ pub struct EmailTransport {
 impl EmailTransport {
     /// Create a new email transport
     pub async fn new(config: EmailConfig) -> Result<Self> {
-        // No SMTP transport is built: `send_message` refuses unconditionally (see its doc
-        // comment), so nothing would hold or use one.
+        // Fail fast on a host lettre cannot build a relay for. The transport itself is not kept:
+        // `send_message` refuses unconditionally (see its doc comment), so nothing would use one.
+        SmtpTransport::relay(&config.smtp.host)
+            .map_err(|e| EmailError::SmtpConnection(e.to_string()))?;
         Ok(Self { config })
     }
 
@@ -283,6 +287,18 @@ mod tests {
             !text.contains("Send failed") || text.contains("cannot produce a signed message"),
             "must not be the generic SMTP send-failure path: {text}"
         );
+    }
+
+    /// `new` still builds the lettre relay for the configured host and returns its error as
+    /// `SmtpConnection`, as before the dead-field removal. No input is known to trigger that error:
+    /// lettre's `relay` accepted every host tried on 2026-10-16 (empty, spaces, `not a host!`, `a..b`,
+    /// a URL, `host:port`, non-ASCII), deferring name checks to connect time, so the failure branch
+    /// cannot be asserted. This pins the success path (a host that builds still yields a transport).
+    #[tokio::test]
+    async fn new_builds_a_relay_check_for_a_good_host() {
+        let mut config = create_test_transport().config;
+        config.smtp.host = "localhost".to_string();
+        assert!(EmailTransport::new(config).await.is_ok());
     }
 
     fn create_test_transport() -> EmailTransport {
