@@ -6,7 +6,8 @@
 //! ("Could not automatically determine the process-level CryptoProvider"). Synapse validates
 //! email-verification tokens with it (`src/synapse/auth/mod.rs`), so a version bump that forgets
 //! the feature would build, pass every test that never decodes a token, and crash in use.
-//! `rust_crypto` is chosen because it is pure Rust (CIRESNAVE-EXPECTATIONS §5.1b).
+//! `aws_lc_rs` is chosen because `rust_crypto` pulls `rsa` (RUSTSEC-2023-0071, no fix) and
+//! `aws-lc-rs` is already in the tree through rustls.
 
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
