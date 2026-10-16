@@ -259,15 +259,6 @@ pub use synapse::models::{DiscoverabilityLevel, EntityType, ParticipantProfile};
 pub use synapse::api;
 pub use synapse::models;
 pub use synapse::services;
-pub use synapse::storage;
-
-// Enhanced auth-framework integration.
-// ⚠️ ASPIRATIONAL: this module is written against an auth-framework API that has never
-// been published (see its own header for the measured list of missing items). It is gated
-// behind `enhanced-auth`, which is OFF by default and DOES NOT BUILD when enabled. Left
-// in-tree, ungated-by-deletion, for the Synapse/FAM merge to dispose of.
-#[cfg(feature = "enhanced-auth")]
-pub mod auth_integration_enhanced;
 
 /// Initialize the Synapse system with logging (not available on WASM)
 #[cfg(not(target_arch = "wasm32"))]

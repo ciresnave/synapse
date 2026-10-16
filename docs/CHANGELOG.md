@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Breaking (rc.83): the `database`, `cache`, `auth` and `enhanced-auth` features are retired (board 199, 200)
+
+CireSnave 2026-10-15: *"Retire database and cache features."* and *"Retire the auth-framework feature."*
+
+**Removed features:** `database`, `cache`, `auth`, `enhanced-auth`. **Removed dependencies:** `sqlx`, `redis`, `auth-framework` (and the `sqlx` dev-dependency). **Removed API:** `synapse::storage` (`Cache`, `Database`, migrations), `synapse::services::{DiscoveryService, PrivacyManager, ParticipantRegistry, RegistryService}`, `synapse::api::{DiscoveryAPI, ParticipantAPI}`, `synapse::auth_integration_enhanced`. Kept: `synapse::services::{NoTrustSource, TrustSource, ...}`, `synapse::api::errors`, `synapse::models`, `synapse::synapse::auth::utils` (the key manager, which never used auth-framework). **Removed files:** `examples/auth_framework_v3_demo.rs`, `docs/AUTH_FRAMEWORK_INTEGRATION.md`, the tests that pinned the auth-framework manifest requirement (`auth_framework_is_current`, `integration_summary_matches_manifest`), and the `enhanced-auth` CI guard (`.github/enhanced_auth_guard.py` and its job; it was not a required check). `native` and `native-base` no longer include the removed features. Nothing in the workspace crates used them: `synapsed` stores in redb.
+
+**Measured** (lockfile packages, `Cargo.lock` at rc.82 against this change): 657 to 521, 136 removed, none added or upgraded; `sqlx`, `sqlx-mysql`, `redis`, `auth-framework` and `jsonwebtoken 10.4.0` leave. `rsa` remains only behind the `jwt` feature (default build only).
+
 ### Changed (rc.82): `synapsed-client` and `synapse-security` no longer pull `rsa`
 
 `jsonwebtoken` (whose `rust_crypto` backend brings `rsa`, RUSTSEC-2023-0071) moves from `core` to a new `jwt` feature; `native` is now `native-base` + `jwt`, so the default build is unchanged. `synapsed-client` and `synapse-security` depend on `synapse` with `default-features = false, features = ["native-base"]`, so `cargo tree -p synapsed-client -i rsa` is empty. `tests/jwt_backend.rs` requires `jwt`. No API change.
