@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Added (rc.95): `docs/PILOT_T0_RUNBOOK.md`
+
+The commands the PM runs at pilot T-0, in order, each with its expected output and rollback: install rc.93, stop the rc.33 restarttest daemon by pid, register the `synapsed` scheduled task, per-lane `--mcp-config` and `launch_args`, the first-message smoke test, and the STOP and rollback criteria. Docs only; names the Claude Code adapter as `synapse-claude-channel` (not `synapse-mcp-server`).
+
 ### Added (rc.94): `synapse list --cwd <dir> --repo <name>`
 
 The daemon's `/v1/list` already filtered on a role's self-reported cwd and repo; the CLI could not ask. Both flags are exact-match and percent-encoded; a role with no reported presence never matches. Additive, no wire change.
