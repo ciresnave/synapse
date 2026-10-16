@@ -27,7 +27,7 @@ jobs:
   # ten files were added afterwards and nothing was watching.
   #
   # A SEPARATE JOB RATHER THAN A STEP IN `build`, DELIBERATELY. `build` stands
-  # up a postgres service and a Rust toolchain before it does anything; a job
+  # up a Rust toolchain before it does anything; a job
   # that dies in an earlier step asserts nothing about the steps below it while
   # its name goes on claiming otherwise. This needs neither, runs in seconds,
   # and stays informative on a run where the toolchain or the service fails.
@@ -58,22 +58,6 @@ jobs:
   build:
     name: Build and Test
     runs-on: ubuntu-latest
-    
-    services:
-      postgres:
-        # SUP-008 (unpinned-images) WAIVED by PM ruling 2026-10-14: CI-only service container, no credential of ours reaches it.
-        image: postgres:13
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: synapse_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,8 +117,6 @@ jobs:
       # --workspace: a root package with members tests only itself by default, which would
       # silently drop crates/synapse-mcp-server's tests.
       run: cargo test --locked --workspace --verbose --no-fail-fast
-      env:
-        DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
     - name: Check formatting
       if: always()
@@ -158,22 +140,6 @@ jobs:
   model-agnostic-core:
     name: core is model-agnostic
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        # SUP-008 (unpinned-images) WAIVED by PM ruling 2026-10-14: CI-only service container, no credential of ours reaches it.
-        image: postgres:13
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: synapse_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -216,8 +182,6 @@ jobs:
     # legitimately differs from the committed Cargo.lock (it loses the adapters' entries).
     - name: The core builds and passes with no adapter present
       run: cargo test -p synapse --verbose --no-fail-fast
-      env:
-        DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
   # COVERAGE IS A SIGNAL, NOT A GATE (agreed with CireSnave 2026-10-03; a pilot with
   # mlmf and coderipper). This job is NOT a required check, sets no threshold, and
@@ -245,22 +209,6 @@ jobs:
     name: Coverage (signal, not a gate)
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
-    services:
-      postgres:
-        # SUP-008 (unpinned-images) WAIVED by PM ruling 2026-10-14: CI-only service container, no credential of ours reaches it.
-        image: postgres:13
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: synapse_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -295,8 +243,6 @@ jobs:
 
     - name: Run the tests under instrumentation
       run: cargo llvm-cov --locked --workspace --no-fail-fast --no-report
-      env:
-        DATABASE_URL: postgres://postgres:postgres@localhost:5432/synapse_test
 
     # The reports are built from the run above even if a test failed, so a
     # failure there still leaves a number, and the job still goes red.
