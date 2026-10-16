@@ -34,6 +34,7 @@ conditions. Cutover (dropping `server:claude-peers`) is **not** part of either p
    (from the `synapsectl` crate), `synapse-claude-channel`.
 2. **The wire probe passes.** It is an example, not a test (no `#[ignore]`). It needs the `claude` CLI on `PATH` (or `SYNAPSE_PROBE_CLAUDE`) and a logged-in account, builds the `tee_mcp` example itself, and starts a real `claude -p hi --model haiku` child that the test stops once the adapter has answered `initialize` (the test's own comments say it makes no model request and kills only that child; not verified by running it). It needs no dev-channel approval:
    `cargo run -p synapse-claude-channel --example wire_probe` (prints `wire probe: ok`; exit 1 with the reason otherwise)
+   **No CI job runs it: it needs a logged-in `claude`, and the self-hosted runner has no secrets (CIRESNAVE-EXPECTATIONS 5.1h). Its result is UNVERIFIED until someone runs it; CI only type-checks it (`clippy --all-targets` builds examples and, under the default `native` features, the two benches).**
    Expect *(source)*: `initialize` accepted at `2025-11-25`, `serverInfo.name` = `synapse`, and, only if
    the client sent `server/discover` (the assertion is conditional), that it was answered `-32022`. If it fails, stop: the live test would fail the same way.
 3. **The approval exists, or CireSnave will answer the dialog by hand.** `lane-restart`'s approval for
