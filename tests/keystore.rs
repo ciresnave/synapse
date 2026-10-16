@@ -39,7 +39,8 @@ fn init_refuses_when_an_account_exists() {
     let again = Keystore::init_account(dir.path(), "other");
     assert!(
         matches!(again, Err(KeystoreError::AccountExists)),
-        "{again:?}"
+        "a second init_account must fail with AccountExists (it succeeded: {})",
+        again.is_ok()
     );
     assert_eq!(std::fs::read(account_key_path(dir.path())).unwrap(), before);
 }
@@ -458,7 +459,11 @@ fn a_taken_account_name_is_refused_and_a_fresh_home_is_created() {
     std::fs::write(account_dir.join("name"), b"someone").unwrap();
     assert!(!account_key_path(taken.path()).exists());
     let got = Keystore::init_account(taken.path(), "acct");
-    assert!(matches!(got, Err(KeystoreError::AccountExists)), "{got:?}");
+    assert!(
+        matches!(got, Err(KeystoreError::AccountExists)),
+        "init_account over a taken name must fail with AccountExists (it succeeded: {})",
+        got.is_ok()
+    );
     assert_eq!(
         std::fs::read(account_dir.join("name")).unwrap(),
         b"someone",

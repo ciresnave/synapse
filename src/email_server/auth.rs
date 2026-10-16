@@ -234,8 +234,8 @@ impl AuthHandler for SynapseAuthHandler {
             match verify(password, &user.password_hash) {
                 Ok(is_valid) => return Ok(is_valid),
                 Err(_) => {
-                    // If bcrypt verification fails, log and deny access
-                    eprintln!("Password verification failed for user: {}", username);
+                    // If bcrypt verification fails (e.g. a malformed stored hash), deny access
+                    // without logging any identifier.
                     return Ok(false);
                 }
             }

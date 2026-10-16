@@ -432,8 +432,16 @@ async fn no_event_carries_a_payload_or_a_signature() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    for secret in [payload.as_str(), &sig_hex, &public_hex] {
-        assert!(!text.contains(secret), "leaked {secret}: {text}");
+    for (index, secret) in [payload.as_str(), &sig_hex, &public_hex]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(
+            !text.contains(secret),
+            "secret #{index} (length {}) leaked into the {}-byte event text",
+            secret.len(),
+            text.len()
+        );
     }
 }
 
