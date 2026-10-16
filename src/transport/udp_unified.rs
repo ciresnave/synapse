@@ -3,7 +3,6 @@
 
 use super::abstraction::*;
 use crate::{
-    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
     error::{Result, SynapseError},
     types::SecureMessage,
 };
@@ -34,9 +33,6 @@ pub struct UdpTransportImpl {
     status: Arc<RwLock<TransportStatus>>,
     /// Performance metrics
     metrics: Arc<RwLock<TransportMetrics>>,
-    /// Circuit breaker for reliability
-    #[allow(dead_code)] // Reserved for future reliability improvements and fault tolerance
-    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl UdpTransportImpl {
@@ -66,7 +62,6 @@ impl UdpTransportImpl {
             received_messages: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(RwLock::new(TransportStatus::Stopped)),
             metrics: Arc::new(RwLock::new(metrics)),
-            circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
         })
     }
 

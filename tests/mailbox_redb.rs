@@ -4,7 +4,7 @@
 
 mod mailbox_suite;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Duration;
@@ -297,7 +297,7 @@ fn the_store_file_is_owner_only() {
 }
 
 #[cfg(windows)]
-fn grant_everyone_read(path: &Path) {
+fn grant_everyone_read(path: &std::path::Path) {
     let status = std::process::Command::new("icacls")
         .arg(path)
         .arg("/grant")
@@ -307,10 +307,6 @@ fn grant_everyone_read(path: &Path) {
         .expect("icacls runs");
     assert!(status.success(), "icacls did not apply the grant");
 }
-
-#[cfg(unix)]
-#[allow(dead_code)]
-fn grant_everyone_read(_path: &Path) {}
 
 /// Review I2: an update of an existing id keeps the stored body, so it must also keep the stored
 /// body length; otherwise STATS (the max_bytes bound) drifts. MemoryStore and RedbStore must agree.

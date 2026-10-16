@@ -51,9 +51,7 @@ pub struct MultiTransportRouter {
     transport_selector: Arc<RwLock<TransportSelector>>,
     route_cache: Arc<RwLock<HashMap<String, (TransportRoute, Instant)>>>,
     cache_duration: Duration,
-    // ...existing code...
-    #[allow(dead_code)]
-    // Used for entity identification in routing decisions and future security features
+    // Stamped as `from_entity` on messages this router originates.
     our_entity_id: String,
     performance_monitoring: bool,
 }
@@ -68,7 +66,7 @@ impl MultiTransportRouter {
     /// Create a new multi-transport router with dependency injection
     pub async fn new_with_provider(
         config: Config,
-        #[allow(dead_code)] our_entity_id: String,
+        our_entity_id: String,
         provider: Box<dyn TransportProvider>,
     ) -> Result<Self> {
         info!(

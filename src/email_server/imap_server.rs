@@ -6,7 +6,6 @@ use crate::types::SecureMessage;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
@@ -53,15 +52,11 @@ pub struct ImapPerformanceConfig {
 
 #[derive(Debug)]
 struct ImapSession {
-    #[allow(dead_code)]
-    id: String,
     /// The peer's IP, the key the login guard uses.
     source: String,
     state: ImapState,
     authenticated_user: Option<String>,
     selected_mailbox: Option<String>,
-    #[allow(dead_code)]
-    tag: u32,
     idle_mode: bool,
 }
 
@@ -174,18 +169,10 @@ impl SynapseImapServer {
         let mut writer = write_half;
 
         let mut session = ImapSession {
-            id: format!(
-                "imap_{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
-            ),
             source,
             state: ImapState::NotAuthenticated,
             authenticated_user: None,
             selected_mailbox: None,
-            tag: 0,
             idle_mode: false,
         };
 
