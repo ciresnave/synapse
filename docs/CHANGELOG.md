@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.90): CI no longer starts postgres containers
+
+The `build`, `model-agnostic-core` and `coverage` jobs started a `postgres:13` service and set `DATABASE_URL`; no test reads it (git grep finds no `DATABASE_URL` in any source file), so both are gone. Job names are unchanged, so branch protection is unaffected. CI-only; no code change.
+
 ### Changed (rc.89): jsonwebtoken uses the `aws_lc_rs` backend; `rsa` leaves the tree
 
 `jsonwebtoken` (the `jwt` feature, which `native` enables) switches from `rust_crypto` to `aws_lc_rs`. `aws-lc-rs` was already in the tree through rustls, and `rust_crypto` was the only path to `rsa` (RUSTSEC-2023-0071, no fix), so `cargo tree --workspace -i rsa` is now empty and the advisory ignore in `.cargo/audit.toml` is removed along with a net 15 crates (rsa, p256, p384, ecdsa, elliptic-curve, pkcs1, num-bigint-dig, ...). No feature is added, removed or renamed and the JWT API is unchanged, so this is not Breaking; HS256 behaviour is pinned by `tests/jwt_backend.rs`.
