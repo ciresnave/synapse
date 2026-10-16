@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! S-1 follow-up (b): how long `Mailbox::depths` holds the mailbox, with roles at `max_messages`.
-//! A measurement, not a check: run with
-//! `cargo test --release --features mailbox-redb --test mailbox_depth_cost -- --ignored --nocapture`.
+//! A measurement, not a test (a bench with its own `main`; minutes long): run with
+//! `cargo bench --features mailbox-redb --bench mailbox_depth_cost`.
 //!
 //! Numbers taken at `e1468f7` on one Windows 11 laptop (this laptop, not a benchmark of any other
 //! machine): 1 KiB bodies, each role holding 10k messages with half of them leased, 100 samples each.
@@ -11,8 +11,7 @@
 //! - `fetch(max=1)` past the leased half: p50 46 ms, p99 63 ms.
 //!
 //! Re-take them with the command above before relying on them at another ref or on another machine.
-#![cfg(feature = "mailbox-redb")]
-
+#[path = "../tests/mailbox_suite/mod.rs"]
 mod mailbox_suite;
 
 use std::time::{Duration as StdDuration, Instant};
@@ -33,9 +32,7 @@ fn stats(label: &str, mut samples: Vec<StdDuration>) {
     );
 }
 
-#[test]
-#[ignore = "measurement; minutes long"]
-fn depth_scan_hold_time_at_max_messages() {
+fn main() {
     let dir = tempfile::tempdir().unwrap();
     let store = RedbStore::open(&dir.path().join("mailbox.redb")).unwrap();
     let config = MailConfig::default();

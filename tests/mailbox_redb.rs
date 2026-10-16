@@ -374,7 +374,7 @@ fn depths_read_no_body() {
 }
 
 /// Perf follow-up: `fetch` scans past a role's leased messages, and must not load their bodies. At 10k
-/// messages with half leased the scan cost 46 ms p50 on one laptop (`tests/mailbox_depth_cost.rs`).
+/// messages with half leased the scan cost 46 ms p50 on one laptop (`benches/mailbox_depth_cost.rs`).
 #[test]
 fn fetch_loads_only_the_bodies_it_hands_out() {
     let ids = suite::Ids::new();

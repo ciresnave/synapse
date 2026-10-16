@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.96): no test is `#[ignore]`d
+
+CireSnave, 2026-10-16: *"I really dislike #[ignore]d things.  If there is an issue, it should almost always be fixed.  #[ignore] should be a last resort."* The three ignored tests were not tests. `mailbox_depth_cost` and `mailbox_fetch_cost` are measurements: they are now `harness = false` benches (`cargo bench --features mailbox-redb --bench <name>`). `real_claude_code_wire_probe` needs the real `claude` CLI and a login, which CI does not have: it is now the `wire_probe` example (`cargo run -p synapse-claude-channel --example wire_probe`, exit 1 on failure). Docs that cited `--ignored` follow. No library or wire change.
+
 ### Added (rc.95): `docs/PILOT_T0_RUNBOOK.md`
 
 The commands the PM runs at pilot T-0, in order, each with its expected output and rollback: install rc.93, stop the rc.33 restarttest daemon by pid, register the `synapsed` scheduled task, per-lane `--mcp-config` and `launch_args`, the first-message smoke test, and the STOP and rollback criteria. Docs only; names the Claude Code adapter as `synapse-claude-channel` (not `synapse-mcp-server`).
