@@ -169,6 +169,12 @@ OverMind answers every signal it acts on with `POST /v1/launch-result`, echoing 
   "reason": "<short code, e.g. model-not-pinned, policy, spawn-failed, restore-lock-held>" }
 ```
 
+The four `outcome` strings are the whole vocabulary; anything else is `malformed`. `launching` and
+`unreachable` are Synapse's own `launch.state` values, never sent. A launcher's dry run launched
+nothing, so it sends no answer (the signal stays open and re-signals after `launch_wait`). Pinned by
+`launch::tests::only_the_four_spec_outcomes_parse`, `synapsectl/tests/mail.rs` (real daemon) and
+`synapsed_client::LaunchOutcome`.
+
 Synapse records it per role as `launch: {state, reason, since, attempts}` and shows it in `/v1/list`, so a
 **sender can see why its mail is not being read** (see C6).
 
