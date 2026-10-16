@@ -945,3 +945,47 @@ fn the_client_launch_methods_work_for_the_launcher_role_only() {
         "{refused:?}"
     );
 }
+
+/// `list --cwd/--repo` keep only roles whose self-reported presence matches exactly. The
+/// positive control is the unfiltered list, which holds both roles.
+#[test]
+fn list_filters_on_reported_cwd_and_repo() {
+    let home = Home::new();
+    home.ok(&["claim", "--role", "alpha"]);
+    home.ok(&["claim", "--role", "beta"]);
+    let daemon = synapsed_client::Daemon::connect(home.path()).expect("the daemon is running");
+    let cwd = r"C:\Projects\a b&c";
+    daemon
+        .call(
+            "alpha",
+            "/v1/heartbeat",
+            Some(&serde_json::json!({"cwd": cwd, "repo": "ra"})),
+        )
+        .expect("alpha reports presence");
+    daemon
+        .call(
+            "beta",
+            "/v1/heartbeat",
+            Some(&serde_json::json!({"cwd": "/other", "repo": "ra"})),
+        )
+        .expect("beta reports presence");
+
+    let ids = |args: &[&str]| -> Vec<String> {
+        let mut argv = vec!["list", "--role", "alpha"];
+        argv.extend_from_slice(args);
+        let mut ids: Vec<String> = json_lines(&home.ok(&argv))
+            .iter()
+            .map(|r| r["global_id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids(&[]), ["alpha@acct", "beta@acct"], "unfiltered control");
+    assert_eq!(ids(&["--cwd", cwd]), ["alpha@acct"]);
+    assert_eq!(ids(&["--repo", "ra"]), ["alpha@acct", "beta@acct"]);
+    assert_eq!(ids(&["--cwd", "/other", "--repo", "ra"]), ["beta@acct"]);
+    assert!(
+        ids(&["--cwd", r"C:\Projects"]).is_empty(),
+        "exact, not prefix"
+    );
+}

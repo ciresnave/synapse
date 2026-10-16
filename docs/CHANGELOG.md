@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Added (rc.94): `synapse list --cwd <dir> --repo <name>`
+
+The daemon's `/v1/list` already filtered on a role's self-reported cwd and repo; the CLI could not ask. Both flags are exact-match and percent-encoded; a role with no reported presence never matches. Additive, no wire change.
+
 ### Added (rc.93): spike 2, a `MailStore` over persistant-kv 0.4.32 `batch`
 
 `docs/spikes/persistant-kv-mailstore-batch.md` and its adapter (not compiled in-tree). `run_all` passes on `MemoryKv` and fails on `KvOnBlob` (no `batch`); 4x25 concurrent `next_seq` writes give 0 duplicates, and 74 of 100 with the `Require`s removed. No durable backend measured. Synapse stays on redb. Docs only.

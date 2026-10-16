@@ -86,10 +86,18 @@ enum Command {
         #[command(flatten)]
         role: RoleArg,
     },
-    /// List every role the daemon knows, with presence, one JSON object per line.
+    /// List every role the daemon knows, with presence, one JSON object per line. `--cwd` and
+    /// `--repo` keep only roles whose self-reported presence matches exactly (a role that reports
+    /// none never matches).
     List {
         #[command(flatten)]
         role: RoleArg,
+        /// Only roles whose reported working directory is exactly this.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Only roles whose reported repo is exactly this.
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -266,15 +274,46 @@ fn run(cli: Cli) -> Result<(), MailError> {
                 println!("{entry}");
             }
         }
-        Command::List { role } => {
+        Command::List { role, cwd, repo } => {
             let daemon = connect(&home, &role)?;
-            let reply = daemon.call(&role.role, "/v1/list", None)?;
+            let reply = daemon.call(
+                &role.role,
+                &list_path(cwd.as_deref(), repo.as_deref()),
+                None,
+            )?;
             for entry in reply["roles"].as_array().into_iter().flatten() {
                 println!("{entry}");
             }
         }
     }
     Ok(())
+}
+
+/// `/v1/list` with the filters as percent-encoded query parameters (paths hold `\`, `:` and `&`).
+fn list_path(cwd: Option<&str>, repo: Option<&str>) -> String {
+    let mut pairs = Vec::new();
+    for (key, value) in [("cwd", cwd), ("repo", repo)] {
+        if let Some(value) = value {
+            pairs.push(format!("{key}={}", percent_encode(value)));
+        }
+    }
+    if pairs.is_empty() {
+        "/v1/list".to_string()
+    } else {
+        format!("/v1/list?{}", pairs.join("&"))
+    }
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut out = String::new();
+    for &b in text.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Validate the role before it names a file or starts a daemon, then connect.
@@ -291,5 +330,20 @@ fn check_role(role: &RoleArg) -> Result<(), MailError> {
             "`{}` is not a role name: use [A-Za-z0-9_-], at most 64 characters",
             role.role
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_path_encodes_filters() {
+        assert_eq!(list_path(None, None), "/v1/list");
+        assert_eq!(
+            list_path(Some(r"C:\Projects\a b&c"), Some("r")),
+            "/v1/list?cwd=C%3A%5CProjects%5Ca%20b%26c&repo=r"
+        );
+        assert_eq!(list_path(None, Some("é")), "/v1/list?repo=%C3%A9");
     }
 }
