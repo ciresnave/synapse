@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.89): jsonwebtoken uses the `aws_lc_rs` backend; `rsa` leaves the tree
+
+`jsonwebtoken` (the `jwt` feature, which `native` enables) switches from `rust_crypto` to `aws_lc_rs`. `aws-lc-rs` was already in the tree through rustls, and `rust_crypto` was the only path to `rsa` (RUSTSEC-2023-0071, no fix), so `cargo tree --workspace -i rsa` is now empty and the advisory ignore in `.cargo/audit.toml` is removed along with a net 15 crates (rsa, p256, p384, ecdsa, elliptic-curve, pkcs1, num-bigint-dig, ...). No feature is added, removed or renamed and the JWT API is unchanged, so this is not Breaking; HS256 behaviour is pinned by `tests/jwt_backend.rs`.
+
 ### Changed (rc.88): launch-result outcome vocabulary pinned
 
 `synapsed-client` gains `LaunchOutcome` (`started`, `already-running`, `refused`, `failed`) and `Daemon::launch_result` takes it instead of a free string (**breaking** for callers; pre-release). The old doc comment listed `launching` and `unreachable`, which are daemon launch *states*, not outcomes; the daemon always rejected them. Tests pin the vocabulary on the daemon (unit) and client (real daemon) sides, and the spec says a dry run sends no answer.

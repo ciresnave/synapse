@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.88"
+version = "6.0.0-rc.89"
 
 [package]
 name = "synapse"
@@ -131,8 +131,9 @@ tempfile = { version = "3.0", optional = true }
 # Missing dependencies that are needed
 regex = { version = "1.10", optional = true }
 # From 10.x jsonwebtoken ships no crypto by default and PANICS at first use without a
-# backend (tests/jwt_backend.rs). rust_crypto: pure Rust (CIRESNAVE-EXPECTATIONS 5.1b).
-jsonwebtoken = { version = "11.1.0", optional = true, default-features = false, features = ["use_pem", "rust_crypto"] }
+# backend (tests/jwt_backend.rs). aws_lc_rs: already in the tree via rustls, and unlike
+# rust_crypto it does not pull `rsa` (RUSTSEC-2023-0071, no fix).
+jsonwebtoken = { version = "11.1.0", optional = true, default-features = false, features = ["use_pem", "aws_lc_rs"] }
 pem = { version = "4.0", optional = true }
 bcrypt = { version = "0.15", optional = true }
 hmac = { version = "0.12", optional = true }
@@ -392,9 +393,8 @@ email = [
     "dep:rustls-native-certs",
 ]
 
-# JWT support. Only tests/jwt_backend.rs uses it. Kept out of `core` and `native-base` because
-# jsonwebtoken's `rust_crypto` backend pulls `rsa` (RUSTSEC-2023-0071, no fix): a consumer that wants
-# the client crates without it depends on `native-base`, as `synapsed-client` does.
+# JWT support. Only tests/jwt_backend.rs uses it. Kept out of `core` and `native-base` so the client
+# crates (`synapsed-client` depends on `native-base`) do not carry jsonwebtoken at all.
 jwt = ["dep:jsonwebtoken"]
 
 # Full native platform support (the original working config but with updated deps)
