@@ -4,7 +4,7 @@
 
 mod mailbox_suite;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Duration;
@@ -297,7 +297,7 @@ fn the_store_file_is_owner_only() {
 }
 
 #[cfg(windows)]
-fn grant_everyone_read(path: &Path) {
+fn grant_everyone_read(path: &std::path::Path) {
     let status = std::process::Command::new("icacls")
         .arg(path)
         .arg("/grant")
