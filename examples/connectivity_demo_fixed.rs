@@ -29,20 +29,16 @@ async fn demo_different_config_types() -> Result<()> {
     info!("🧪 Test config created: {}", test_config.entity.local_name);
 
     // Gmail configuration example
-    let gmail_config =
-        Config::gmail_config("MyBot", "Tool", "mybot@gmail.com", "app_password_here");
+    let pw = format!("pw-{}", uuid::Uuid::new_v4());
+    let gmail_config = Config::gmail_config("MyBot", "Tool", "mybot@gmail.com", &pw);
     info!(
         "📧 Gmail config created: {}",
         gmail_config.entity.local_name
     );
 
     // Outlook configuration example
-    let outlook_config = Config::outlook_config(
-        "OfficeBot",
-        "Service",
-        "officebot@outlook.com",
-        "password_here",
-    );
+    let outlook_config =
+        Config::outlook_config("OfficeBot", "Service", "officebot@outlook.com", &pw);
     info!(
         "🏢 Outlook config created: {}",
         outlook_config.entity.local_name

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.86): CodeQL hygiene, examples
+
+The three `examples/` programs that passed literal passwords to the Gmail/Outlook config builders now use per-run random ones. Examples only; no library change.
 
 ### Changed (rc.85): CodeQL hygiene, config and connectivity tests
 

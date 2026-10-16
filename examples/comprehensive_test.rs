@@ -80,8 +80,9 @@ async fn test_configuration_variants() -> Result<()> {
 
     // Test different configuration methods
     let test_config = Config::for_testing();
-    let gmail_config = Config::gmail_config("Bot", "Tool", "bot@gmail.com", "pass");
-    let outlook_config = Config::outlook_config("Bot", "Service", "bot@outlook.com", "pass");
+    let pw = format!("pw-{}", uuid::Uuid::new_v4());
+    let gmail_config = Config::gmail_config("Bot", "Tool", "bot@gmail.com", &pw);
+    let outlook_config = Config::outlook_config("Bot", "Service", "bot@outlook.com", &pw);
 
     assert!(!test_config.entity.local_name.is_empty());
     assert_eq!(gmail_config.entity.local_name, "Bot");
