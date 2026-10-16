@@ -430,6 +430,23 @@ mod tests {
         assert_eq!(only(&later)["attempt"], 2, "{later:?}");
     }
 
+    /// The outcome vocabulary is exactly four wire strings (spec C4). `launching` and `unreachable`
+    /// are launch *states*, and a dry run answers nothing: none of them is an outcome.
+    #[test]
+    fn only_the_four_spec_outcomes_parse() {
+        for (s, want) in [
+            ("started", Outcome::Started),
+            ("already-running", Outcome::AlreadyRunning),
+            ("refused", Outcome::Refused),
+            ("failed", Outcome::Failed),
+        ] {
+            assert_eq!(Outcome::parse(s), Some(want), "{s}");
+        }
+        for s in ["launching", "unreachable", "dry-run", "Started", ""] {
+            assert_eq!(Outcome::parse(s), None, "{s:?}");
+        }
+    }
+
     #[test]
     fn failed_backs_off_then_the_last_failure_is_unreachable() {
         let mut table = Table::new(t(0));

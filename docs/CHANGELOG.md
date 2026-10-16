@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.88): launch-result outcome vocabulary pinned
+
+`synapsed-client` gains `LaunchOutcome` (`started`, `already-running`, `refused`, `failed`) and `Daemon::launch_result` takes it instead of a free string (**breaking** for callers; pre-release). The old doc comment listed `launching` and `unreachable`, which are daemon launch *states*, not outcomes; the daemon always rejected them. Tests pin the vocabulary on the daemon (unit) and client (real daemon) sides, and the spec says a dry run sends no answer.
+
 ### Changed (rc.87): CodeQL hygiene, log and assert messages
 
 The email server no longer prints the username when bcrypt verification fails (it still denies access). Three test assert messages (`keystore`, `transport_security_events`) report a discriminant or length instead of a Debug of a result or a secret value; the assertions are unchanged.

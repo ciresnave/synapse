@@ -138,6 +138,44 @@ pub struct Claimed {
     pub epoch: u64,
 }
 
+/// What a launcher says about one launch signal (`POST /v1/launch-result`). These four wire
+/// strings are the whole vocabulary: the daemon rejects any other `outcome` as `malformed`.
+/// `launching` and `unreachable` are the daemon's own per-role launch *states* shown in
+/// `/v1/list`; a launcher never sends them. A dry run launched nothing, so there is nothing to
+/// answer: leave the signal open and it is re-signalled after `launch_wait`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchOutcome {
+    /// The lane was started; wait for it to claim.
+    Started,
+    /// The lane is already running (a heartbeat gap, not a launch need); wait for it to claim.
+    AlreadyRunning,
+    /// Policy said no; terminal for this signal until the oldest message changes or it is cleared.
+    Refused,
+    /// The launch failed; the daemon retries with backoff, then marks the role `unreachable`.
+    Failed,
+}
+
+impl LaunchOutcome {
+    /// Every outcome, for tests that must cover the whole vocabulary.
+    pub const ALL: [LaunchOutcome; 4] = [
+        LaunchOutcome::Started,
+        LaunchOutcome::AlreadyRunning,
+        LaunchOutcome::Refused,
+        LaunchOutcome::Failed,
+    ];
+
+    /// The wire string the daemon parses.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LaunchOutcome::Started => "started",
+            LaunchOutcome::AlreadyRunning => "already-running",
+            LaunchOutcome::Refused => "refused",
+            LaunchOutcome::Failed => "failed",
+        }
+    }
+}
+
 /// A live connection to this home's daemon.
 pub struct Daemon {
     http: reqwest::blocking::Client,
@@ -296,9 +334,8 @@ impl Daemon {
         self.call(role, &path, None)
     }
 
-    /// `POST /v1/launch-result`: answer one signal. `outcome` is `launching`, `failed`, `refused`
-    /// or `unreachable`; `reason` a short code. A signal that is no longer open is the API error
-    /// `stale_signal`.
+    /// `POST /v1/launch-result`: answer one signal with a [`LaunchOutcome`]; `reason` is a short
+    /// code. A signal that is no longer open is the API error `stale_signal`.
     #[allow(clippy::too_many_arguments)]
     pub fn launch_result(
         &self,
@@ -307,7 +344,7 @@ impl Daemon {
         epoch: &str,
         attempt: u32,
         target_role: &str,
-        outcome: &str,
+        outcome: LaunchOutcome,
         reason: Option<&str>,
     ) -> Result<Value, MailError> {
         let mut body = serde_json::json!({
@@ -315,7 +352,7 @@ impl Daemon {
             "epoch": epoch,
             "attempt": attempt,
             "role": target_role,
-            "outcome": outcome,
+            "outcome": outcome.as_str(),
         });
         if let Some(reason) = reason {
             body["reason"] = Value::String(reason.to_string());

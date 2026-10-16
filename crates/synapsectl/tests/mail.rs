@@ -898,7 +898,7 @@ fn the_client_launch_methods_work_for_the_launcher_role_only() {
             &epoch,
             1,
             "beta",
-            "failed",
+            synapsed_client::LaunchOutcome::Failed,
             None,
         )
         .expect_err("no open signal");
@@ -906,6 +906,39 @@ fn the_client_launch_methods_work_for_the_launcher_role_only() {
         matches!(&stale, synapsed_client::MailError::Api { kind, .. } if kind == "stale_signal"),
         "{stale:?}"
     );
+    // The daemon parses every wire string the client can send: a valid outcome gets as far as the
+    // signal lookup (`stale_signal`), never `malformed`.
+    for outcome in synapsed_client::LaunchOutcome::ALL {
+        let err = daemon
+            .launch_result(
+                "agentlife-launcher",
+                "beta:none",
+                &epoch,
+                1,
+                "beta",
+                outcome,
+                None,
+            )
+            .expect_err("no open signal");
+        assert!(
+            matches!(&err, synapsed_client::MailError::Api { kind, .. } if kind == "stale_signal"),
+            "{} was not accepted by the daemon: {err:?}",
+            outcome.as_str()
+        );
+    }
+    // A name that is a launch *state* or a dry run is not an outcome: the daemon says `malformed`.
+    for bogus in ["launching", "unreachable", "dry-run"] {
+        let body = serde_json::json!({
+            "signal_id": "beta:none", "epoch": epoch, "attempt": 1, "role": "beta", "outcome": bogus,
+        });
+        let err = daemon
+            .call("agentlife-launcher", "/v1/launch-result", Some(&body))
+            .expect_err("not an outcome");
+        assert!(
+            matches!(&err, synapsed_client::MailError::Api { kind, .. } if kind == "malformed"),
+            "{bogus}: {err:?}"
+        );
+    }
     let refused = daemon.waiting("beta", 0).expect_err("not a launcher");
     assert!(
         matches!(&refused, synapsed_client::MailError::Api { kind, .. } if kind == "forbidden"),
