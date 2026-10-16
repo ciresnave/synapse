@@ -1,0 +1,249 @@
+//! SPIKE 2: a MailStore over persistant-kv 0.4.32 `batch` (Put/Delete/Require) and
+//! `ordered_scan_values`, run against synapse::mailbox::conformance. No process mutex, no undo journal:
+//! a write is optimistic (reads recorded as `Require`, writes buffered, committed by one `batch`, retried
+//! on `Ok(false)`).
+use chrono::{DateTime, Utc};
+use futures::executor::block_on;
+use persistant_kv::{BatchOp, KvBackend, KvError, KvOnBlob, MemoryKv};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use synapse::mailbox::{MailError, MailStore, MailTxn, StoreError, Stored};
+use synapse::roles::RolesState;
+
+struct KvMailStore<K: KvBackend> {
+    kv: K,
+    /// Mutation control: commit without the `Require`s.
+    skip_require: bool,
+}
+impl<K: KvBackend> KvMailStore<K> {
+    fn new(kv: K) -> Self {
+        Self { kv, skip_require: false }
+    }
+}
+
+fn se(e: KvError) -> StoreError {
+    StoreError(e.to_string())
+}
+fn js<T: serde::Serialize>(v: &T) -> Vec<u8> {
+    serde_json::to_vec(v).unwrap()
+}
+fn un<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T, StoreError> {
+    serde_json::from_slice(b).map_err(|e| StoreError(e.to_string()))
+}
+
+struct Txn<'a, K: KvBackend> {
+    kv: &'a K,
+    /// key -> value first observed from the store (None: absent). Becomes a `Require` at commit.
+    seen: RefCell<BTreeMap<String, Option<Vec<u8>>>>,
+    /// key -> pending write (None: delete). Read-your-writes.
+    pending: RefCell<BTreeMap<String, Option<Vec<u8>>>>,
+}
+impl<K: KvBackend> Txn<'_, K> {
+    fn get(&self, k: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        if let Some(p) = self.pending.borrow().get(k) {
+            return Ok(p.clone());
+        }
+        if let Some(s) = self.seen.borrow().get(k) {
+            return Ok(s.clone());
+        }
+        let v = block_on(self.kv.get(k)).map_err(se)?;
+        self.seen.borrow_mut().insert(k.to_string(), v.clone());
+        Ok(v)
+    }
+    fn set(&mut self, k: &str, v: Vec<u8>) -> Result<(), StoreError> {
+        self.get(k)?; // a blind overwrite still conflicts with a concurrent writer of the same key
+        self.pending.borrow_mut().insert(k.to_string(), Some(v));
+        Ok(())
+    }
+    fn del(&mut self, k: &str) -> Result<(), StoreError> {
+        self.get(k)?;
+        self.pending.borrow_mut().insert(k.to_string(), None);
+        Ok(())
+    }
+    /// Every (key, value) under `prefix`, ascending, from the store's snapshot overlaid with this
+    /// transaction's own writes. Each stored entry read is recorded for the commit's `Require`.
+    fn entries(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        let mut merged: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = block_on(self.kv.ordered_scan_values(prefix, after.as_deref(), 64)).map_err(se)?;
+            for (k, v) in page.entries {
+                self.seen.borrow_mut().entry(k.clone()).or_insert_with(|| Some(v.clone()));
+                merged.insert(k, Some(v));
+            }
+            match page.next {
+                Some(c) => after = Some(c),
+                None => break,
+            }
+        }
+        for (k, p) in self.pending.borrow().range(prefix.to_string()..) {
+            if !k.starts_with(prefix) {
+                break;
+            }
+            merged.insert(k.clone(), p.clone());
+        }
+        Ok(merged.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect())
+    }
+}
+fn qkey(role: &str, seq: u64) -> String {
+    format!("m/q/{role}/{seq:020}")
+}
+fn ikey(role: &str, id: &str) -> String {
+    format!("m/i/{role}/{id}")
+}
+fn akey(role: &str, id: &str) -> String {
+    format!("m/a/{role}/{id}")
+}
+
+impl<K: KvBackend> MailTxn for Txn<'_, K> {
+    fn stats(&self, role: &str) -> Result<(usize, u64), StoreError> {
+        let (mut n, mut b) = (0usize, 0u64);
+        self.scan(role, &mut |s| {
+            n += 1;
+            b += s.envelope.body.len() as u64;
+            true
+        })?;
+        Ok((n, b))
+    }
+    fn scan(&self, role: &str, visit: &mut dyn FnMut(&Stored) -> bool) -> Result<(), StoreError> {
+        for (_, v) in self.entries(&format!("m/q/{role}/"))? {
+            if !visit(&un::<Stored>(&v)?) {
+                break;
+            }
+        }
+        Ok(())
+    }
+    fn queued(&self, role: &str, id: &str) -> Result<Option<Stored>, StoreError> {
+        let Some(seq) = self.get(&ikey(role, id))? else { return Ok(None) };
+        let seq: u64 = un(&seq)?;
+        self.get(&qkey(role, seq))?.map(|v| un(&v)).transpose()
+    }
+    fn put(&mut self, role: &str, stored: Stored) -> Result<(), StoreError> {
+        let id = stored.envelope.message_id.clone();
+        if let Some(old) = self.get(&ikey(role, &id))? {
+            let old: u64 = un(&old)?;
+            if old != stored.seq {
+                self.del(&qkey(role, old))?;
+            }
+        }
+        self.set(&qkey(role, stored.seq), js(&stored))?;
+        self.set(&ikey(role, &id), js(&stored.seq))
+    }
+    fn remove(&mut self, role: &str, id: &str) -> Result<(), StoreError> {
+        if let Some(seq) = self.get(&ikey(role, id))? {
+            let seq: u64 = un(&seq)?;
+            self.del(&qkey(role, seq))?;
+            self.del(&ikey(role, id))?;
+        }
+        Ok(())
+    }
+    fn acked_at(&self, role: &str, id: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
+        self.get(&akey(role, id))?.map(|v| un(&v)).transpose()
+    }
+    fn record_ack(&mut self, role: &str, id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+        self.set(&akey(role, id), js(&at))
+    }
+    fn sweep_acked(&mut self, before: DateTime<Utc>) -> Result<usize, StoreError> {
+        let mut n = 0;
+        for (k, v) in self.entries("m/a/")? {
+            if un::<DateTime<Utc>>(&v)? < before {
+                self.del(&k)?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+    fn next_seq(&mut self) -> Result<u64, StoreError> {
+        let n = self.get("m/seq")?.map(|v| un::<u64>(&v)).transpose()?.unwrap_or(0) + 1;
+        self.set("m/seq", js(&n))?;
+        Ok(n)
+    }
+    fn roles(&self) -> Result<RolesState, StoreError> {
+        Ok(self.get("m/roles")?.map(|v| un(&v)).transpose()?.unwrap_or_default())
+    }
+    fn set_roles(&mut self, s: &RolesState) -> Result<(), StoreError> {
+        self.set("m/roles", js(s))
+    }
+}
+
+impl<K: KvBackend> MailStore for KvMailStore<K> {
+    fn write(
+        &self,
+        f: &mut dyn FnMut(&mut dyn MailTxn) -> Result<(), MailError>,
+    ) -> Result<(), MailError> {
+        for _ in 0..1000 {
+            let mut t = Txn { kv: &self.kv, seen: Default::default(), pending: Default::default() };
+            f(&mut t)?;
+            let mut ops: Vec<BatchOp> = Vec::new();
+            if !self.skip_require {
+                for (k, v) in t.seen.borrow().iter() {
+                    ops.push(BatchOp::require(k.clone(), v.clone()));
+                }
+            }
+            for (k, v) in t.pending.borrow().iter() {
+                ops.push(match v {
+                    Some(v) => BatchOp::put(k.clone(), v.clone()),
+                    None => BatchOp::delete(k.clone()),
+                });
+            }
+            if ops.is_empty() {
+                return Ok(());
+            }
+            if block_on(self.kv.batch(&ops)).map_err(|e| MailError::Store(se(e)))? {
+                return Ok(());
+            }
+        }
+        Err(MailError::Store(StoreError("write conflicted 1000 times".into())))
+    }
+}
+
+fn concurrent_seqs<K: KvBackend + Send + Sync + 'static>(store: KvMailStore<K>) -> usize {
+    let store = std::sync::Arc::new(store);
+    let hs: Vec<_> = (0..4)
+        .map(|_| {
+            let s = store.clone();
+            std::thread::spawn(move || {
+                (0..25)
+                    .map(|_| {
+                        let mut got = 0;
+                        s.write(&mut |t| {
+                            got = t.next_seq().map_err(MailError::Store)?;
+                            std::thread::sleep(std::time::Duration::from_millis(1)); // widen the read-to-commit window
+                            Ok(())
+                        })
+                        .unwrap();
+                        got
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut all: Vec<u64> = hs.into_iter().flat_map(|h| h.join().unwrap()).collect();
+    all.sort();
+    let total = all.len();
+    all.dedup();
+    total - all.len() // duplicates handed out
+}
+
+fn main() {
+    let which = std::env::args().nth(1).unwrap_or_else(|| "memorykv".into());
+    match which.as_str() {
+        "memorykv" => synapse::mailbox::conformance::run_all(|| KvMailStore::new(MemoryKv::new())),
+        "onblob" => synapse::mailbox::conformance::run_all(|| {
+            KvMailStore::new(KvOnBlob::new(persistant_blob::MemoryBlob::new()))
+        }),
+        "concurrent" => {
+            let d = concurrent_seqs(KvMailStore::new(MemoryKv::new()));
+            println!("with Require: {d} duplicate seqs of 100");
+            assert_eq!(d, 0);
+            let mut s = KvMailStore::new(MemoryKv::new());
+            s.skip_require = true;
+            let d = concurrent_seqs(s);
+            println!("MUTANT without Require: {d} duplicate seqs of 100");
+            assert!(d > 0, "mutant not caught: the concurrency test cannot see the missing Require");
+            return;
+        }
+        _ => panic!("memorykv|onblob|concurrent"),
+    }
+    println!("{which}: run_all passed");
+}
