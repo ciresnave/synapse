@@ -5,7 +5,6 @@
 pub mod api;
 pub mod models;
 pub mod services;
-pub mod storage;
 pub mod telemetry;
 pub mod transport;
 
