@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Added (rc.93): spike 2, a `MailStore` over persistant-kv 0.4.32 `batch`
+
+`docs/spikes/persistant-kv-mailstore-batch.md` and its adapter (not compiled in-tree). `run_all` passes on `MemoryKv` and fails on `KvOnBlob` (no `batch`); 4x25 concurrent `next_seq` writes give 0 duplicates, and 74 of 100 with the `Require`s removed. No durable backend measured. Synapse stays on redb. Docs only.
+
 ### Removed (rc.92): the stale `end_to_end_integration_test`
 
 `tests/end_to_end_integration_test.rs` (477 lines, `test = false` since it was found not to compile) is deleted. It imported `synapse::identity::{Identity, KeyPair}`, `synapse::services::trust_manager` and `Database::new_in_memory`, and called `UnifiedTransportManager::new_with_transports` and `TrustManager::trust_participant`; none of these exist at bec9ea5, so repairing it means designing that API, not fixing the test. Nothing else referenced it. Recover with `git show bec9ea5:tests/end_to_end_integration_test.rs`. `comprehensive_feature_test` stays excluded.
