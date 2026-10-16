@@ -61,8 +61,9 @@ async fn test_configurations() -> Result<()> {
     // Test different configuration methods
     let test_config = Config::for_testing();
     let entity_config = Config::default_for_entity("TestBot", "AiModel");
-    let gmail_config = Config::gmail_config("Bot", "Tool", "test@gmail.com", "pass");
-    let outlook_config = Config::outlook_config("Bot", "Service", "test@outlook.com", "pass");
+    let pw = format!("pw-{}", uuid::Uuid::new_v4());
+    let gmail_config = Config::gmail_config("Bot", "Tool", "test@gmail.com", &pw);
+    let outlook_config = Config::outlook_config("Bot", "Service", "test@outlook.com", &pw);
 
     // Verify configurations are valid
     assert!(!test_config.entity.local_name.is_empty());
