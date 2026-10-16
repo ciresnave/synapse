@@ -344,6 +344,22 @@ jobs:
       
       - name: Run security audit
         run: cargo audit
+
+      - name: No crate in the workspace depends on rsa (RUSTSEC-2023-0071)
+        # `rsa` left the tree in rc.89 (jsonwebtoken `aws_lc_rs`). `cargo audit` would
+        # only notice if its ignore were still needed; this fails when anything
+        # pulls `rsa` back in. Absence is `cargo tree` exiting non-zero with "did not
+        # match any packages", so any other failure is not read as absence.
+        shell: bash
+        run: |
+          set -u
+          cargo tree --locked --workspace -i aws-lc-rs > /dev/null   # positive control: the query works
+          for flags in "" "--all-features"; do
+            if out=$(cargo tree --locked --workspace $flags -i rsa 2>&1); then
+              echo "rsa is in the dependency tree ($flags):"; echo "$out"; exit 1
+            fi
+            case "$out" in *"did not match any packages"*) ;; *) echo "unexpected cargo tree failure ($flags): $out"; exit 1 ;; esac
+          done
   
   build-docker:
     name: Build Docker Image

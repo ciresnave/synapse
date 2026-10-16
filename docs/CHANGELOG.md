@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.91): CI guard that `rsa` stays out of the tree
+
+The `Security Audit` job gains a step that fails if `cargo tree --workspace -i rsa` (default and `--all-features`) finds anything. Absence is read only from cargo's "did not match any packages" error, with `-i aws-lc-rs` as the positive control. Checked by pointing the same loop at `ron`, which is present: it prints the tree and fails. CI-only.
+
 ### Changed (rc.90): CI no longer starts postgres containers
 
 The `build`, `model-agnostic-core` and `coverage` jobs started a `postgres:13` service and set `DATABASE_URL`; no test reads it (git grep finds no `DATABASE_URL` in any source file), so both are gone. Job names are unchanged, so branch protection is unaffected. CI-only; no code change.
