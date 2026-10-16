@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Removed (rc.92): the stale `end_to_end_integration_test`
+
+`tests/end_to_end_integration_test.rs` (477 lines, `test = false` since it was found not to compile) is deleted. It imported `synapse::identity::{Identity, KeyPair}`, `synapse::services::trust_manager` and `Database::new_in_memory`, and called `UnifiedTransportManager::new_with_transports` and `TrustManager::trust_participant`; none of these exist at bec9ea5, so repairing it means designing that API, not fixing the test. Nothing else referenced it. Recover with `git show bec9ea5:tests/end_to_end_integration_test.rs`. `comprehensive_feature_test` stays excluded.
+
 ### Changed (rc.91): CI guard that `rsa` stays out of the tree
 
 The `Security Audit` job gains a step that fails if `cargo tree --workspace -i rsa` (default and `--all-features`) finds anything. Absence is read only from cargo's "did not match any packages" error, with `-i aws-lc-rs` as the positive control. Checked by pointing the same loop at `ron`, which is present: it prints the tree and fails. CI-only.

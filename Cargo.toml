@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "6.0.0-rc.91"
+version = "6.0.0-rc.92"
 
 [package]
 name = "synapse"
@@ -276,31 +276,29 @@ required-features = ["minimal", "http"]
 # transport, not a typo fix. Recoverable with `git show <ref>:examples/...`.
 
 # ---------------------------------------------------------------------------
-# Two integration tests are excluded from `cargo test` with `test = false`.
+# One integration test is excluded from `cargo test` with `test = false`.
 #
-# They do not compile, and not because of a typo: they target an API this crate
-# no longer has. `comprehensive_feature_test` still refers to `EmrpRouter` --
-# the pre-rename name, from before EMRP became Synapse in v1.1.0 -- plus
-# `SimpleMessage`, `MessageType`, `Config::gmail`, `Config::for_entity` and ~12
-# `ParticipantProfile` fields that do not exist. `end_to_end_integration_test`
-# refers to `Database::new_in_memory`, `UnifiedTransportManager::new_with_transports`,
-# `TrustManager::trust_participant` and six `TransportMetrics` fields that do not
-# exist. 137 and 44 errors respectively.
+# `comprehensive_feature_test` does not compile, and not because of a typo: it targets
+# an API this crate no longer has. It still refers to `EmrpRouter` -- the pre-rename
+# name, from before EMRP became Synapse in v1.1.0 -- plus `SimpleMessage`,
+# `MessageType`, `Config::gmail`, `Config::for_entity` and ~12 `ParticipantProfile`
+# fields that do not exist (137 errors).
 #
-# `cargo test` builds every test target, so these two kept the 102 tests that DO
-# pass from ever running in CI. Excluding them is not a judgement that they are
-# worthless -- they encode intent about a participant/trust API -- but repairing
-# them means deciding what that API should be, which is a merge decision and not
-# a repair. They remain in the tree, compile-checked by nothing, and are listed
-# as aspirational in CAPABILITY_INVENTORY.md.
+# `cargo test` builds every test target, so it kept the tests that DO pass from ever
+# running in CI. Excluding it is not a judgement that it is worthless -- it encodes
+# intent about a participant/trust API -- but repairing it means deciding what that
+# API should be, which is a merge decision and not a repair. It stays in the tree,
+# compile-checked by nothing, and is listed as aspirational in CAPABILITY_INVENTORY.md.
+#
+# `end_to_end_integration_test` was deleted in rc.92 on the same grounds: it imported
+# `synapse::identity::{Identity, KeyPair}`, `synapse::services::trust_manager` and
+# `Database::new_in_memory`, none of which resolve, and it used
+# `UnifiedTransportManager::new_with_transports` and `TrustManager::trust_participant`,
+# which do not exist. Nothing else referenced it. `git show bec9ea5:tests/end_to_end_integration_test.rs`
+# recovers it.
 [[test]]
 name = "comprehensive_feature_test"
 path = "tests/comprehensive_feature_test.rs"
-test = false
-
-[[test]]
-name = "end_to_end_integration_test"
-path = "tests/end_to_end_integration_test.rs"
 test = false
 
 [[test]]
