@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 6.0.0 release-candidate series
 
+### Docs (rc.84): cutover readiness assessment and daemon contract + pilot (board 217)
+
+`docs/CUTOVER_READINESS_2026-10-15.md`: G1-G9 status at rc.81, lane usage of claude-peers against what Synapse covers, what the rc.33 soak did not test, side-by-side and rollback plan, verdict NOT READY with the shortest list to ready. `docs/superpowers/specs/2026-10-15-daemon-contract-and-pilot.md`: the synapsed start contract for AgentLife, the accepted delivery statement, and the 24 h pilot checklist with measures and stop conditions. Docs only.
+
 ### Breaking (rc.83): the `database`, `cache`, `auth` and `enhanced-auth` features are retired (board 199, 200)
 
 CireSnave 2026-10-15: *"Retire database and cache features."* and *"Retire the auth-framework feature."*
