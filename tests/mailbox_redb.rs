@@ -2,13 +2,11 @@
 //! The mailbox suite (M4) run against `RedbStore`, plus durability and storage-layout checks.
 #![cfg(feature = "mailbox-redb")]
 
-mod mailbox_suite;
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Duration;
-use mailbox_suite as suite;
+use synapse::mailbox::conformance as suite;
 use synapse::mailbox::{
     Enqueued, Lease, MailConfig, MailError, MailStore, Mailbox, RedbStore, Stored,
 };

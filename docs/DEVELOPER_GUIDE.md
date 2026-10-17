@@ -54,7 +54,7 @@ synapse::mailbox::conformance::run_all(synapse::mailbox::MemoryStore::new); // y
 ```
 
 Each case takes a closure returning a fresh, empty store. A case is added only when the mailbox gains a
-guarantee, and a case is never loosened to let a store pass. `tests/mailbox_suite/` runs the suite against the
+guarantee, and a case is never loosened to let a store pass. `tests/mailbox.rs` and `tests/mailbox_redb.rs` run the suite against the
 memory and redb stores.
 
 ## Making a change

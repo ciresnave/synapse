@@ -5,13 +5,11 @@
 //! Prints p50/p99 over 100 calls for roles of 1k, 5k and 10k messages with half of them leased
 //! (1 KiB bodies). Numbers go in the PR that changed the scan, with the ref and machine; a number
 //! without its ref says nothing about the present.
-#[path = "../tests/mailbox_suite/mod.rs"]
-mod mailbox_suite;
 
 use std::time::Instant;
 
 use chrono::Duration;
-use mailbox_suite as suite;
+use synapse::mailbox::conformance as suite;
 use synapse::mailbox::{MailConfig, Mailbox, RedbStore};
 
 fn main() {

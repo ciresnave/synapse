@@ -11,13 +11,11 @@
 //! - `fetch(max=1)` past the leased half: p50 46 ms, p99 63 ms.
 //!
 //! Re-take them with the command above before relying on them at another ref or on another machine.
-#[path = "../tests/mailbox_suite/mod.rs"]
-mod mailbox_suite;
 
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::Duration;
-use mailbox_suite as suite;
+use synapse::mailbox::conformance as suite;
 use synapse::mailbox::{MailConfig, Mailbox, RedbStore};
 
 fn stats(label: &str, mut samples: Vec<StdDuration>) {

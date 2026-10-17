@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The mailbox suite (M4) run against `MemoryStore`, one named test per case.
 
-mod mailbox_suite;
-
-use mailbox_suite as suite;
+use synapse::mailbox::conformance as suite;
 use synapse::mailbox::{MailError, MailStore, MemoryStore, Stored};
 
 macro_rules! cases {

@@ -9,14 +9,12 @@
 //! apart (review focus 4).
 #![cfg(feature = "mailbox-redb")]
 
-mod mailbox_suite;
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Duration, Utc};
-use mailbox_suite as suite;
+use synapse::mailbox::conformance as suite;
 use synapse::mailbox::{MailConfig, MailError, MailStore, MailTxn, Mailbox, RedbStore};
 
 const LANE: &str = "lane@acct";
