@@ -16,7 +16,7 @@ the definition can be checked; this page is not a design document. Alphabetical.
 | **Home** | The daemon's data directory (mailbox file, keys, start diagnostics). Refused when its permissions are too open (`permissions_too_open`). | `crates/synapsed` |
 | **Instance id** | The identifier a daemon proves to the CLI before the CLI sends any credential. | `crates/synapsed` |
 | **Lease** | A time-limited claim on a fetched message. Defaults: 60 s, minimum 5 s, maximum 15 minutes. | `MailConfig` in `src/mailbox.rs` |
-| **`MailStore`** | The storage trait under the mailbox; every mailbox operation is one atomic write transaction on it. Implemented in memory and on redb. | `src/mailbox.rs`, `tests/mailbox_suite/mod.rs` |
+| **`MailStore`** | The storage trait under the mailbox; every mailbox operation is one atomic write transaction on it. Implemented in memory and on redb. | `src/mailbox.rs`, `src/mailbox/conformance.rs` |
 | **Mailbox** | Per-role durable mail that waits for the role across session restarts, daemon restarts and crashes. Retention deletes acked history only (default 7 days), never undelivered mail. | `src/mailbox.rs` |
 | **MCP server** | `synapse-mcp-server`: the generic MCP adapter over `synapsed`, served over stdio. | `crates/synapse-mcp-server` |
 | **redb** | The embedded database under the daemon's mailbox (`mailbox-redb`). Its on-disk file carries Synapse's own `FORMAT` stamp (currently 2). | `src/mailbox.rs` |

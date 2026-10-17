@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info};
+use tracing::info;
 
 #[cfg(feature = "mdns")]
 use auto_discovery::{DiscoveryConfig, ProtocolType, ServiceDiscovery, ServiceInfo, ServiceType};
@@ -84,8 +84,6 @@ pub struct DiscoveryTransport {
     discovery: Arc<Mutex<Option<ServiceDiscovery>>>,
     discovered_services: Arc<RwLock<HashMap<String, DiscoveredService>>>,
     metrics: Arc<RwLock<TransportMetrics>>,
-    #[expect(dead_code, reason = "initialised and never read or updated")]
-    last_discovery: Arc<RwLock<Instant>>,
     running: Arc<RwLock<bool>>,
 }
 
@@ -107,7 +105,6 @@ impl DiscoveryTransport {
                 reliability_score: 0.0,
                 ..TransportMetrics::default()
             })),
-            last_discovery: Arc::new(RwLock::new(Instant::now())),
             running: Arc::new(RwLock::new(false)),
         };
 
@@ -165,60 +162,6 @@ impl DiscoveryTransport {
     #[cfg(not(feature = "mdns"))]
     async fn initialize_discovery(&self) -> Result<()> {
         tracing::warn!("mDNS discovery not available - compiled without mdns feature");
-        Ok(())
-    }
-
-    #[expect(
-        dead_code,
-        reason = "no caller; the background loop in start() calls the auto-discovery crate directly"
-    )]
-    async fn discover_services(&self) -> Result<()> {
-        #[cfg(feature = "mdns")]
-        {
-            if let Some(discovery) = self.discovery.lock().await.as_ref() {
-                debug!("Discovering services...");
-
-                match discovery.discover_services(Some(ProtocolType::Mdns)).await {
-                    Ok(services) => {
-                        let mut discovered = self.discovered_services.write().await;
-                        let now = Instant::now();
-
-                        for service in services {
-                            let discovered_service = DiscoveredService {
-                                name: service.name().to_string(),
-                                service_type: service.service_type().to_string(),
-                                host: service.address().to_string(),
-                                port: service.port(),
-                                addresses: vec![service.address()],
-                                txt_records: HashMap::new(), // auto-discovery doesn't expose txt records directly
-                                last_seen: now,
-                            };
-
-                            debug!(
-                                "Discovered service: {} at {}:{}",
-                                discovered_service.name,
-                                discovered_service.host,
-                                discovered_service.port
-                            );
-
-                            discovered.insert(discovered_service.name.clone(), discovered_service);
-                        }
-
-                        // Update metrics - skip last_updated as it's not available in TransportMetrics
-                        info!("Discovery found {} services", discovered.len());
-                    }
-                    Err(e) => {
-                        error!("Discovery failed: {}", e);
-                        return Err(SynapseError::TransportError(format!(
-                            "Discovery failed: {}",
-                            e
-                        )));
-                    }
-                }
-            }
-        }
-
-        *self.last_discovery.write().await = Instant::now();
         Ok(())
     }
 

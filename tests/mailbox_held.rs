@@ -6,14 +6,12 @@
 //! rc.26 database is atomic, idempotent and refuses a format it does not know.
 #![cfg(feature = "mailbox-redb")]
 
-mod mailbox_suite;
-
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Duration, Utc};
-use mailbox_suite as suite;
+use synapse::mailbox::conformance as suite;
 use synapse::mailbox::{MailConfig, MailStore, Mailbox, MemoryStore, RedbStore};
 
 const ADDR: &str = "lane@acct";

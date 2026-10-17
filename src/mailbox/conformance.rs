@@ -12,11 +12,9 @@
 //! its files until the process ends). A failing case panics; [`run_all`] runs every case and names
 //! the one that failed.
 //!
-//! ```ignore
-//! #[test]
-//! fn my_store_is_a_mailbox() {
-//!     synapse::mailbox::conformance::run_all(|| MyStore::open_fresh());
-//! }
+//! ```
+//! // A store of your own goes where `MemoryStore` does; `MemoryStore::new()` is a fresh store.
+//! synapse::mailbox::conformance::run_all(|| synapse::mailbox::MemoryStore::new());
 //! ```
 
 use super::{Acked, Depth, Enqueued, Envelope, MailConfig, MailError, MailStore, Mailbox, Stored};

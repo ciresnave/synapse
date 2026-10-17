@@ -89,11 +89,7 @@
 //! a round, not the number of rounds.
 
 use super::abstraction::*;
-use crate::{
-    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
-    error::Result,
-    types::SecureMessage,
-};
+use crate::{error::Result, types::SecureMessage};
 use async_trait::async_trait;
 use serde_json;
 use std::{
@@ -301,12 +297,6 @@ struct Queued {
 
 /// TCP Transport implementation
 pub struct TcpTransportImpl {
-    /// Local listening port
-    #[expect(
-        dead_code,
-        reason = "stored and never read; the bound socket in `listener` is the source of truth"
-    )]
-    listen_port: u16,
     /// TCP listener (if acting as server). `Arc` so the accept loop spawned by
     /// `start_server` serves THIS listener instead of binding a second one.
     listener: Option<Arc<TcpListener>>,
@@ -331,12 +321,6 @@ pub struct TcpTransportImpl {
     status: Arc<RwLock<TransportStatus>>,
     /// Performance metrics
     metrics: Arc<RwLock<TransportMetrics>>,
-    /// Circuit breaker for reliability
-    #[expect(
-        dead_code,
-        reason = "constructed and never consulted -- the TCP path has no circuit breaking; see CAPABILITY_INVENTORY.md"
-    )]
-    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl TcpTransportImpl {
@@ -383,7 +367,6 @@ impl TcpTransportImpl {
         };
 
         Ok(Self {
-            listen_port,
             listener,
             connection_timeout,
             max_message_size,
@@ -393,7 +376,6 @@ impl TcpTransportImpl {
             received_messages: Arc::new(Mutex::new(Vec::new())),
             status: Arc::new(RwLock::new(TransportStatus::Stopped)),
             metrics: Arc::new(RwLock::new(metrics)),
-            circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
         })
     }
 
