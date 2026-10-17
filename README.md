@@ -383,7 +383,6 @@ while let Some(alert) = alerts.recv().await {
 
 ### Core Concepts
 
-- **[Complete Architecture](docs/SYNAPSE_COMPLETE_ARCHITECTURE.md)**: System architecture and design
 - **[Transport Layer](docs/API_REFERENCE.md#-transport-system)**: Multi-transport architecture
 - **[Security Model](docs/API_REFERENCE.md#-error-handling)**: Encryption and authentication
 - **[Email Integration](docs/API_REFERENCE.md#-transport-system)**: SMTP/IMAP server capabilities
@@ -474,56 +473,33 @@ We welcome contributions! See the [Developer Guide](docs/DEVELOPER_GUIDE.md) for
 ### Development Setup
 
 ```bash
-git clone https://github.com/ai-dev-team/message-routing-system
-cd message-routing-system
-cargo build
-cargo test
-cargo run --example email_integration_test
+git clone https://github.com/ThinkersJournal/synapse
+cd synapse
+cargo build --locked --workspace
+cargo test --locked --workspace --no-fail-fast
 ```
 
-### Project Structure
-
-```text
-src/
-├── lib.rs              # Main library with overview
-├── types.rs            # Core types and message definitions
-├── identity.rs         # Name resolution and identity management
-├── router.rs           # Basic message routing
-├── router_enhanced.rs  # Multi-transport enhanced router
-├── email_server/       # SMTP/IMAP server implementation
-├── transport/          # Multi-transport layer
-├── crypto.rs           # Encryption and signatures
-└── config.rs           # Configuration management
-
-examples/               # Comprehensive examples
-docs/                   # Detailed documentation
-tests/                  # Integration tests
-```
+The layout, the CI commands and the mailbox contract are in the [Developer Guide](docs/DEVELOPER_GUIDE.md).
 
 ## � Documentation and Resources
 
 ### 📖 Core Documentation
 
-- **[Developer Guide](docs/DEVELOPER_GUIDE.md)** - Comprehensive development guide with step-by-step tutorials
+- **[Developer Guide](docs/DEVELOPER_GUIDE.md)** - Build, test, layout and the mailbox contract
 - **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation with examples
-- **[Configuration Guide](docs/CONFIGURATION_GUIDE.md)** - All configuration options and settings
-- **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Common issues and solutions
+- **[Configuration Guide](docs/CONFIGURATION_GUIDE.md)** - Environment variables, mailbox limits and the files in the home
+- **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Daemon will not start, refused calls, messages that do not arrive
 - **[New Features](docs/NEW_FEATURES.md)** - Latest features and capabilities in v1.0.0
 
 ### 🏗️ Architecture and Design
 
-- **[Complete Architecture](docs/SYNAPSE_COMPLETE_ARCHITECTURE.md)** - System architecture and design
 - **[Deployment Guide](docs/DEPLOYMENT_GUIDE.md)** - Production deployment instructions
-- **[Advanced Monitoring](docs/ADVANCED_MONITORING.md)** - Monitoring and observability
 - **[Security Audit](security/TRUST_SYSTEM_SECURITY_AUDIT.md)** - Security analysis and trust system
 
 ### 🧪 Specialized Features
 
 - **[LLM Discovery Guide](docs/LLM_DISCOVERY_GUIDE.md)** - AI agent discovery and communication
-- **[Identity Resolution](docs/IDENTITY_RESOLUTION_TROUBLESHOOTING.md)** - Name resolution troubleshooting
-- **[Unknown Name Handling](docs/UNKNOWN_NAME_HANDLING_COOKBOOK.md)** - Handling unknown entities
 - **[Circuit Breaker System](docs/CIRCUIT_BREAKER_SYSTEM.md)** - Fault tolerance patterns
-- **[OAuth Authentication](docs/OAUTH_AUTHENTICATION.md)** - Authentication integration
 - **[WASM Support](docs/WASM_README.md)** - WebAssembly and browser support
 
 ### 🚀 Examples and Tutorials
@@ -540,7 +516,7 @@ tests/                  # Integration tests
 
 - **[New Features](docs/NEW_FEATURES.md)** - Latest features and capabilities added in v1.0.0
 - **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation with examples
-- **[Developer Guide](docs/DEVELOPER_GUIDE.md)** - Development tutorials and best practices
+- **[Developer Guide](docs/DEVELOPER_GUIDE.md)** - Build, test and layout
 
 ## �📄 License
 
