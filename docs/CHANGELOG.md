@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.100): docs staleness pass (ROADMAP row 12)
+
+Five pages for retired features are deleted: `OAUTH_AUTHENTICATION` (the `auth` feature went in rc.83), `SYNAPSE_COMPLETE_ARCHITECTURE` and `ADVANCED_MONITORING` (trust, staking, alert manager), `UNKNOWN_NAME_HANDLING_COOKBOOK` and `IDENTITY_RESOLUTION_TROUBLESHOOTING` (approval and contact-lookup API). For each, the CamelCase types in its Rust samples were checked against `src/`, `crates/`, `examples/` and `tests/`: 0.58 to 0.82 of them are absent, and `AlertManager`, `AuditLogger`, `OAuthProvider`, `ContactLookupRequest`, `ApprovalAction`, `ContactHint` and `BlockchainClient` have 0 hits. `TROUBLESHOOTING`, `CONFIGURATION_GUIDE` and `DEVELOPER_GUIDE` are rewritten to the daemon, CLI and MCP surface (each states what it was read from). `NEW_FEATURES`, `LLM_DISCOVERY_GUIDE` and `CIRCUIT_BREAKER_SYSTEM` stay: their modules exist. README doc links to the deleted pages are removed and its Development Setup (a clone URL and example that did not exist) is corrected. Old text: `git show 519bd52:docs/<NAME>.md`. Docs only; no code change.
+
 ### Changed (rc.99): pilot runbook s3b/s5 no longer assume a spec edit survives a restart
 
 OverMind#150 (read from `agentlife@e609da5`, not run): `lane-restart` rebuilds from `.lane-state/<role>.json` and overwrites `<role>.launch.json`, so the runbook's "edit `launch_args` and restart" rollback did nothing. Section 3b now requires the hand launch (it records the flags in the state file) and a read-back of both files; section 3 rollback and section 5 step 1 hand-launch once with the old flags. The install version is now rc.97 (what the PM installs; the old text said rc.93). Docs only.
