@@ -18,8 +18,9 @@ variable or a compiled-in default.
 | `SYNAPSE_ADDR` | `synapse`, `synapsed` | the daemon's address; **loopback only** (the daemon refuses any other) | `127.0.0.1:7920` |
 | `SYNAPSE_ROLE` | `synapse`, both adapters | the default for `--role` | none; an adapter without `--role` or `SYNAPSE_ROLE` exits with status 2 |
 | `SYNAPSE_LAUNCHER_ROLES` | `synapsed` | comma-separated roles allowed to read the launch signals (`GET /v1/waiting`); empty means lane launch on message is off | empty (off) |
+| `SYNAPSE_ALERT_ROLES` | `synapsed` | comma-separated roles that receive security alerts as mail from `daemon:alerts@<account>` (a threshold of 10 events in 5 minutes for one kind, surface and subject; digests of held alerts, at most one alert per kind and surface per 15 minutes). A role that has not claimed yet gets them when it does; a body is untrusted text like any other | empty (off: nothing changes) |
 
-An unparsable `SYNAPSE_ADDR` or a bad role name in `SYNAPSE_LAUNCHER_ROLES` makes `synapsed` exit with
+An unparsable `SYNAPSE_ADDR` or a bad role name in `SYNAPSE_LAUNCHER_ROLES` or `SYNAPSE_ALERT_ROLES` makes `synapsed` exit with
 status 2 and say which. A port already in use also exits 2 (`cannot listen on <addr>`).
 
 Names (accounts and roles) are 1 to 64 characters: letters, digits, `-` and `_`.

@@ -10,6 +10,8 @@
 //! (default `127.0.0.1:7920`), loopback only. Logs never carry tokens or key material.
 //! Launch signals (`GET /v1/waiting`, lane launch on message) are OFF unless `SYNAPSE_LAUNCHER_ROLES`
 //! names the role(s), comma separated, that may read them (for example `agentlife-launcher`).
+//! Security alerts go as mail to the roles in `SYNAPSE_ALERT_ROLES` (comma separated), from
+//! `daemon:alerts@<account>`; unset, nothing changes.
 //! Security events (failed bearers and claims, over-budget requests) go to
 //! `<home>/security-events.jsonl`, owner-only; they never carry a token, nonce or signature.
 
@@ -65,10 +67,19 @@ async fn main() -> ExitCode {
         eprintln!("synapsed: SYNAPSE_LAUNCHER_ROLES: {bad:?} is not a role name");
         return ExitCode::from(2);
     }
-    let daemon = daemon.with_launcher(synapsed::LauncherConfig {
-        roles: launcher_roles,
-        ..synapsed::LauncherConfig::default()
-    });
+    let alert_roles = match role_list("SYNAPSE_ALERT_ROLES") {
+        Ok(roles) => roles,
+        Err(bad) => {
+            eprintln!("synapsed: SYNAPSE_ALERT_ROLES: {bad:?} is not a role name");
+            return ExitCode::from(2);
+        }
+    };
+    let daemon = daemon
+        .with_alert_roles(alert_roles)
+        .with_launcher(synapsed::LauncherConfig {
+            roles: launcher_roles,
+            ..synapsed::LauncherConfig::default()
+        });
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(e) => {
@@ -119,5 +130,20 @@ async fn shutdown_signal() {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// The comma-separated role names in `var` (none when unset), or the first that is not a name.
+fn role_list(var: &str) -> Result<Vec<String>, String> {
+    let roles: Vec<String> = std::env::var(var)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+        .collect();
+    match roles.iter().find(|r| !synapse::keystore::valid_name(r)) {
+        Some(bad) => Err(bad.clone()),
+        None => Ok(roles),
     }
 }

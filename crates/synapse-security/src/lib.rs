@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Sinks for `synapse::security_events` (brute-force hardening P4).
 //!
-//! The file, stderr and fanout sinks are complete. Alert delivery is only a seam
-//! ([`AlertTransport`], no implementation) and awaits board 131. A sink must never take down its
+//! The file, stderr and fanout sinks are complete. Alert delivery is a seam ([`AlertTransport`]):
+//! `synapsed` implements it as mail to configured roles (`SYNAPSE_ALERT_ROLES`); which external
+//! channel reaches a person awaits board 131. A sink must never take down its
 //! caller, so I/O errors are reported once on stderr and then swallowed.
 
 use std::fs::{File, OpenOptions};
@@ -133,7 +134,8 @@ impl SecuritySink for StderrSink {
     }
 }
 
-/// Delivers an alert to a person. No implementation ships: delivery waits on board 131.
+/// Delivers an alert. This crate ships no implementation: `synapsed` queues alerts as mail to its
+/// alert roles; delivery to a person over an external channel waits on board 131.
 pub trait AlertTransport: Send + Sync {
     /// Sends the alert, or says why it could not.
     fn send(&self, alert: &Alert) -> Result<(), String>;
