@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - 6.0.0 release-candidate series
 ### Changed (rc.105): T-0 runbook lists AgentLife's M8 sender roles
 
-`docs/PILOT_T0_RUNBOOK.md` section 3c: `agentlife-launcher` and `agentlife-cli` (senders only, both need `send`), the claim order (`pm` and the lane roles claim first, or send is 404 `unknown_recipient`), and which of the ten pilot measures apply to them and how a loss to `pm` is decided without an adapter session. Roles and their traffic are as AgentLife's lane reported them; not rehearsed. Docs only; stacked on #203.
+`docs/PILOT_T0_RUNBOOK.md` section 3c: `agentlife-launcher` and `agentlife-cli` (senders only, both need `send`), the claim order (`pm` and the lane roles claim first, or send is 404 `unknown_recipient`), the qualified recipient form `pm@ciresnave` (a bare role is also 404, measured by agentlife against rc.101), and which of the ten pilot measures apply to them and how a loss to `pm` is decided without an adapter session. Roles and their traffic are as AgentLife's lane reported them; not rehearsed. Docs only; stacked on #203.
 
 ### Changed (rc.104): adoption-fit note, auth-framework and PersistAnt
 

@@ -130,6 +130,11 @@ carries `ack`, `request-ack`, `send`).
 | `agentlife-launcher` | waiting and launch-result notices, alarms, relayed host ASKs | `pm` | while the launcher service runs |
 | `agentlife-cli` | `agentlife down` wrap-up requests (PM-run) | the lane's role | once per `agentlife down` run |
 
+**Address the recipient qualified: `pm@ciresnave`, never bare `pm`.** `/v1/send` to a bare role is 404 `unknown_recipient`
+(measured by the agentlife lane against a scratch `synapsed` rc.101; the code requires `role@account` with this daemon's
+account, `crates/synapsed/src/lib.rs` "Review I2"). `synapsectl` qualifies a bare name for its own callers; a library
+caller such as AgentLife's must send the qualified form. The account is `ciresnave` per the PM (the `<ACCT>` of section 2).
+
 **Order matters.** `/v1/send` answers 404 `unknown_recipient` unless the recipient is in the daemon's account **and has
 claimed at least once on this daemon** (`crates/synapsed/src/lib.rs`, "Review I2"). So at T-0:
 1. `pm` claims first (a `synapse list --role pm` is enough; or the PM's own adapter session). A role that has claimed
