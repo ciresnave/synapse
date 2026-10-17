@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.105): T-0 runbook lists AgentLife's M8 sender roles
+
+`docs/PILOT_T0_RUNBOOK.md` section 3c: `agentlife-launcher` and `agentlife-cli` (senders only, both need `send`), the claim order (`pm` and the lane roles claim first, or send is 404 `unknown_recipient`), and which of the ten pilot measures apply to them and how a loss to `pm` is decided without an adapter session. Roles and their traffic are as AgentLife's lane reported them; not rehearsed. Docs only; stacked on #203.
+
 ### Changed (rc.104): adoption-fit note, auth-framework and PersistAnt
 
 `docs/ADOPTION_FIT_2026-10-17.md` (board 196, EXPECTATIONS 6.14): Synapse's authentication (role-key claim, certificates, session tokens, limiter) against auth-framework, and its stores (redb mailbox, keystore, small files, security log) against PersistAnt, with seven named gaps (durability class, performance, native-fs properties, deployment shape, migration off redb, crash tests, dependencies) and an ordered plan. The mailbox spike (PersistAnt 0.7.0, 21 conformance cases on SQLite, PostgreSQL, MySQL) proves semantics only. Nothing was built; it also records that PersistAnt's inventory still lists a Synapse Postgres/redis layer that no longer exists. Docs only; stacked on #202 (rc.103).
