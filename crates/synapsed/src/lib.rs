@@ -50,9 +50,10 @@ use synapse::mailbox::{
 };
 use synapse::roles::{ClaimRequest, RolesState};
 use synapse::security_events::{
-    FailureLimiter, LimiterConfig, SecurityEvent, SecurityEventKind, SecuritySink, Verdict,
+    Alert, AlertConfig, AlertPolicy, FailureLimiter, LimiterConfig, SecurityEvent,
+    SecurityEventKind, SecuritySink, Verdict,
 };
-use synapse_security::FileSink;
+use synapse_security::{AlertSink, AlertTransport, FanoutSink, FileSink};
 
 pub mod launch;
 pub use launch::LauncherConfig;
@@ -322,9 +323,100 @@ impl Default for SecurityConfig {
     }
 }
 
+/// The sender of the daemon's own alert mail. `:` is not valid in a role name, so no role can claim it.
+const ALERT_SENDER: &str = "daemon:alerts";
+
+/// How many raised alerts may wait for the delivery task. A full queue is a failed send, recorded
+/// as `AlertFailed` and never retried through the same transport.
+const ALERT_QUEUE: usize = 256;
+
+/// How often the delivery task asks the policy for digests that are due.
+const ALERT_FLUSH_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hands an alert to the delivery task. It never touches the mailbox itself: the sink can be called
+/// while the mailbox lock is held, and `send` must never block or lock.
+struct QueueTransport(tokio::sync::mpsc::Sender<Alert>);
+
+impl AlertTransport for QueueTransport {
+    fn send(&self, alert: &Alert) -> Result<(), String> {
+        self.0
+            .try_send(alert.clone())
+            .map_err(|_| "the alert queue is full or closed".to_string())
+    }
+}
+
+/// Alert delivery by mail (ROADMAP row 9): off unless [`Daemon::with_alert_roles`] named a role.
+struct AlertDelivery {
+    sink: Arc<AlertSink<QueueTransport>>,
+    rx: tokio::sync::mpsc::Receiver<Alert>,
+    roles: Vec<String>,
+    /// Where a failed delivery is recorded: the event file, not the alert sink.
+    fallback: Arc<dyn SecuritySink>,
+}
+
+/// The mail body for an alert. Every field came from a [`SecurityEvent`], which sanitizes its text,
+/// but a reader still treats the body as untrusted like any other.
+fn alert_text(alert: &Alert) -> String {
+    format!(
+        "SECURITY ALERT ({:?}): {:?} on {}, {} event(s). First at {}: subject {}, detail {}",
+        alert.reason,
+        alert.kind,
+        alert.surface,
+        alert.count,
+        alert.first.at.to_rfc3339(),
+        alert.first.subject,
+        alert.first.detail
+    )
+}
+
+/// Queues `alert` for every alert role. A role that has not claimed yet gets it when it does (the
+/// operator chose the recipients, so the unknown-recipient rule for senders does not apply). A
+/// failure becomes an `AlertFailed` line in the event file.
+fn queue_alert(shared: &Shared, roles: &[String], fallback: &Arc<dyn SecuritySink>, alert: &Alert) {
+    let body = alert_text(alert).into_bytes();
+    let now = Utc::now();
+    for role in roles {
+        let envelope = Envelope {
+            message_id: format!("{ALERT_SENDER}/{}", uuid::Uuid::new_v4()),
+            to: format!("{role}@{}", shared.account),
+            from: format!("{ALERT_SENDER}@{}", shared.account),
+            body: body.clone(),
+        };
+        let result = match shared.mailbox.lock() {
+            Ok(mut mailbox) => mailbox.enqueue(envelope, now).map(|_| ()),
+            Err(_) => Err(MailError::Store(StoreError(
+                "mailbox lock poisoned".to_string(),
+            ))),
+        };
+        if let Err(error) = result {
+            fallback.record(&SecurityEvent::new(
+                now,
+                SecurityEventKind::AlertFailed,
+                "synapsed/alert",
+                role,
+                None,
+                &format!("alert mail not queued: {error}"),
+            ));
+        }
+    }
+}
+
+async fn deliver_alerts(shared: Arc<Shared>, mut delivery: AlertDelivery) {
+    let mut tick = tokio::time::interval(ALERT_FLUSH_EVERY);
+    loop {
+        tokio::select! {
+            Some(alert) = delivery.rx.recv() => {
+                queue_alert(&shared, &delivery.roles, &delivery.fallback, &alert);
+            }
+            _ = tick.tick() => delivery.sink.flush(Utc::now()),
+        }
+    }
+}
+
 /// An opened daemon, ready to serve.
 pub struct Daemon {
     shared: Shared,
+    alerts: Option<AlertDelivery>,
 }
 
 struct NoRevocations;
@@ -355,6 +447,7 @@ impl Daemon {
         let instance_id = hex(&instance);
         let summary = keystore.account();
         Ok(Daemon {
+            alerts: None,
             shared: Shared {
                 mailbox: Mutex::new(mailbox),
                 sessions: Mutex::new(HashMap::new()),
@@ -382,6 +475,33 @@ impl Daemon {
     pub fn with_security(mut self, config: SecurityConfig) -> Daemon {
         let sink = self.shared.security.sink.clone();
         self.shared.security = Security::new(config, sink);
+        self
+    }
+
+    /// Delivers security alerts as mail to these roles on this account (ROADMAP row 9): what the alert
+    /// policy raises (a threshold crossed, a digest due) is queued from `daemon:alerts@<account>`,
+    /// and a role that has not claimed yet receives it when it does. An empty list changes nothing,
+    /// which is the default. This is an internal transport only; which external channel carries
+    /// alerts to a person is board 131's. Call after `open`, before `serve`.
+    #[must_use]
+    pub fn with_alert_roles(mut self, roles: Vec<String>) -> Daemon {
+        if roles.is_empty() {
+            return self;
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(ALERT_QUEUE);
+        let fallback = self.shared.security.sink.clone();
+        let sink = Arc::new(AlertSink::new(
+            AlertPolicy::new(AlertConfig::default()),
+            QueueTransport(tx),
+            fallback.clone(),
+        ));
+        self.shared.security.sink = Arc::new(FanoutSink(vec![fallback.clone(), sink.clone()]));
+        self.alerts = Some(AlertDelivery {
+            sink,
+            rx,
+            roles,
+            fallback,
+        });
         self
     }
 
@@ -431,6 +551,7 @@ impl Daemon {
                 "synapsed serves on loopback addresses only",
             ));
         }
+        let alerts = self.alerts;
         let shared = Arc::new(self.shared);
         let pause = shared.pause.clone();
         write_announce(&shared.home, bound, &shared.instance_id)?;
@@ -453,6 +574,8 @@ impl Daemon {
                 }
             })
         };
+        let alert_task =
+            alerts.map(|delivery| tokio::spawn(deliver_alerts(shared.clone(), delivery)));
         let app = Router::new()
             .route(
                 "/v1/health",
@@ -482,6 +605,9 @@ impl Daemon {
             .with_graceful_shutdown(shutdown)
             .await;
         sweeper.abort();
+        if let Some(task) = alert_task {
+            task.abort();
+        }
         result
     }
 }
