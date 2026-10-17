@@ -2,8 +2,10 @@
 # Pilot T-0 runbook (PM runs this, in order)
 
 Spec: `docs/superpowers/specs/2026-10-15-daemon-contract-and-pilot.md` (section 3 = measures).
-Written 2026-10-16 against `origin/main@993abf3` (6.0.0-rc.94). **Nothing here was run**; "Expect" lines
-come from reading source and the machine's current state, and say so where they are a guess.
+Written 2026-10-16 against `origin/main@993abf3` (6.0.0-rc.94). **Rehearsed 2026-10-17 at `bb84636` (6.0.0-rc.102)**
+in a throwaway home on port 7961 with two stand-in MCP clients driving `synapse-claude-channel`: sections 2 and 4
+below are corrected to what that run printed. Not rehearsed (they touch lane config or the scheduler): `-Register`,
+`schtasks /Run`, section 3, the G5 dialog. "Expect" lines in those say so where they are a guess.
 Subject: lanes `synapse`, `agentlife`, `overmind`. Pilot home: `C:\Users\cires\AppData\Local\synapse-pilot`
 (exists, empty as of 2026-10-16; the default `%LOCALAPPDATA%\synapse` does not exist). Address `127.0.0.1:7920`.
 
@@ -26,7 +28,7 @@ cargo install synapsed synapsectl synapse-claude-channel --version 6.0.0-rc.97 -
 Needs the MSVC toolchain env your shell already has. Prerelease: `--version` must be exact.
 Expect: `Installed package ... synapsed`, `... synapsectl`, `... synapse-claude-channel`; in `C:\Users\cires\.cargo\bin`:
 `synapsed.exe`, `synapse.exe`, `synapse-claude-channel.exe` (side by side: the client looks next to its own exe).
-Check: neither `synapsed` nor `synapse` has a `--version` flag; `Get-Item` the exe, and read the daemon's `version` from `synapse list` output or the pilot log.
+Check: neither `synapsed` nor `synapse` has a `--version` flag; `Get-Item` the exe, and the daemon's `version` is in neither (`synapse list` has no version field); the adapter's MCP `serverInfo.version` shows the installed build. `synapsed --help` does not print help: it starts a daemon on the default home, so never run it bare.
 Rollback: `cargo uninstall synapsed synapsectl synapse-claude-channel`.
 
 Stop the old daemon (restarttest, rc.33, **pid 28280**, `...\synapse-restarttest-bin\synapsed.exe`, port 7931,
@@ -50,8 +52,12 @@ $env:SYNAPSE_HOME = "C:\Users\cires\AppData\Local\synapse-pilot"; $env:SYNAPSE_A
 synapse id init --account <ACCT>
 synapse id show --role synapse; synapse id show --role agentlife; synapse id show --role overmind
 ```
-Expect: `account: <ACCT>`, `account key id: ...`, then `identity: <role>@<ACCT>` per role; never key material.
-`id init` refuses a second run. Rollback: delete the pilot home (step 5).
+Expect (rehearsed): `account: <ACCT>` and `account key id: ...` from `id init`; `id show` adds `identity: <role>@<ACCT>`,
+`signing key id`, `sealing key id`, `certificate valid: <now> to <now+24h>` and `permissions: ack, request-ack, send`; never key
+material. The 24 h certificate does not end the pilot: the keystore reissues it once under 12 h remain
+(`RENEW_BELOW`, `src/keystore.rs`). The home must be owner-only: a home under `C:\s` inherited Authenticated Users and
+`id init` refused it (`permissions_too_open ... account directory`, exit 2); a home under `%LOCALAPPDATA%` works.
+`id init` refuses a second run (`error: an account already exists`, exit 2). Rollback: delete the pilot home (step 5).
 
 Dry run (prints the wrapper and the task XML, changes nothing), then register:
 ```powershell
@@ -59,16 +65,20 @@ cd C:\Projects\agentlife
 .\scripts\synapsed-task.ps1 -Exe C:\Users\cires\.cargo\bin\synapsed.exe -SynapseHome $env:SYNAPSE_HOME -Addr 127.0.0.1:7920
 .\scripts\synapsed-task.ps1 -Exe C:\Users\cires\.cargo\bin\synapsed.exe -SynapseHome $env:SYNAPSE_HOME -Addr 127.0.0.1:7920 -Register
 schtasks /Run /TN synapsed-cires
-synapse list
+synapse list --role synapse
 ```
 Expect: dry run starts `DRY RUN (nothing written...`; register ends `registered task synapsed-cires (read back: logon
-trigger, restart-on-failure, wrapper ...)`. The task name is `synapsed-` + the Windows user name (`cires`; guess,
-read it from the output). `synapse list` prints one JSON object per role, empty before any lane connects; no
-error means the daemon answered and proved its instance id. Log: `%SYNAPSE_HOME%\task\synapsed.log`.
+trigger, restart-on-failure, wrapper ...)`. The dry run printed task `synapsed-cires` (rehearsed). **`synapse list` requires `--role`** (a bare `synapse list`
+exits 2) and acting as a role makes that role present, so the output is never empty: it is one JSON line per role the
+daemon knows, the caller `online: true`. No error means the daemon answered and proved its instance id.
+**The CLI starts a `synapsed` itself when none answers** (`synapse: started synapsed (pid N)`): after any stop by pid,
+the next `synapse` or adapter call resurrects a daemon, from the caller's environment, outside the task. Log: `%SYNAPSE_HOME%\task\synapsed.log`.
 Exit 2 from `synapsed` is a config or lock problem; the wrapper reports it and does not restart.
 Rollback: `.\scripts\synapsed-task.ps1 -Remove` (leaves logs and home), then
 `Stop-Process -Id (Get-Content "$env:SYNAPSE_HOME\synapsed.json" | ConvertFrom-Json).pid`
-(`pid` is a field of the announce file in the client's reader; confirm with `Get-NetTCPConnection -LocalPort 7920`).
+(rehearsed: `synapsed.json` is `{"addr","instance_id","pid"}` and stays after the stop; confirm with
+`Get-NetTCPConnection -LocalPort 7920`). Stop the lanes' adapters first or re-check the port, then confirm the pid's
+`ExecutablePath` before a second stop.
 
 ## 3. Per-lane config
 
@@ -111,15 +121,21 @@ so `SessionStart` re-records them, confirm `<role>.json` and `<role>.launch.json
 ## 4. First message and the measures
 
 ```powershell
-synapse list      # expect the three roles with "online": true (heartbeat at start, then every 30 s; window 90 s)
+synapse list --role synapse   # one line per role that has connected, "online": true (heartbeat every 30 s; window 90 s)
 synapse send --role overmind --to synapse --id pilot-overmind-0001 "smoke"
 ```
 Expect: the synapse session shows a `<channel source="synapse">` event, text starting `UNTRUSTED message from`,
 within ~1-2 s. Then `synapse list` shows `pending` for `synapse` at `queued:0, leased:0` after the adapter's bounded
 attempts (up to 3 shows, ~30 s apart; same `message_id`; act once).
+Rehearsed: `send` prints `message id: overmind@rehearsal/pilot-overmind-0001` and `outcome: queued` (the id is prefixed
+with the sender's identity: match on the suffix); the event arrived at +0.7 s, +31 s, +61 s, with `meta.message_id`,
+`sender`, `sender_cwd`. `pending` read `leased:1` at +15 s and +60 s and `queued:0, leased:0` by +120 s. `synapse stats`
+then read `sent:1, acked:1, redelivered:2, expired:2` for that one message: **`expired` and `redelivered` count each
+unacknowledged show, so 2 per message is normal, not loss** (measure it as `sent` vs `acked` plus `synapse dead`, which
+was empty).
 Record at T-0 in the pilot log: `git rev-parse` of the rc.97 tag/commit (crates.io rc.97 = the commit it was
-published from), `synapse list` output, the task XML, and each lane's `--role`. Then start the 10 measures
-(spec section 3, table): sender log lines `<id> <to-role> <utc>` with ids `pilot-<role>-<n>`; `synapse list` every 5 min;
+published from), `synapse list --role <r>` output, the task XML, and each lane's `--role`. Then start the 10 measures
+(spec section 3, table): sender log lines `<id> <to-role> <utc>` with ids `pilot-<role>-<n>`; `synapse list --role <r>` every 5 min;
 `security-events.jsonl` and `synapse dead <role>` at the end. Do not `curl` the port without a session
 (it writes `security-events.jsonl` lines).
 
