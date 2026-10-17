@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] - 6.0.0 release-candidate series
+### Changed (rc.99): pilot runbook s3b/s5 no longer assume a spec edit survives a restart
+
+OverMind#150 (read from `agentlife@e609da5`, not run): `lane-restart` rebuilds from `.lane-state/<role>.json` and overwrites `<role>.launch.json`, so the runbook's "edit `launch_args` and restart" rollback did nothing. Section 3b now requires the hand launch (it records the flags in the state file) and a read-back of both files; section 3 rollback and section 5 step 1 hand-launch once with the old flags. The install version is now rc.97 (what the PM installs; the old text said rc.93). Docs only.
+
 ### Changed (rc.98): ROADMAP rows 4, 11, 18 brought up to date
 
 Rows 4 and 11 (publish dry-run, crates.io names) are done: the family is published at 6.0.0-rc.97. Row 18 records the 2026-10-16 spike of a `MailStore` over persistant `KvOnRelational` (all 21 conformance cases pass on SQLite, PostgreSQL 16 and MySQL 8.4; a deadlock defect on PostgreSQL/MySQL batches with `Require(absent)` was reported to PersistAnt). Docs only; no code change.
