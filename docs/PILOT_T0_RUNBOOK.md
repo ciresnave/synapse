@@ -118,6 +118,51 @@ Hand-launch once with the old flags (`claude --model sonnet --dangerously-load-d
 so `SessionStart` re-records them, confirm `<role>.json` and `<role>.launch.json` show the two-element form, delete
 `<role>.mcp.json`, then restart normally and confirm a prompt.
 
+## 3c. Non-lane senders: AgentLife M8 (`agentlife-launcher`, `agentlife-cli`)
+
+Added at rc.105 from AgentLife's account of its M8 (reported by the agentlife lane 2026-10-17; their code was not read
+for this note). These are **senders, not Claude lanes**: no session, no `claude-peers` channel, no adapter, so the
+three-lane config in section 3 does not apply to them. Both need the `send` permission (the default role certificate
+carries `ack`, `request-ack`, `send`).
+
+| Role | What it sends | Target | When it claims |
+|---|---|---|---|
+| `agentlife-launcher` | waiting and launch-result notices, alarms, relayed host ASKs | `pm` | while the launcher service runs |
+| `agentlife-cli` | `agentlife down` wrap-up requests (PM-run) | the lane's role | once per `agentlife down` run |
+
+**Address the recipient qualified: `pm@ciresnave`, never bare `pm`.** `/v1/send` to a bare role is 404 `unknown_recipient`
+(measured by the agentlife lane against a scratch `synapsed` rc.101; the code requires `role@account` with this daemon's
+account, `crates/synapsed/src/lib.rs` "Review I2"). `synapsectl` qualifies a bare name for its own callers; a library
+caller such as AgentLife's must send the qualified form. The account is `ciresnave` per the PM (the `<ACCT>` of section 2).
+
+**Order matters.** `/v1/send` answers 404 `unknown_recipient` unless the recipient is in the daemon's account **and has
+claimed at least once on this daemon** (`crates/synapsed/src/lib.rs`, "Review I2"). So at T-0:
+1. `pm` claims first (a `synapse list --role pm` is enough; or the PM's own adapter session). A role that has claimed
+   once stays known, even when no session is connected: mail then waits in its durable queue.
+2. Then the lane roles (`synapse`, `agentlife`, `overmind`) claim, as section 3.
+3. Only then may `agentlife-launcher` start, and `agentlife-cli` on its first run. A launcher started earlier gets 404s;
+   repeated 404s from one sender are counted and, over budget, written to `security-events.jsonl`
+   (`unknown_recipient`), which measure 6 would then have to classify.
+Each role needs its own keys in the pilot home (created when the role first claims through `synapse`; whether the
+`synapsed-client` library path AgentLife uses creates them was **not rehearsed**, rehearse it in a scratch home first,
+as in section 4).
+
+What the 24 h pilot measures for them (spec section 3, by measure number):
+- **1 Loss by id and 2 wake latency:** AgentLife's sender log lists every send as `<id> <to-role> <utc>`, with ids
+  `pilot-agentlife-launcher-<n>` and `pilot-agentlife-cli-<n>`. A loss can only be decided where a **session reads
+  the message**: for a lane target, its transcript; for `pm`, only if the PM's session runs the adapter. If `pm` has no
+  adapter session, those sends are measured by `synapse stats` (`sent` against `acked`) and `synapse dead pm` instead,
+  and the report says that measure 1 could not be decided for them.
+- **3 Shows per id:** only for targets that have an adapter.
+- **4 Queue age:** applies to `online` roles. `pm` without a session is not `online`, so its queue is expected to
+  age; do not read that as a breach (read it as undelivered mail, and say so).
+- **5 Dead set and 6 Security events:** `synapse dead pm` and every line naming `agentlife-launcher` or
+  `agentlife-cli` (failed claims, `unknown_recipient`, bad bearer) are classified. The launcher's claims after the
+  deliberate daemon restart (measure 7/10) are a normal re-claim, not an event to explain.
+- **Not measured for them:** 8 (they have no dialog), 9 (no model turns, no cache-read).
+- A sender whose daemon restarted must re-claim; AgentLife's behaviour on a 401 is **not covered** by this pilot
+  unless the deliberate restart is done while the launcher is sending.
+
 ## 4. First message and the measures
 
 ```powershell
